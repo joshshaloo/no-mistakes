@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -479,7 +480,7 @@ func TestBKTClientMalformedJSONTimeoutCancellationAndBoundedOutput(t *testing.T)
 		}
 	})
 
-	t.Run("failed command does not expose stderr or secret arguments", func(t *testing.T) {
+	t.Run("failed command surfaces sanitized stderr without secret arguments", func(t *testing.T) {
 		client, fake := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
 			return fakeBKTResult{stderr: "request rejected: " + fakeSecret, exit: 1}
 		})
@@ -493,8 +494,93 @@ func TestBKTClientMalformedJSONTimeoutCancellationAndBoundedOutput(t *testing.T)
 		if strings.Contains(err.Error(), fakeSecret) {
 			t.Fatalf("command error leaked stderr: %v", err)
 		}
+		if !strings.Contains(err.Error(), "request rejected") {
+			t.Fatalf("command error dropped the stderr diagnostic: %v", err)
+		}
 		if strings.Contains(fmt.Sprint(fake.snapshotCalls()), fakeSecret) {
 			t.Fatalf("command arguments leaked fixture secret: %q", fake.snapshotCalls())
+		}
+	})
+}
+
+func TestBKTClientFailedCommandStderrIsSanitizedAndBounded(t *testing.T) {
+	repo := RepoRef{Workspace: "envy-forge", RepoSlug: "app"}
+	failWith := func(t *testing.T, stderr string) error {
+		t.Helper()
+		client, _ := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
+			return fakeBKTResult{stderr: stderr, exit: 1}
+		})
+		if err := client.Available(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		_, err := client.GetPR(context.Background(), repo, 42)
+		if err == nil {
+			t.Fatal("expected command error")
+		}
+		return err
+	}
+
+	t.Run("credentialed URL keeps target but redacts userinfo", func(t *testing.T) {
+		err := failWith(t, "fetch https://x-token-auth:"+fakeSecret+"@bitbucket.org/envy-forge/app.git failed")
+		if strings.Contains(err.Error(), fakeSecret) || strings.Contains(err.Error(), "x-token-auth") {
+			t.Fatalf("error leaked URL credential: %v", err)
+		}
+		if !strings.Contains(err.Error(), "redacted@bitbucket.org/envy-forge/app.git") {
+			t.Fatalf("error dropped the redacted URL diagnostic: %v", err)
+		}
+	})
+
+	t.Run("standalone token is redacted while scope diagnostics survive", func(t *testing.T) {
+		err := failWith(t, "403 Forbidden: Your credentials lack one or more required privilege scopes ("+fakeSecret+")")
+		if strings.Contains(err.Error(), fakeSecret) {
+			t.Fatalf("error leaked standalone token: %v", err)
+		}
+		for _, want := range []string{"403 Forbidden", "privilege scopes", "[redacted]"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %v, want substring %q", err, want)
+			}
+		}
+	})
+
+	t.Run("credential assignments and auth headers are redacted", func(t *testing.T) {
+		err := failWith(t, "request rejected: api_token=plain-secret-value Authorization: Bearer opaque-secret-892f31 scope=repository:write")
+		for _, leaked := range []string{"plain-secret-value", "opaque-secret-892f31"} {
+			if strings.Contains(err.Error(), leaked) {
+				t.Fatalf("error leaked %q: %v", leaked, err)
+			}
+		}
+		for _, want := range []string{"request rejected", "scope=repository:write"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %v, want substring %q", err, want)
+			}
+		}
+	})
+
+	t.Run("malformed stderr yields valid UTF-8 without secrets", func(t *testing.T) {
+		err := failWith(t, "scope \xff\xfe denied "+fakeSecret)
+		if !utf8.ValidString(err.Error()) {
+			t.Fatalf("error is not valid UTF-8: %q", err.Error())
+		}
+		if strings.Contains(err.Error(), fakeSecret) {
+			t.Fatalf("error leaked secret from malformed stderr: %v", err)
+		}
+		if !strings.Contains(err.Error(), "denied") {
+			t.Fatalf("error dropped the diagnostic: %v", err)
+		}
+	})
+
+	t.Run("oversized stderr stays bounded and marked truncated", func(t *testing.T) {
+		err := failWith(t, "scope failure: "+strings.Repeat("x", maxBKTStderrBytes)+fakeSecret)
+		if strings.Contains(err.Error(), fakeSecret) {
+			t.Fatalf("error leaked overflow bytes: %v", err)
+		}
+		for _, want := range []string{"scope failure", "[stderr truncated]"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %.120q..., want substring %q", err.Error(), want)
+			}
+		}
+		if len(err.Error()) > maxBKTStderrBytes+128 {
+			t.Fatalf("error length = %d, want <= %d", len(err.Error()), maxBKTStderrBytes+128)
 		}
 	})
 }

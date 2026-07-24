@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"net/url"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
@@ -570,11 +572,39 @@ func (c *BKTClient) run(ctx context.Context, timeout time.Duration, label string
 	}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
+			if detail := sanitizeBKTStderr(stderr); detail != "" {
+				return fmt.Errorf("bkt %s failed (exit code %d): %s", label, exitErr.ExitCode(), detail)
+			}
 			return fmt.Errorf("bkt %s failed (exit code %d)", label, exitErr.ExitCode())
 		}
 		return fmt.Errorf("bkt %s failed: executable is unavailable", label)
 	}
 	return nil
+}
+
+var (
+	bktCredentialAssignmentPattern = regexp.MustCompile(`(?i)([\w-]*(?:token|password|passwd|secret|credential|api[_-]?key)[\w-]*\s*[:=]\s*)(\S+)`)
+	bktAuthSchemePattern           = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9+/=_.-]{8,}`)
+	bktSecretShapedTokenPattern    = regexp.MustCompile(`\b(?:AT(?:BB|ATT|CTT)|BBDC-)[A-Za-z0-9+/=_.-]{4,}`)
+)
+
+// sanitizeBKTStderr returns the bounded stderr capture with URL userinfo,
+// credential-style assignments, auth-scheme values, and Atlassian-shaped
+// tokens redacted, so bkt diagnostics can reach step logs without ever
+// carrying a secret.
+func sanitizeBKTStderr(capture *prefixCapture) string {
+	text := strings.ToValidUTF8(strings.TrimSpace(string(capture.data)), "")
+	if text == "" {
+		return ""
+	}
+	text = safeurl.RedactText(text)
+	text = bktAuthSchemePattern.ReplaceAllString(text, "$1 [redacted]")
+	text = bktCredentialAssignmentPattern.ReplaceAllString(text, "${1}[redacted]")
+	text = bktSecretShapedTokenPattern.ReplaceAllString(text, "[redacted]")
+	if capture.overflow {
+		text += " [stderr truncated]"
+	}
+	return text
 }
 
 type prefixCapture struct {
