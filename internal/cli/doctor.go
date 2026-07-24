@@ -6,10 +6,12 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/bitbucket"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"github.com/spf13/cobra"
@@ -61,6 +63,25 @@ func newDoctorCmd() *cobra.Command {
 					warn("gh            ", "not found "+sDim.Render("(optional, needed for PR/CI)"))
 				} else {
 					ok("gh            ", "ok")
+				}
+
+				bitbucketAPI, bitbucketErr := bitbucket.NewAPIFromEnvOrBKT(nil, nil)
+				bktCLIAvailable := scm.CLIAvailable(scm.ProviderBitbucket)
+				var bktAvailabilityErr error
+				if bitbucketErr == nil && !isDirectBitbucketAPI(bitbucketAPI) && bktCLIAvailable {
+					bktAvailabilityErr = bitbucketAPI.Available(cmd.Context())
+				}
+				switch {
+				case bitbucketErr != nil:
+					warn("bitbucket     ", bitbucketErr.Error())
+				case isDirectBitbucketAPI(bitbucketAPI):
+					ok("bitbucket     ", "direct REST credentials configured")
+				case !bktCLIAvailable:
+					warn("bkt           ", "not found "+sDim.Render("(optional, needed for Bitbucket Cloud PR/CI without direct credentials)"))
+				case bktAvailabilityErr != nil:
+					warn("bkt           ", bktAvailabilityErr.Error())
+				default:
+					ok("bkt           ", "v0.30.0+ authenticated with Bitbucket Cloud Keychain context")
 				}
 
 				if _, err := exec.LookPath("az"); err != nil {
@@ -156,6 +177,11 @@ func newDoctorCmd() *cobra.Command {
 			})
 		},
 	}
+}
+
+func isDirectBitbucketAPI(api bitbucket.API) bool {
+	_, ok := api.(*bitbucket.Client)
+	return ok
 }
 
 func doctorAgentChecks() []doctorAgentCheck {

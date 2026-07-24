@@ -36,25 +36,25 @@ Takes precedence over `daemon_connect_timeout` in `config.yaml`. An empty, unpar
 
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
-Bitbucket Cloud account email used for PR creation and CI monitoring.
+Bitbucket Cloud account email used by the direct REST compatibility path for PR creation and CI monitoring.
 
 |         |                                               |
 | ------- | --------------------------------------------- |
 | Type    | `string`                                      |
-| Default | (none; Bitbucket PR/CI steps skip when unset) |
+| Default | (none) |
 
-Used alongside `NO_MISTAKES_BITBUCKET_API_TOKEN`. See [Provider Integration](/no-mistakes/guides/provider-integration/#bitbucket-cloud).
+Used alongside `NO_MISTAKES_BITBUCKET_API_TOKEN`. When both variables are set, the direct REST client takes precedence. When both are absent, No Mistakes can use an authenticated `bkt` v0.30.0+ Keychain context instead. Setting only one variable is an explicit configuration error; it does not fall back to `bkt`. See [Provider Integration](/no-mistakes/guides/provider-integration/#bitbucket-cloud).
 
 ## `NO_MISTAKES_BITBUCKET_API_TOKEN`
 
-Bitbucket Cloud API token.
+Bitbucket Cloud API token used only by the direct REST compatibility path.
 
 |         |          |
 | ------- | -------- |
 | Type    | `string` |
 | Default | (none)   |
 
-Get one from [Bitbucket account settings](https://bitbucket.org/account/settings/app-passwords/).
+Get one from [Atlassian API token settings](https://id.atlassian.com/manage-profile/security/api-tokens). The preferred macOS `bkt` path keeps its separate credential in Keychain; No Mistakes never reads or stores that credential and does not require these variables.
 
 ## `NO_MISTAKES_BITBUCKET_API_BASE_URL`
 
@@ -65,7 +65,7 @@ Override the Bitbucket Cloud API base URL.
 | Type    | `string`                        |
 | Default | `https://api.bitbucket.org/2.0` |
 
-Useful for mocking in tests or pointing at a proxy.
+Used only by the direct REST credential path. It has no effect on `bkt`, whose authenticated Cloud context owns its API endpoint and Keychain credential.
 
 ## `AZURE_DEVOPS_EXT_PAT`
 

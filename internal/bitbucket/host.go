@@ -11,14 +11,15 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
-// Host implements scm.Host for Bitbucket using the REST API client.
+// Host implements scm.Host for Bitbucket Cloud using either the direct REST
+// compatibility client or the authenticated bkt CLI client.
 type Host struct {
-	client *Client
+	client API
 	repo   RepoRef
 }
 
-// NewHost builds a Host from an API client and a parsed repository reference.
-func NewHost(client *Client, repo RepoRef) *Host {
+// NewHost builds a Host from a Bitbucket API transport and parsed repository reference.
+func NewHost(client API, repo RepoRef) *Host {
 	return &Host{client: client, repo: repo}
 }
 
@@ -30,11 +31,11 @@ func (h *Host) Capabilities() scm.Capabilities {
 	return scm.Capabilities{MergeableState: false, FailedCheckLogs: true}
 }
 
-func (h *Host) Available(_ context.Context) error {
+func (h *Host) Available(ctx context.Context) error {
 	if h.client == nil {
 		return errors.New("bitbucket client is not configured")
 	}
-	return nil
+	return h.client.Available(ctx)
 }
 
 func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error) {
@@ -107,7 +108,7 @@ func (h *Host) GetMergeableState(_ context.Context, _ *scm.PR) (scm.MergeableSta
 	return "", scm.ErrUnsupported
 }
 
-func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, _ string, headSHA string, failingNames []string) (string, error) {
+func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, branch string, headSHA string, failingNames []string) (string, error) {
 	if h.client == nil {
 		return "", nil
 	}
@@ -115,43 +116,13 @@ func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, _ string, h
 	if err != nil {
 		return "", err
 	}
-	commitSHA := strings.TrimSpace(headSHA)
-	var targets map[string]struct{}
-	if got, prErr := h.client.GetPR(ctx, h.repo, id); prErr == nil && got != nil && strings.TrimSpace(got.SourceCommitHash) != "" {
-		commitSHA = strings.TrimSpace(got.SourceCommitHash)
-	}
-	if statuses, statusErr := h.client.ListPRStatuses(ctx, h.repo, id); statusErr == nil {
-		targets = failedPipelineUUIDs(statuses, failingNames)
-	}
-	if strings.TrimSpace(commitSHA) == "" {
+	fetcher, ok := h.client.(interface {
+		FetchFailedCheckLogs(context.Context, RepoRef, int, string, string, []string) (string, error)
+	})
+	if !ok {
 		return "", nil
 	}
-	pipelines, err := h.client.ListPipelinesByCommit(ctx, h.repo, commitSHA)
-	if err != nil {
-		return "", nil
-	}
-	for _, pipelineRun := range pipelines {
-		if len(targets) > 0 {
-			if _, ok := targets[normalizePipelineUUID(pipelineRun.UUID)]; !ok {
-				continue
-			}
-		}
-		steps, err := h.client.ListPipelineSteps(ctx, h.repo, pipelineRun.UUID)
-		if err != nil {
-			continue
-		}
-		for _, step := range steps {
-			if !strings.EqualFold(step.State.Result.Name, "FAILED") {
-				continue
-			}
-			logOutput, err := h.client.GetStepLog(ctx, h.repo, pipelineRun.UUID, step.UUID)
-			if err != nil || strings.TrimSpace(logOutput) == "" {
-				continue
-			}
-			return strings.TrimSpace(logOutput), nil
-		}
-	}
-	return "", nil
+	return fetcher.FetchFailedCheckLogs(ctx, h.repo, id, branch, headSHA, failingNames)
 }
 
 func (h *Host) toPR(pr *PullRequest) *scm.PR {

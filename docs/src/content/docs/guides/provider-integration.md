@@ -27,8 +27,8 @@ What you do not get is PR automation and CI monitoring.
 
 | Step | GitHub | GitLab | Bitbucket Cloud | Azure DevOps |
 |---|---|---|---|---|
-| **PR** (create/update) | `gh` CLI, authenticated | `glab` CLI, authenticated | `NO_MISTAKES_BITBUCKET_EMAIL` + `NO_MISTAKES_BITBUCKET_API_TOKEN` | `az` CLI + `azure-devops` extension, authenticated |
-| **CI** (polling, auto-fix) | `gh` CLI | `glab` CLI | same env vars | `az` CLI |
+| **PR** (create/update) | `gh` CLI, authenticated | `glab` CLI, authenticated | authenticated `bkt` CLI or `NO_MISTAKES_BITBUCKET_EMAIL` + `NO_MISTAKES_BITBUCKET_API_TOKEN` | `az` CLI + `azure-devops` extension, authenticated |
+| **CI** (polling, auto-fix) | `gh` CLI | `glab` CLI | same `bkt` or env credential path | `az` CLI |
 | **Merge conflict auto-fix** | `gh` CLI | `glab` CLI | not supported | `az` CLI |
 | **Mergeability polling** | `gh` CLI | `glab` CLI | not supported | `az` CLI |
 | **Failed check log fetching** | `gh` CLI | `glab` CLI | supported | not yet |
@@ -113,17 +113,29 @@ glab auth login
 
 ## Bitbucket Cloud
 
-Bitbucket Cloud uses the REST API directly rather than a provider CLI. Set two environment variables (and optionally a third):
+Bitbucket Cloud supports two authentication paths. The preferred macOS path is [`bkt`](https://github.com/avivsinai/bitbucket-cli) **v0.30.0 or newer**, authenticated to Bitbucket Cloud through macOS Keychain:
+
+```sh
+bkt --version
+bkt auth login https://bitbucket.org --kind cloud --web-token
+bkt context create work --host bitbucket.org --workspace your-workspace --set-active
+bkt auth status
+no-mistakes doctor
+```
+
+Create a scoped Bitbucket application token with Account Read, Repository Read, Pull Request Read/Write, and Pipeline Read access so all PR and CI capabilities are available. General Atlassian tokens without the Bitbucket application scopes do not work.
+
+`no-mistakes` invokes `bkt` directly with structured output and explicit workspace, repository, source, and target selectors parsed from the canonical `bitbucket.org` remote. It accepts only an authenticated Cloud context backed by `bkt`'s Keychain credential source; a Data Center or mismatched context cannot redirect provider operations. `bkt` remains the sole credential owner: No Mistakes never retrieves, exports, passes, or stores its token.
+
+The existing direct REST path remains supported. Set both variables (and optionally the API base override):
 
 ```sh
 export NO_MISTAKES_BITBUCKET_EMAIL=you@example.com
 export NO_MISTAKES_BITBUCKET_API_TOKEN=your-api-token
-
-# Optional: override the API base URL
-export NO_MISTAKES_BITBUCKET_API_BASE_URL=https://api.bitbucket.org/2.0
+export NO_MISTAKES_BITBUCKET_API_BASE_URL=https://api.bitbucket.org/2.0 # optional
 ```
 
-Get an API token from [Bitbucket account settings](https://bitbucket.org/account/settings/app-passwords/).
+When both direct credentials are present, they take precedence and preserve the existing REST behavior. `bkt` is selected only when both are absent. A partial direct configuration fails explicitly instead of silently falling back. Get a direct-path API token from [Atlassian API token settings](https://id.atlassian.com/manage-profile/security/api-tokens).
 
 **What you get:**
 
@@ -227,8 +239,8 @@ Everything before push (rebase, review, test, document, lint) still works regard
 no-mistakes doctor
 ```
 
-`doctor` checks `gh` and `az` availability. For GitLab, confirm `glab` is installed and authenticated. For Bitbucket Cloud, confirm the two env vars are set in the environment the daemon runs under. For Azure DevOps, confirm the `azure-devops` extension is installed (`az extension show --name azure-devops`) and a PAT is available.
+`doctor` checks `gh` and `az` availability. For Bitbucket Cloud, it reports complete direct REST credentials first (without displaying them), otherwise verifies that an installed `bkt` is v0.30.0+ with a Cloud Keychain context; partial direct credentials remain an explicit warning. For GitLab, confirm `glab` is installed and authenticated. For Azure DevOps, confirm the `azure-devops` extension is installed (`az extension show --name azure-devops`) and a PAT is available.
 
 :::note
-When the daemon runs through a managed service (launchd, systemd, Task Scheduler), it reloads environment from your login shell on macOS and Linux so `gh` auth and `NO_MISTAKES_BITBUCKET_*` vars are picked up, and it augments `PATH` with common binary directories. If credentials or PATH-derived tools are missing, check `~/.no-mistakes/logs/daemon.log` for a login-shell environment resolution warning. On Windows it reuses the current process environment.
+When the daemon runs through a managed service (launchd, systemd, Task Scheduler), it reloads environment from your login shell on macOS and Linux so provider tools and `NO_MISTAKES_BITBUCKET_*` vars are picked up, and it augments `PATH` with common binary directories. On macOS, `bkt` reads its credential from Keychain in the daemon process; No Mistakes does not copy it into the service environment. If credentials or PATH-derived tools are missing, check `~/.no-mistakes/logs/daemon.log` for a login-shell environment resolution warning. On Windows it reuses the current process environment.
 :::

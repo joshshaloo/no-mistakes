@@ -281,6 +281,48 @@ func (c *Client) GetStepLog(ctx context.Context, repo RepoRef, pipelineUUID, ste
 	return strings.TrimSpace(string(data)), nil
 }
 
+// FetchFailedCheckLogs implements the direct REST compatibility path for the
+// provider-level failed-log capability.
+func (c *Client) FetchFailedCheckLogs(ctx context.Context, repo RepoRef, prID int, _ string, headSHA string, failingNames []string) (string, error) {
+	commitSHA := strings.TrimSpace(headSHA)
+	var targets map[string]struct{}
+	if got, prErr := c.GetPR(ctx, repo, prID); prErr == nil && got != nil && strings.TrimSpace(got.SourceCommitHash) != "" {
+		commitSHA = strings.TrimSpace(got.SourceCommitHash)
+	}
+	if statuses, statusErr := c.ListPRStatuses(ctx, repo, prID); statusErr == nil {
+		targets = failedPipelineUUIDs(statuses, failingNames)
+	}
+	if commitSHA == "" {
+		return "", nil
+	}
+	pipelines, err := c.ListPipelinesByCommit(ctx, repo, commitSHA)
+	if err != nil {
+		return "", nil
+	}
+	for _, pipelineRun := range pipelines {
+		if len(targets) > 0 {
+			if _, ok := targets[normalizePipelineUUID(pipelineRun.UUID)]; !ok {
+				continue
+			}
+		}
+		steps, err := c.ListPipelineSteps(ctx, repo, pipelineRun.UUID)
+		if err != nil {
+			continue
+		}
+		for _, step := range steps {
+			if !strings.EqualFold(step.State.Result.Name, "FAILED") {
+				continue
+			}
+			logOutput, err := c.GetStepLog(ctx, repo, pipelineRun.UUID, step.UUID)
+			if err != nil || strings.TrimSpace(logOutput) == "" {
+				continue
+			}
+			return strings.TrimSpace(logOutput), nil
+		}
+	}
+	return "", nil
+}
+
 func readTail(r io.Reader, maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, nil
