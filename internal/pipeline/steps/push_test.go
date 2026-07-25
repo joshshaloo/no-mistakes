@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
 // TestPushStep_RefusesPostReviewClobberWithoutLaterPipelineCommit reproduces
@@ -72,6 +74,72 @@ func TestPushStep_RefusesPostReviewClobberWithoutLaterPipelineCommit(t *testing.
 		err,
 		remoteHead,
 	)
+}
+
+// TestPushStep_RefusesBeforePublishingUnapprovedHead pins the ordering half of
+// the same guard: review approval gates PUBLICATION, not only the network push.
+// A head that fails the durable review-approved binding must never be pinned as
+// run-owned authority or written to runs.head_sha, because custody recovery and
+// rerun would then treat unreviewed work as authoritative pipeline output.
+func TestPushStep_RefusesBeforePublishingUnapprovedHead(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, submittedHead := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	// R is the exact tree the completed review approved.
+	if err := os.WriteFile(filepath.Join(dir, "reviewed.txt"), []byte("reviewed fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "reviewed fix")
+	reviewedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	// D descends from the head the run last recorded, so the entry continuity
+	// guard passes, but it is not a descendant of the approved head.
+	gitCmd(t, dir, "reset", "--hard", submittedHead)
+	if err := os.WriteFile(filepath.Join(dir, "unreviewed.txt"), []byte("unreviewed replacement\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "out-of-band replacement")
+	clobberedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, submittedHead, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Run.HeadSHA = submittedHead
+	recordReviewApproval(t, sctx, reviewedHead)
+
+	if _, err := (&PushStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "review-approved head") {
+		t.Fatalf("push error = %v, want review continuity refusal", err)
+	}
+	if exists := refExists(t, dir, git.RunHeadRef(sctx.Run.ID)); exists {
+		t.Fatal("refused push pinned the unapproved head as run-owned authority")
+	}
+	if sctx.Run.HeadSHA != submittedHead {
+		t.Fatalf("in-memory authority advanced to %s", sctx.Run.HeadSHA)
+	}
+	reloaded, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.HeadSHA != submittedHead {
+		t.Fatalf("durable authority advanced to %s, want %s", reloaded.HeadSHA, submittedHead)
+	}
+	t.Logf("review-approved=%s clobbered-HEAD=%s run-authority-still=%s", reviewedHead, clobberedHead, reloaded.HeadSHA)
+}
+
+func refExists(t *testing.T, dir, ref string) bool {
+	t.Helper()
+	exists, err := git.RefExists(context.Background(), dir, ref)
+	if err != nil {
+		t.Fatalf("probe ref %s: %v", ref, err)
+	}
+	return exists
 }
 
 func TestAssertReviewApprovedPushHead(t *testing.T) {

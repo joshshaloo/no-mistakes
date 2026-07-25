@@ -428,6 +428,51 @@ func (d *DB) UpdateRunHeadSHA(id, headSHA string) error {
 	return nil
 }
 
+// ResolveRunHeadSHA advances durable run authority only while head_sha still
+// holds expected. It is the compare-and-swap half of an explicit operator
+// resolution of ambiguous preservation evidence, so a losing race leaves the
+// row untouched and reports false instead of overwriting a newer value.
+func (d *DB) ResolveRunHeadSHA(id, expected, headSHA string) (bool, error) {
+	result, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, updated_at = ? WHERE id = ? AND head_sha = ?`, headSHA, now(), id, expected)
+	if err != nil {
+		return false, fmt.Errorf("resolve run head sha: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("resolve run head sha: %w", err)
+	}
+	return affected == 1, nil
+}
+
+// RunCustodyDiagnosticMarker prefixes every custody diagnostic appended to
+// runs.error. It is a stable marker so repeated cleanup attempts across daemon
+// restarts append the note exactly once.
+const RunCustodyDiagnosticMarker = "worktree retained for custody recovery:"
+
+// RecordRunCustodyDiagnostic appends a custody diagnostic to a run without
+// discarding why the run actually ended. A run that already reached a terminal
+// status keeps that status and its root error - a deliberate `axi abort` must
+// not be reported as a crash, and a step failure's cause must stay readable in
+// `axi status` - while a still-active run becomes failed, because its worktree
+// is being torn down and nothing will advance it.
+func (d *DB) RecordRunCustodyDiagnostic(id, msg string) error {
+	ts := now()
+	_, err := d.sql.Exec(`UPDATE runs SET
+		error = CASE
+			WHEN COALESCE(error, '') = '' THEN ?
+			WHEN instr(error, ?) > 0 THEN error
+			ELSE error || ' | ' || ?
+		END,
+		status = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN status ELSE ? END,
+		push_active = 0,
+		updated_at = ?
+	WHERE id = ?`, msg, RunCustodyDiagnosticMarker, msg, types.RunFailed, ts, id)
+	if err != nil {
+		return fmt.Errorf("record run custody diagnostic: %w", err)
+	}
+	return nil
+}
+
 // UpdateRunError sets the error message on a run.
 func (d *DB) UpdateRunError(id, errMsg string) error {
 	return d.UpdateRunErrorStatus(id, errMsg, types.RunFailed)

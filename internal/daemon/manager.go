@@ -569,9 +569,18 @@ func (m *RunManager) resolveRerunHead(ctx context.Context, repo *db.Repo, branch
 	if err != nil {
 		return "", "", fmt.Errorf("get runs: %w", err)
 	}
+	// One Git read of every preservation ref: probing per candidate walked
+	// unbounded run history with three subprocesses each.
+	preservedRefs, err := git.PreservedHeads(ctx, gateDir)
+	if err != nil {
+		return "", "", fmt.Errorf("verify run-owned preservation refs: %w", err)
+	}
+	// Custody ownership is selected exactly once, newest first, using the same
+	// rule branch inspection uses. Choosing an ambiguous run independently of
+	// an unresolved one made rerun refuse about a different, older run than the
+	// one the operator was told to recover.
 	var latestForBranch *db.Run
-	var unresolvedOwner *db.Run
-	var ambiguousOwner *db.Run
+	var owner *db.Run
 	var matchingHead *db.Run
 	for _, run := range runs {
 		if run.Branch != branch {
@@ -580,20 +589,8 @@ func (m *RunManager) resolveRerunHead(ctx context.Context, repo *db.Repo, branch
 		if latestForBranch == nil {
 			latestForBranch = run
 		}
-		if unresolvedOwner == nil && terminalUnpublishedHead(run) {
-			unresolvedOwner = run
-		}
-		if ambiguousOwner == nil && run.CustodyReturnedAt == nil && (run.Status == types.RunCompleted || run.Status == types.RunFailed || run.Status == types.RunCancelled) {
-			for _, ref := range []string{git.CrashHeadRef(run.ID), git.RunHeadRef(run.ID)} {
-				candidate, exists, candidateErr := resolveOptionalGateRef(ctx, gateDir, ref)
-				if candidateErr != nil {
-					return "", "", rerunCustodyError(run, "a run-owned preservation ref could not be verified")
-				}
-				if exists && candidate != run.HeadSHA {
-					ambiguousOwner = run
-					break
-				}
-			}
+		if owner == nil && (terminalUnpublishedHead(run) || ambiguousPreservedRun(preservedRefs, run)) {
+			owner = run
 		}
 		if run.HeadSHA == gateHead && matchingHead == nil {
 			matchingHead = run
@@ -602,31 +599,38 @@ func (m *RunManager) resolveRerunHead(ctx context.Context, repo *db.Repo, branch
 	if latestForBranch == nil {
 		return "", "", fmt.Errorf("no previous run for branch %s", branch)
 	}
-	if ambiguousOwner != nil {
-		return "", "", rerunCustodyError(ambiguousOwner, "crash recovery found an additional live worktree head")
-	}
-	if unresolvedOwner != nil {
-		exact := strings.TrimSpace(unresolvedOwner.HeadSHA)
-		candidate, exists, candidateErr := resolveOptionalGateRef(ctx, gateDir, git.CrashHeadRef(unresolvedOwner.ID))
-		if candidateErr != nil {
-			return "", "", rerunCustodyError(unresolvedOwner, "the crash-candidate preservation ref could not be verified")
+	if owner != nil {
+		if ambiguousPreservedRun(preservedRefs, owner) {
+			return "", "", rerunAmbiguityError(owner)
 		}
-		if exists && candidate != exact {
-			return "", "", rerunCustodyError(unresolvedOwner, "crash recovery found an additional live worktree head")
-		}
-		if err := git.VerifyExactRef(ctx, gateDir, git.RunHeadRef(unresolvedOwner.ID), exact); err != nil {
-			return "", "", rerunCustodyError(unresolvedOwner, "the exact run-owned head is not verified")
+		exact := strings.TrimSpace(owner.HeadSHA)
+		if preservedRefs[git.RunHeadRef(owner.ID)] != exact {
+			return "", "", rerunCustodyError(owner, "the exact run-owned head is not verified")
 		}
 		if gateHead != exact {
-			return "", "", rerunCustodyError(unresolvedOwner, "the mutable gate branch no longer equals the exact preserved head")
+			return "", "", rerunCustodyError(owner, "the mutable gate branch no longer equals the exact preserved head")
 		}
-		return exact, unresolvedOwner.BaseSHA, nil
+		return exact, owner.BaseSHA, nil
 	}
 	baseSHA := latestForBranch.BaseSHA
 	if matchingHead != nil {
 		baseSHA = matchingHead.BaseSHA
 	}
 	return gateHead, baseSHA, nil
+}
+
+// ambiguousPreservedRun reports preservation evidence that names a head other
+// than durable run authority. Neither head may be promoted or discarded
+// automatically, so rerun refuses until an operator names the exact commit.
+func ambiguousPreservedRun(preservedRefs map[string]string, run *db.Run) bool {
+	if run == nil || run.CustodyReturnedAt != nil || !terminalRunStatus(run.Status) {
+		return false
+	}
+	if candidate, exists := preservedRefs[git.CrashHeadRef(run.ID)]; exists && candidate != run.HeadSHA {
+		return true
+	}
+	candidate, exists := preservedRefs[git.RunHeadRef(run.ID)]
+	return exists && candidate != run.HeadSHA
 }
 
 func terminalUnpublishedHead(run *db.Run) bool {
@@ -639,17 +643,12 @@ func terminalUnpublishedHead(run *db.Run) bool {
 	return run.SubmittedHeadSHA != nil && run.HeadSHA != *run.SubmittedHeadSHA
 }
 
-func resolveOptionalGateRef(ctx context.Context, gateDir, ref string) (string, bool, error) {
-	exists, err := git.RefExists(ctx, gateDir, ref)
-	if err != nil || !exists {
-		return "", false, err
-	}
-	resolved, err := git.ResolveRef(ctx, gateDir, ref)
-	return resolved, err == nil, err
-}
-
 func rerunCustodyError(run *db.Run, reason string) error {
 	return fmt.Errorf("refusing rerun: terminal run %s has unresolved unpublished pipeline head %s (%s); recover custody with `no-mistakes axi sync --recover` before starting another run", run.ID, run.HeadSHA, reason)
+}
+
+func rerunAmbiguityError(run *db.Run) error {
+	return fmt.Errorf("refusing rerun: terminal run %s retains preservation evidence naming a head other than recorded head %s; no head was discarded, so recover custody by naming the exact commit to keep with `no-mistakes axi sync --recover --resolve-head <commit>` before starting another run", run.ID, run.HeadSHA)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.

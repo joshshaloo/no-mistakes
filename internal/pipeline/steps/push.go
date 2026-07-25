@@ -58,6 +58,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		if err != nil {
 			return nil, fmt.Errorf("resolve head after commit: %w", err)
 		}
+		// Review approval gates publication, not just the network push. A head
+		// that fails this check must never become run-owned authority or move
+		// the gate branch, or custody recovery and rerun would treat an
+		// unreviewed commit as authoritative pipeline work.
+		if err := assertReviewApprovedPushHead(sctx, headSHA); err != nil {
+			return nil, err
+		}
 		if err := publishPipelineHead(sctx, headSHA); err != nil {
 			return nil, fmt.Errorf("publish push-stage commit: %w", err)
 		}
@@ -80,13 +87,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
+	if err := assertReviewApprovedPushHead(sctx, headBeingPushed); err != nil {
+		return nil, err
+	}
 	if headBeingPushed != sctx.Run.HeadSHA {
 		if err := publishPipelineHead(sctx, headBeingPushed); err != nil {
 			return nil, fmt.Errorf("publish exact pre-push head: %w", err)
 		}
-	}
-	if err := assertReviewApprovedPushHead(sctx, headBeingPushed); err != nil {
-		return nil, err
 	}
 
 	// Decide whether force-pushing would discard commits the pipeline never saw.

@@ -62,7 +62,11 @@ func newStatusCmd() *cobra.Command {
 					return "", "", fmt.Errorf("check active run: %w", err)
 				}
 				fingerprint := statusFingerprint(repo.ID, daemonState, activeRun)
-				if syncState := (&branchsync.Service{DB: d, Repo: repo, WorkDir: "."}).InspectCached(cmd.Context()); relevantCachedSyncState(syncState) {
+				// GateDir is required: without it this surface cannot see
+				// preserved-head ambiguity and would advise a recovery that
+				// `axi status` already knows is blocked.
+				syncService := &branchsync.Service{DB: d, Repo: repo, WorkDir: ".", GateDir: p.RepoDir(repo.ID), Paths: p}
+				if syncState := syncService.InspectCached(cmd.Context()); relevantCachedSyncState(syncState) {
 					fmt.Fprintf(w, "\n  %s  %s\n", sDim.Render("local branch:"), humanSyncSummary(syncState))
 				}
 				if activeRun != nil {

@@ -24,7 +24,7 @@ func renderLocalBranchStatus(state *branchsync.State, refreshing bool, width int
 				message = "Run ended without publishing its pipeline commits; the exact run-owned head is preserved in the local gate. Recover custody to take the branch back; rerun works only while that ref and gate branch agree."
 				footer = "u recover custody"
 			} else if state.Safety == "blocked_pipeline_owned_ambiguous" {
-				message = "Preservation evidence retained different recorded and pipeline/live worktree heads. Automatic recovery and rerun are blocked; neither head was discarded."
+				message = "Preservation evidence retained different recorded and pipeline/live worktree heads. No head was discarded; name the exact commit to keep with `no-mistakes sync --recover --resolve-head <commit>` and every losing head is archived."
 			} else {
 				message = "Local branch unchanged; the pipeline fix is not pushed yet. Do not make follow-up commits."
 			}

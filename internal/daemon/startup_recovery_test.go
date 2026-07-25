@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -171,6 +172,163 @@ func TestCleanupRunWorktreeRetainsAmbiguousLiveHead(t *testing.T) {
 	}
 }
 
+// TestCleanupPreservesTerminalOutcomeWhileRecordingCustodyDiagnostic pins the
+// reporting contract: a deliberate `axi abort` must not be rewritten into a
+// crash, and a step failure's root cause must stay readable in `axi status`.
+// The custody note is recorded alongside them, exactly once across restarts.
+func TestCleanupPreservesTerminalOutcomeWhileRecordingCustodyDiagnostic(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		status    types.RunStatus
+		rootError string
+	}{
+		{name: "cancelled", status: types.RunCancelled, rootError: "aborted by user"},
+		{name: "failed", status: types.RunFailed, rootError: "test step failed: 3 tests failing"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			d, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			repo, recorded := setupTestGitRepo(t, p, d, "custody-diagnostic-"+tc.name)
+			run, err := d.InsertRun(repo.ID, "feature", recorded, recorded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			worktree := p.WorktreeDir(repo.ID, run.ID)
+			if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, recorded); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, worktree, "config", "user.name", "test")
+			gitCmd(t, worktree, "config", "user.email", "test@example.com")
+			if err := os.WriteFile(worktree+"/self-commit.txt", []byte("agent self commit\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, worktree, "add", "self-commit.txt")
+			gitCmd(t, worktree, "commit", "-m", "unrecorded agent self-commit")
+			if err := d.UpdateRunErrorStatus(run.ID, tc.rootError, tc.status); err != nil {
+				t.Fatal(err)
+			}
+
+			for attempt := 0; attempt < 2; attempt++ {
+				if err := cleanupRunWorktree(context.Background(), d, p.RepoDir(repo.ID), worktree, run.ID); !errors.Is(err, errWorktreeRetainedForCustody) {
+					t.Fatalf("cleanup attempt %d error = %v, want custody retention", attempt, err)
+				}
+			}
+			reloaded, _ := d.GetRun(run.ID)
+			if reloaded.Status != tc.status {
+				t.Fatalf("terminal status rewritten to %s, want %s", reloaded.Status, tc.status)
+			}
+			if reloaded.Error == nil {
+				t.Fatal("run error was cleared")
+			}
+			recordedError := *reloaded.Error
+			if !strings.Contains(recordedError, tc.rootError) {
+				t.Fatalf("root error discarded: %q", recordedError)
+			}
+			if !strings.Contains(recordedError, db.RunCustodyDiagnosticMarker) {
+				t.Fatalf("custody diagnostic not recorded: %q", recordedError)
+			}
+			if strings.Count(recordedError, db.RunCustodyDiagnosticMarker) != 1 {
+				t.Fatalf("custody diagnostic appended more than once: %q", recordedError)
+			}
+		})
+	}
+}
+
+// TestRetirePreservedRunHeadsOnlyRetiresSettledCustody proves preservation refs
+// are bounded without ever becoming a code-loss path: only provably settled
+// heads are retired, and every uncertain or ambiguous one is retained.
+func TestRetirePreservedRunHeadsOnlyRetiresSettledCustody(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	repo, head := setupTestGitRepo(t, p, d, "retire-preserved")
+	gate := p.RepoDir(repo.ID)
+
+	newRun := func(branch string) *db.Run {
+		t.Helper()
+		run, err := d.InsertRun(repo.ID, branch, head, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := git.PinRunHead(context.Background(), gate, run.ID, head); err != nil {
+			t.Fatal(err)
+		}
+		return run
+	}
+	markTerminal := func(run *db.Run) {
+		t.Helper()
+		if err := d.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	custodyReturned := newRun("custody-returned")
+	markTerminal(custodyReturned)
+	if err := d.SetRunCustodyReturned(custodyReturned.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	merged := newRun("merged")
+	markTerminal(merged)
+	if err := d.UpdateRunPushBinding(merged.ID, db.PushBinding{HeadSHA: head, TargetKind: "upstream", TargetFingerprint: "fp", Ref: "refs/heads/merged"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunPRState(merged.ID, "merged"); err != nil {
+		t.Fatal(err)
+	}
+
+	unresolved := newRun("unresolved")
+	markTerminal(unresolved)
+
+	openPR := newRun("open-pr")
+	markTerminal(openPR)
+	if err := d.UpdateRunPushBinding(openPR.ID, db.PushBinding{HeadSHA: head, TargetKind: "upstream", TargetFingerprint: "fp", Ref: "refs/heads/open-pr"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ambiguous := newRun("ambiguous")
+	markTerminal(ambiguous)
+	if err := d.SetRunCustodyReturned(ambiguous.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.PinExactCommit(context.Background(), gate, git.CrashHeadRef(ambiguous.ID), head); err != nil {
+		t.Fatal(err)
+	}
+
+	active := newRun("active")
+
+	retired, retained := retirePreservedRunHeads(context.Background(), d, p)
+	if retired != 2 || retained != 4 {
+		t.Fatalf("retirement counts = %d retired / %d retained, want 2/4", retired, retained)
+	}
+	for _, run := range []*db.Run{custodyReturned, merged} {
+		if exists, _ := git.RefExists(context.Background(), gate, git.RunHeadRef(run.ID)); exists {
+			t.Fatalf("settled run %s was not retired", run.Branch)
+		}
+	}
+	for _, run := range []*db.Run{unresolved, openPR, ambiguous, active} {
+		if err := git.VerifyExactRef(context.Background(), gate, git.RunHeadRef(run.ID), head); err != nil {
+			t.Fatalf("unsettled run %s lost its evidence ref: %v", run.Branch, err)
+		}
+	}
+	if err := git.VerifyExactRef(context.Background(), gate, git.CrashHeadRef(ambiguous.ID), head); err != nil {
+		t.Fatalf("crash evidence was retired: %v", err)
+	}
+}
+
 func TestCrashRecoveryPinsRecordedHeadBeforeFailureAndRetainsAmbiguity(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -213,9 +371,15 @@ func TestCrashRecoveryPinsRecordedHeadBeforeFailureAndRetainsAmbiguity(t *testin
 				live = gitOutput(t, worktree, "rev-parse", "HEAD")
 			}
 
-			preserved := preserveActiveRunHeadsBeforeCrashRecovery(d, p, nil)
-			if _, retainedActive := preserved[run.ID]; retainedActive {
-				t.Fatal("verifiable crash evidence unnecessarily retained the row active")
+			// The reported counts must describe what preservation actually did,
+			// not restate the parked-run input it was handed.
+			stats := preserveActiveRunHeadsBeforeCrashRecovery(d, p, nil)
+			want := staleHeadPreservation{Pinned: 1}
+			if tc.ambiguous {
+				want = staleHeadPreservation{Retained: 1}
+			}
+			if stats != want {
+				t.Fatalf("preservation stats = %#v, want %#v", stats, want)
 			}
 			if !tc.ambiguous {
 				if err := git.VerifyExactRef(context.Background(), p.RepoDir(repo.ID), git.RunHeadRef(run.ID), recorded); err != nil {
@@ -224,7 +388,7 @@ func TestCrashRecoveryPinsRecordedHeadBeforeFailureAndRetainsAmbiguity(t *testin
 			} else if err := git.VerifyExactRef(context.Background(), p.RepoDir(repo.ID), git.CrashHeadRef(run.ID), live); err != nil {
 				t.Fatalf("crash candidate was not pinned: %v", err)
 			}
-			if _, err := d.RecoverStaleRunsExcept("daemon crashed during execution", preserved); err != nil {
+			if _, err := d.RecoverStaleRunsExcept("daemon crashed during execution", nil); err != nil {
 				t.Fatal(err)
 			}
 			cleanupOrphanWorktrees(d, p)

@@ -145,7 +145,48 @@ func TestResolveRerunHeadRefusesAmbiguousCrashCandidate(t *testing.T) {
 	if err := git.PinExactCommit(f.ctx, f.gate, git.CrashHeadRef(f.run.ID), f.submitted); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := f.manager.resolveRerunHead(f.ctx, f.repo, "main"); err == nil || !strings.Contains(err.Error(), "recover custody") {
+	_, _, err := f.manager.resolveRerunHead(f.ctx, f.repo, "main")
+	if err == nil || !strings.Contains(err.Error(), "recover custody") {
 		t.Fatalf("ambiguous rerun error = %v", err)
+	}
+	// An ambiguity has a different exit than an ordinary unresolved head, so
+	// the refusal must name the operator-resolution command, not a plain
+	// `--recover` that would itself refuse.
+	if !strings.Contains(err.Error(), "--resolve-head") {
+		t.Fatalf("ambiguous rerun refusal lacks resolution guidance: %v", err)
+	}
+}
+
+// TestResolveRerunHeadSelectsCustodyOwnerOnceNewestFirst pins the selection
+// rule against branch inspection: an older ambiguous run must not preempt the
+// newest unresolved owner, or rerun refuses about a different run than the one
+// the operator was told to recover.
+func TestResolveRerunHeadSelectsCustodyOwnerOnceNewestFirst(t *testing.T) {
+	f := newRerunHeadFixture(t)
+	// The older run carries ambiguous evidence.
+	if err := f.database.UpdateRunHeadSHA(f.run.ID, f.submitted); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	// The newer run is the one branch inspection selects: ordinary unresolved.
+	newer, err := f.database.InsertRun(f.repo.ID, "main", f.submitted, f.submitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.database.UpdateRunHeadSHA(newer.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.database.UpdateRunStatus(newer.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err = f.manager.resolveRerunHead(f.ctx, f.repo, "main")
+	if err == nil || !strings.Contains(err.Error(), newer.ID) {
+		t.Fatalf("rerun refused about the wrong owner: %v", err)
+	}
+	if strings.Contains(err.Error(), f.run.ID) {
+		t.Fatalf("rerun preferred the older ambiguous run: %v", err)
 	}
 }

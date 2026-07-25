@@ -387,8 +387,8 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	logStartupPhase("parked_runs", parkedStarted, "preserved", len(plans))
 
 	preserveHeadsStarted := time.Now()
-	preserved = preserveActiveRunHeadsBeforeCrashRecovery(d, p, preserved)
-	logStartupPhase("stale_run_heads", preserveHeadsStarted, "retained_active", len(preserved))
+	headStats := preserveActiveRunHeadsBeforeCrashRecovery(d, p, preserved)
+	logStartupPhase("stale_run_heads", preserveHeadsStarted, "pinned", headStats.Pinned, "retained", headStats.Retained)
 
 	staleStarted := time.Now()
 	count, err := d.RecoverStaleRunsExcept("daemon crashed during execution", preserved)
@@ -408,6 +408,11 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	worktreeStarted := time.Now()
 	cleanupOrphanWorktrees(d, p)
 	logStartupPhase("worktree_cleanup", worktreeStarted)
+
+	retireStarted := time.Now()
+	retiredRefs, retainedRefs := retirePreservedRunHeads(context.Background(), d, p)
+	logStartupPhase("preserved_head_retirement", retireStarted, "retired", retiredRefs, "retained", retainedRefs)
+
 	mgr.resumeRecoveredRuns(plans)
 }
 
@@ -455,7 +460,11 @@ func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths) {
 			}
 			if run != nil {
 				if err := cleanupRunWorktree(ctx, d, gateDir, wtPath, runID); err != nil {
-					slog.Warn("retained orphaned worktree because its recorded head was not safely pinned", "path", wtPath, "error", err)
+					if errors.Is(err, errWorktreeRetainedForCustody) {
+						slog.Warn("retained orphaned worktree because its recorded head was not safely pinned", "path", wtPath, "error", err)
+					} else {
+						slog.Warn("retained orphaned worktree because removing it failed", "path", wtPath, "error", err)
+					}
 					continue
 				}
 				slog.Info("removed safely preserved orphaned worktree", "path", wtPath)

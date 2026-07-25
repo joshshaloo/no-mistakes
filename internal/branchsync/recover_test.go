@@ -652,12 +652,197 @@ func TestAmbiguousPublishedRefBlocksFreshRunBeforeCleanupWhenDatabaseStayedSubmi
 	if state.State != StatePipelineOwned || state.Safety != "blocked_pipeline_owned_ambiguous" {
 		t.Fatalf("submitted-authority ambiguous state = %#v", state)
 	}
-	if state.NextAction == nil || state.NextAction.Code != "inspect_ambiguous_custody" {
+	if state.NextAction == nil || state.NextAction.Code != "resolve_ambiguous_custody" {
 		t.Fatalf("ambiguous next action = %#v", state.NextAction)
+	}
+	for _, candidate := range []string{f.submitted, f.preserved} {
+		if !strings.Contains(state.Error, candidate) {
+			t.Fatalf("ambiguous note does not name candidate %s: %q", candidate, state.Error)
+		}
 	}
 	if recovered := f.service.Recover(f.ctx, true); recovered.Recovered || recovered.Safety != "blocked_recover_ambiguous_head" {
 		t.Fatalf("ambiguous submitted-authority recover = %#v", recovered)
 	}
+}
+
+// TestResolveAmbiguousHeadRequiresOperatorNamedCandidate proves the ambiguous
+// state has exactly one supported exit and that the tool never chooses: an
+// empty or non-candidate commit refuses without touching any ref, and the
+// branch stays blocked.
+func TestResolveAmbiguousHeadRequiresOperatorNamedCandidate(t *testing.T) {
+	for name, chosen := range map[string]string{"empty": "", "not a candidate": "0000000000000000000000000000000000000000"} {
+		t.Run(name, func(t *testing.T) {
+			f := newAmbiguousFixture(t)
+			state := f.service.ResolveAmbiguousHead(f.ctx, chosen)
+			if state.Changed || state.Safety != "blocked_resolve_head_not_candidate" {
+				t.Fatalf("resolution = %#v", state)
+			}
+			for _, candidate := range []string{f.submitted, f.preserved} {
+				if !strings.Contains(state.Error, candidate) {
+					t.Fatalf("refusal does not list candidate %s: %q", candidate, state.Error)
+				}
+			}
+			if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {
+				t.Fatalf("refused resolution moved the run ref to %s", got)
+			}
+			if reloaded, _ := f.db.GetRun(f.run.ID); reloaded.HeadSHA != f.submitted {
+				t.Fatalf("refused resolution moved durable authority to %s", reloaded.HeadSHA)
+			}
+		})
+	}
+}
+
+// TestResolveAmbiguousHeadPublishesNamedCommitAndArchivesLosers is the exit
+// itself: naming the preserved pipeline head publishes it as run authority,
+// archives the losing head rather than discarding it, and leaves the branch
+// ordinarily recoverable.
+func TestResolveAmbiguousHeadPublishesNamedCommitAndArchivesLosers(t *testing.T) {
+	f := newAmbiguousFixture(t)
+	state := f.service.ResolveAmbiguousHead(f.ctx, f.preserved)
+	if !state.Changed || state.Safety != "blocked_pipeline_owned_recoverable" {
+		t.Fatalf("resolution = %#v", state)
+	}
+	if state.NextAction == nil || state.NextAction.Code != "recover_custody" {
+		t.Fatalf("resolved next action = %#v", state.NextAction)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {
+		t.Fatalf("run ref = %s, want the named head %s", got, f.preserved)
+	}
+	reloaded, _ := f.db.GetRun(f.run.ID)
+	if reloaded.HeadSHA != f.preserved {
+		t.Fatalf("durable authority = %s, want the named head %s", reloaded.HeadSHA, f.preserved)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", git.ArchiveHeadRef(f.run.ID, f.submitted)); got != f.submitted {
+		t.Fatalf("losing head was not archived: %s", got)
+	}
+	// The whole point is that resolution is not destructive: it may not move a
+	// branch, touch files, or stamp custody on the operator's behalf.
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatalf("resolution moved the operator worktree to %s", got)
+	}
+	if f.custodyReturned() {
+		t.Fatal("resolution stamped custody instead of leaving the guarded recovery to the operator")
+	}
+
+	// The branch is now genuinely usable again: ordinary recovery proceeds.
+	recovered := f.service.Recover(f.ctx, false)
+	if !recovered.Recovered {
+		t.Fatalf("recovery after resolution = %#v", recovered)
+	}
+}
+
+// TestResolveAmbiguousHeadRetiresCrashCandidateAfterArchiving covers the crash
+// shape: a fix agent self-committed, cleanup pinned the live head as crash
+// evidence, and the operator keeps the recorded head. The crash ref is retired
+// only after its commit is archived.
+func TestResolveAmbiguousHeadRetiresCrashCandidateAfterArchiving(t *testing.T) {
+	f := newRecoverFixture(t, types.RunFailed)
+	crash := mustRun(t, f.pipeline, "commit-tree", f.preserved+"^{tree}", "-p", f.preserved, "-m", "unrecorded agent self-commit")
+	mustRun(t, f.pipeline, "push", f.gate, crash+":refs/no-mistakes/crash-stage")
+	mustRun(t, f.gate, "update-ref", "-d", "refs/no-mistakes/crash-stage")
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.PinExactCommit(f.ctx, f.gate, git.CrashHeadRef(f.run.ID), crash); err != nil {
+		t.Fatal(err)
+	}
+
+	if state := f.service.InspectCached(f.ctx); state.Safety != "blocked_pipeline_owned_ambiguous" {
+		t.Fatalf("crash-candidate state = %#v", state)
+	}
+	state := f.service.ResolveAmbiguousHead(f.ctx, f.preserved)
+	if !state.Changed || state.Safety != "blocked_pipeline_owned_recoverable" {
+		t.Fatalf("crash-candidate resolution = %#v", state)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", git.ArchiveHeadRef(f.run.ID, crash)); got != crash {
+		t.Fatalf("crash candidate was retired without archiving: %s", got)
+	}
+	if exists, _ := git.RefExists(f.ctx, f.gate, git.CrashHeadRef(f.run.ID)); exists {
+		t.Fatal("crash candidate ref was not retired after resolution")
+	}
+}
+
+// TestResolveAmbiguousHeadCreatesRunAuthorityFromCrashEvidenceOnly covers the
+// shape where preservation pinned crash evidence but no run-owned ref: naming
+// the crash head must create that ref from absent and move durable authority,
+// both with compare-and-swap, while the losing recorded head is archived.
+func TestResolveAmbiguousHeadCreatesRunAuthorityFromCrashEvidenceOnly(t *testing.T) {
+	f := newRecoverFixture(t, types.RunFailed)
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, f.submitted); err != nil {
+		t.Fatal(err)
+	}
+	f.run.HeadSHA = f.submitted
+	if err := git.PinExactCommit(f.ctx, f.gate, git.CrashHeadRef(f.run.ID), f.preserved); err != nil {
+		t.Fatal(err)
+	}
+
+	state := f.service.ResolveAmbiguousHead(f.ctx, f.preserved)
+	if !state.Changed || state.Safety != "blocked_pipeline_owned_recoverable" {
+		t.Fatalf("crash-only resolution = %#v", state)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {
+		t.Fatalf("run ref = %s, want the named head %s", got, f.preserved)
+	}
+	reloaded, _ := f.db.GetRun(f.run.ID)
+	if reloaded.HeadSHA != f.preserved {
+		t.Fatalf("durable authority = %s, want %s", reloaded.HeadSHA, f.preserved)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", git.ArchiveHeadRef(f.run.ID, f.submitted)); got != f.submitted {
+		t.Fatalf("losing recorded head was not archived: %s", got)
+	}
+	if exists, _ := git.RefExists(f.ctx, f.gate, git.CrashHeadRef(f.run.ID)); exists {
+		t.Fatal("crash evidence ref was not retired after resolution")
+	}
+}
+
+// TestRecoverLegacySubmittedHeadMismatchIsIdempotent pins the DEV-451 legacy
+// shape against a re-run: the first recovery pins the exact run ref, and the
+// second must return the same actionable refusal rather than degrading to a
+// weaker gate-diverged message with no --keep-local exit.
+func TestRecoverLegacySubmittedHeadMismatchIsIdempotent(t *testing.T) {
+	f := newRecoverFixture(t, types.RunFailed)
+	makeLegacyRebaseMismatch(t, f)
+
+	first := f.service.Recover(f.ctx, false)
+	second := f.service.Recover(f.ctx, false)
+	if first.Safety != "blocked_recover_diverged" || second.Safety != first.Safety {
+		t.Fatalf("legacy recovery is not idempotent: first %s, second %s", first.Safety, second.Safety)
+	}
+	if second.NextAction == nil || second.NextAction.Code != "inspect_and_reconcile_manually" {
+		t.Fatalf("second legacy refusal next action = %#v", second.NextAction)
+	}
+	if !strings.Contains(second.Error, "--keep-local") {
+		t.Fatalf("second legacy refusal dropped the --keep-local exit: %q", second.Error)
+	}
+	// rerun refuses in this shape (the gate branch is not the preserved head),
+	// so recovery must not advertise it.
+	if strings.Contains(second.Error, "no-mistakes rerun") {
+		t.Fatalf("legacy refusal offered unusable rerun advice: %q", second.Error)
+	}
+
+	keepLocal := f.service.Recover(f.ctx, true)
+	if !keepLocal.Recovered || keepLocal.Changed {
+		t.Fatalf("keep-local after repeated refusals = %#v", keepLocal)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {
+		t.Fatalf("idempotent legacy recovery lost the preserved head: %s", got)
+	}
+}
+
+// newAmbiguousFixture models the reachable ambiguity: a Git publication landed
+// under the run-owned ref while the database write never did, so evidence and
+// durable authority name different heads.
+func newAmbiguousFixture(t *testing.T) *recoverFixture {
+	t.Helper()
+	f := newRecoverFixture(t, types.RunFailed)
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, f.submitted); err != nil {
+		t.Fatal(err)
+	}
+	f.run.HeadSHA = f.submitted
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	return f
 }
 
 // TestRecoverTerminalPostPushRunWithMovedHead covers the post-push class cell:
