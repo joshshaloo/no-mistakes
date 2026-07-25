@@ -84,7 +84,7 @@ When a push arrives via the post-receive hook:
 1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`
 2. Starts the pipeline executor in that worktree
 3. Streams events to any connected TUI clients and serves request/response state to AXI clients
-4. Cleans up the worktree when the run finishes (success or failure)
+4. Cleans up the worktree when the run finishes (success or failure), but only after byte-verifying that the run's exact recorded head is pinned under its own gate reference
 
 Pipeline agents are prompted to keep intentional writes inside that detached worktree and avoid changing system state outside it, such as Homebrew packages, apps under `/Applications`, or global tool configuration.
 That reduces surprising machine-level side effects and macOS App Management prompts, but it is prompt steering rather than a true sandbox.
@@ -109,11 +109,13 @@ reason about in one long-lived process than inside independent hook invocations.
 On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
+- Inspects every stale run's worktree and pins its exact head before marking the run terminal, so no cleanup path can ever be the last reference to pipeline commits
 - Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
-- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`; only leftovers from terminal runs or directories with no matching run record are removed
+- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`; only leftovers from terminal runs or directories with no matching run record are removed. A worktree that still belongs to a run row is removed only after its recorded head is exactly pinned; when the pinned, recorded, and live heads disagree, every head is preserved under its own reference and the worktree is deliberately retained as independent evidence
+- Retires a run's preserved head reference only when the run is terminal, the reference still matches durable run authority exactly, it carries no crash candidate, no run is active on that branch, and either custody was returned or that exact head reached the push target and its pull request merged. That lets the managed gate reclaim objects without ever dropping the last evidence of unpublished work; crash candidates, resolution archives, and every uncertain head are always retained
 - Migrates gates named by authoritative repository records, plus legacy directories with the strict `<repoID>.git` shape. Before changing an unstamped candidate, it validates that the directory is a bare repository without relying on the current directory or ancestor Git discovery; unrelated and malformed directories are rejected without hook or Git mutation
 - For a validated legacy gate, installs or refreshes the no-mistakes-managed pre-receive admission and post-receive notification hooks, preserving an existing custom pre-receive hook behind the admission wrapper, then enables push-option support and reapplies per-worktree hook-path isolation
 - Records a content-versioned gate configuration stamp only after the whole migration succeeds. Normal restarts check current stamped gates from the filesystem without rerunning the mutating Git commands

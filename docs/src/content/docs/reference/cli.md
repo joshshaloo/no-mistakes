@@ -190,6 +190,7 @@ no-mistakes axi sync --recover --resolve-head <commit>
 | `--resolve-head` | `string` | `""`    | With `--recover`: the exact commit that becomes run authority when preservation evidence is ambiguous |
 
 The default command is an explicit non-interactive apply request and never prompts.
+`--keep-local` and `--resolve-head` each require `--recover` and cannot be combined with each other.
 All modes return the complete `branch_sync` object as TOON.
 Exit code `0` means an eligible check, applied synchronization or recovery, already-synchronized or custody-returned no-op, or expected merged-and-removed no-op; blocked operational states return `1`.
 The ordinary worktree mutation is either a strict fast-forward of the invoking clean checked-out branch to the freshly verified pipeline-owned pushed SHA, or an equivalent-diverged advance.
@@ -223,7 +224,7 @@ Nothing is chosen automatically, because either head may be the work worth keepi
 A commit that is not one of this run's candidates, does not resolve exactly in the gate, or loses a race refuses with every candidate still archived, so a partial resolution is re-runnable rather than lossy.
 Resolution never moves a branch, touches worktree files, or stamps custody: it restores agreement so the ordinary `--recover` exit becomes available again.
 When the gate's preservation refs cannot be read at all, ambiguity cannot be ruled out. Because that snapshot is also an input to run selection, the refusal is branch-scoped rather than run-scoped: inspection reports `state: ambiguous_context` with `safety: blocked_preservation_unreadable` and `next_action.code: inspect_gate_preservation`, naming no run. Every surface carries it - cached `branch_sync` in `axi` home, `axi status`, and query output, the `no-mistakes status` local-branch line, and the TUI local-branch box - and recovery, resolution, and fresh runs all refuse until the gate is readable again. No head is ever discarded while the branch is blocked.
-Once custody is durably returned, or once the exact head reached the push target and its pull request merged, an unambiguous run-owned ref is retired at daemon startup so the managed gate can reclaim objects; crash evidence, archives, and every uncertain head are always retained.
+Preserved references outlive the run and are retired only at daemon startup, only once a run is fully settled; [Crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns those rules.
 
 ## no-mistakes axi logs
 
@@ -349,6 +350,7 @@ Displays:
 - Gate path
 - Daemon status (running/stopped, PID)
 - Active run details: ID, branch, status, head SHA, start time
+- A cached local-branch line when the branch needs attention, including custody and preservation states described under [`no-mistakes axi sync`](#no-mistakes-axi-sync)
 
 ## no-mistakes runs
 
