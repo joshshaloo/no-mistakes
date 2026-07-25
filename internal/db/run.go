@@ -445,8 +445,7 @@ func (d *DB) ResolveRunHeadSHA(id, expected, headSHA string) (bool, error) {
 }
 
 // RunCustodyDiagnosticMarker prefixes every custody diagnostic appended to
-// runs.error. It is a stable marker so repeated cleanup attempts across daemon
-// restarts append the note exactly once.
+// runs.error so operators and tests can recognize one.
 const RunCustodyDiagnosticMarker = "worktree retained for custody recovery:"
 
 // RecordRunCustodyDiagnostic appends a custody diagnostic to a run without
@@ -455,6 +454,11 @@ const RunCustodyDiagnosticMarker = "worktree retained for custody recovery:"
 // not be reported as a crash, and a step failure's cause must stay readable in
 // `axi status` - while a still-active run becomes failed, because its worktree
 // is being torn down and nothing will advance it.
+//
+// Deduplication is on the exact diagnostic, not on the marker: the message
+// carries the exact heads for one state, so repeated restarts against unchanged
+// state append once, while a genuinely different later failure still reaches
+// runs.error instead of being silently swallowed behind the first note.
 func (d *DB) RecordRunCustodyDiagnostic(id, msg string) error {
 	ts := now()
 	_, err := d.sql.Exec(`UPDATE runs SET
@@ -466,7 +470,7 @@ func (d *DB) RecordRunCustodyDiagnostic(id, msg string) error {
 		status = CASE WHEN status IN ('completed', 'failed', 'cancelled') THEN status ELSE ? END,
 		push_active = 0,
 		updated_at = ?
-	WHERE id = ?`, msg, RunCustodyDiagnosticMarker, msg, types.RunFailed, ts, id)
+	WHERE id = ?`, msg, msg, msg, types.RunFailed, ts, id)
 	if err != nil {
 		return fmt.Errorf("record run custody diagnostic: %w", err)
 	}

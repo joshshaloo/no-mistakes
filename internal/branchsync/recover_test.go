@@ -762,6 +762,87 @@ func TestResolveAmbiguousHeadRetiresCrashCandidateAfterArchiving(t *testing.T) {
 	}
 }
 
+// TestUnreadablePreservationEvidenceFailsClosed pins the direction this guard
+// must fail in. When the gate's preservation refs cannot be read, ambiguity
+// cannot be ruled out, so inspection, recovery, and resolution must all refuse
+// rather than silently treat the branch as unambiguous and stamp custody.
+func TestUnreadablePreservationEvidenceFailsClosed(t *testing.T) {
+	f := newAmbiguousFixture(t)
+	// The gate path exists but its refs cannot be read. This is the unreadable
+	// case, distinct from the absent-gate case that the gate-unavailable
+	// refusals already own.
+	unreadable := filepath.Join(t.TempDir(), "unreadable-gate")
+	if err := os.MkdirAll(unreadable, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.PreservedHeads(f.ctx, unreadable); err == nil {
+		t.Fatal("fixture gate is still readable")
+	}
+	service := &Service{DB: f.db, Repo: f.repo, WorkDir: f.local, GateDir: unreadable}
+
+	state := service.InspectCached(f.ctx)
+	if state.Safety != "blocked_preservation_unreadable" {
+		t.Fatalf("unreadable evidence inspection = %#v", state)
+	}
+	for _, keepLocal := range []bool{false, true} {
+		recovered := service.Recover(f.ctx, keepLocal)
+		if recovered.Recovered || recovered.Safety != "blocked_recover_preservation_unreadable" {
+			t.Fatalf("keep_local=%v unreadable evidence recovery = %#v", keepLocal, recovered)
+		}
+		if f.custodyReturned() {
+			t.Fatalf("keep_local=%v stamped custody on unreadable preservation evidence", keepLocal)
+		}
+	}
+	resolved := service.ResolveAmbiguousHead(f.ctx, f.preserved)
+	if resolved.Changed || resolved.Safety != "blocked_resolve_preservation_unreadable" {
+		t.Fatalf("unreadable evidence resolution = %#v", resolved)
+	}
+	// The readable gate still holds every head, so nothing was discarded while
+	// the branch was blocked.
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {
+		t.Fatalf("blocked state disturbed the preserved run ref: %s", got)
+	}
+}
+
+// TestRecoverPinnedRunRefStillRefusesThirdGateHead is the regression for the
+// widening this arm introduced: a byte-verified run ref must not license
+// recovery across a live third gate head, because --keep-local would then
+// compare-and-swap that head off the gate branch without ever naming it.
+func TestRecoverPinnedRunRefStillRefusesThirdGateHead(t *testing.T) {
+	f := newRecoverFixture(t, types.RunFailed)
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	writer := filepath.Join(t.TempDir(), "writer")
+	mustRun(t, filepath.Dir(writer), "clone", f.gate, writer)
+	configureIdentity(t, writer)
+	mustRun(t, writer, "checkout", "feature/recover")
+	mustWrite(t, filepath.Join(writer, "third.txt"), "colleague work\n")
+	mustRun(t, writer, "add", "third.txt")
+	mustRun(t, writer, "commit", "-m", "colleague pushed tip")
+	third := mustRun(t, writer, "rev-parse", "HEAD")
+	mustRun(t, writer, "push", "origin", "HEAD:refs/heads/feature/recover")
+
+	for _, keepLocal := range []bool{false, true} {
+		state := f.service.Recover(f.ctx, keepLocal)
+		if state.Recovered || state.Safety != "blocked_recover_gate_diverged" {
+			t.Fatalf("keep_local=%v third-head recovery = %#v", keepLocal, state)
+		}
+		if !strings.Contains(state.Error, third) {
+			t.Fatalf("refusal does not name the displaced gate head %s: %q", third, state.Error)
+		}
+		if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != third {
+			t.Fatalf("keep_local=%v displaced the colleague tip to %s", keepLocal, got)
+		}
+		if f.custodyReturned() {
+			t.Fatalf("keep_local=%v stamped custody across a third gate head", keepLocal)
+		}
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {
+		t.Fatalf("refusal disturbed the preserved run ref: %s", got)
+	}
+}
+
 // TestResolveAmbiguousHeadCreatesRunAuthorityFromCrashEvidenceOnly covers the
 // shape where preservation pinned crash evidence but no run-owned ref: naming
 // the crash head must create that ref from absent and move durable authority,

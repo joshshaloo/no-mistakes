@@ -454,14 +454,18 @@ func (s *Service) Apply(ctx context.Context) State {
 //     already reachable from the local branch (equal/ahead), recovery pins the
 //     private anchor ref refs/no-mistakes/recover/<runID> locally without gate
 //     access; otherwise it verifies and fetches the exact run-owned gate ref.
-//     That exact ref, byte-verified against runs.head_sha, is the authority -
-//     the mutable gate branch is provenance and is never required to agree,
-//     which is also what makes repeated recovery idempotent. Absent that ref,
-//     legacy object existence is authority only for the historical clean
-//     local == gate == submitted shape, never for a third mutable gate head.
-//   - Preservation evidence that names more than one head is never resolved
-//     automatically. It blocks with blocked_recover_ambiguous_head until
-//     ResolveAmbiguousHead publishes an operator-named exact commit.
+//     That ref must be byte-equal to runs.head_sha, and the mutable gate branch
+//     must additionally be one of exactly three explainable values: the
+//     preserved head, the run's own immutable submitted head (the historical
+//     shape, where an already-pinned ref is accepted so a repeated recovery is
+//     idempotent), or the operator's kept head from an interrupted keep-local
+//     recovery. Any other live gate head is a third head this run cannot
+//     explain, and it is refused rather than displaced - a pinned run ref never
+//     licenses moving it.
+//   - Preservation evidence that names more than one head, or that cannot be
+//     read at all, is never resolved automatically. It blocks with
+//     blocked_recover_ambiguous_head or blocked_recover_preservation_unreadable
+//     until ResolveAmbiguousHead publishes an operator-named exact commit.
 //   - The only possible worktree mutation stays a strict fast-forward of a
 //     clean checked-out branch. When the operator explicitly keeps a behind or
 //     diverged local head instead of taking P, --keep-local never touches the
@@ -483,6 +487,9 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		return refusal
 	}
 	state, run, _ := s.inspect(ctx)
+	if state.Safety == safetyPreservationUnreadable {
+		return blockedPlan(state, StateAmbiguousContext, "blocked_recover_preservation_unreadable", preservationUnreadableMessage)
+	}
 	if run != nil && run.CustodyReturnedAt != nil {
 		state.Recovered = true
 		state.Changed = false
@@ -500,7 +507,11 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	local := state.Local.Head
 	preserved := strings.TrimSpace(run.HeadSHA)
 	anchorRef := recoverAnchorRef(run.ID)
-	if ambiguous, exists := ambiguousPreservedHead(s.loadPreservedHeads(ctx), run); exists {
+	refs, refsErr := s.loadPreservedHeads(ctx)
+	if refsErr != nil {
+		return blockedPlan(state, StateAmbiguousContext, "blocked_recover_preservation_unreadable", preservationUnreadableMessage)
+	}
+	if ambiguous, exists := ambiguousPreservedHead(refs, run); exists {
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_ambiguous_head", fmt.Sprintf("preservation evidence names head %s in addition to recorded head %s; neither head was discarded, so resolve the ambiguity by naming the exact commit to keep with `no-mistakes sync --recover --resolve-head <commit>`", ambiguous, preserved))
 	}
 
@@ -536,35 +547,43 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if existing, anchorErr := git.ResolveRef(ctx, wd, anchorRef); anchorErr == nil && existing == preserved {
 		anchored = true
 	}
+	// A keep-local recovery that already compare-and-swapped the gate branch but
+	// crashed before stamping custody resumes here. The gate then holds the
+	// operator's own kept head, which is the only third value this recovery may
+	// infer anything from.
+	resumedKeepLocal := keepLocal && anchored && runRefExists && gateHead == local
 	legacyMismatch := false
 	switch {
-	case runRefExists:
-		// The exact run-owned ref was byte-verified against durable authority
-		// above, which is the strongest evidence this head is pipeline work.
-		// The mutable gate branch is provenance, not authority, so it is never
-		// required to agree; this is also what makes an already-pinned legacy
-		// or resumed keep-local recovery idempotent instead of degrading into a
-		// strictly less actionable refusal on the second invocation.
 	case gateHead == preserved:
-		if err := git.PinRunHead(ctx, gateDir, run.ID, preserved); err != nil {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the preserved pipeline head could not be pinned under its exact run-owned gate ref; no custody was returned")
+		// The exact run-owned ref is byte-verified against durable authority
+		// above; pin it when a legacy row never had one.
+		if !runRefExists {
+			if err := git.PinRunHead(ctx, gateDir, run.ID, preserved); err != nil {
+				return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the preserved pipeline head could not be pinned under its exact run-owned gate ref; no custody was returned")
+			}
+			runRefExists = true
 		}
-		runRefExists = true
+	case resumedKeepLocal:
+		// Both exact anchors already exist and the gate holds the kept head.
 	case s.legacySubmittedMismatchEligible(ctx, run, state, gateHead):
 		// Historical rebase failures recorded R while both the clean operator
-		// and mutable gate branch remained at immutable submitted A. Object
-		// existence is accepted only inside this exact shape; it never
-		// authorizes recovery across an unexplained third branch head.
-		if _, err := git.ResolveExactCommit(ctx, gateDir, preserved); err != nil {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the historical recorded pipeline commit is missing from the managed gate object store; no files, refs, or custody state were changed")
+		// and mutable gate branch remained at immutable submitted A. Accepting
+		// an already-pinned run ref here is what makes a repeated recovery
+		// idempotent; it never authorizes recovery across an unexplained third
+		// branch head, which stays with the refusal below whether or not a run
+		// ref exists.
+		if !runRefExists {
+			if _, err := git.ResolveExactCommit(ctx, gateDir, preserved); err != nil {
+				return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the historical recorded pipeline commit is missing from the managed gate object store; no files, refs, or custody state were changed")
+			}
+			if err := git.PinRunHead(ctx, gateDir, run.ID, preserved); err != nil {
+				return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the historical recorded pipeline commit could not be pinned exactly; no custody was returned")
+			}
+			runRefExists = true
 		}
-		if err := git.PinRunHead(ctx, gateDir, run.ID, preserved); err != nil {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the historical recorded pipeline commit could not be pinned exactly; no custody was returned")
-		}
-		runRefExists = true
 		legacyMismatch = true
 	default:
-		return blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_diverged", fmt.Sprintf("the gate branch is at %s, not the preserved pipeline head %s recorded for this run; no files or refs were changed", gateHead, preserved))
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_diverged", fmt.Sprintf("the gate branch is at %s, which is neither the preserved pipeline head %s recorded for this run nor its immutable submitted head; that live third head is never displaced automatically, so no files or refs were changed", gateHead, preserved))
 	}
 
 	if !anchored {
@@ -645,6 +664,9 @@ func (s *Service) ResolveAmbiguousHead(ctx context.Context, chosen string) State
 		return refusal
 	}
 	state, run, _ := s.inspect(ctx)
+	if state.Safety == safetyPreservationUnreadable {
+		return blockedPlan(state, StateAmbiguousContext, "blocked_resolve_preservation_unreadable", preservationUnreadableMessage)
+	}
 	if run == nil || state.State != StatePipelineOwned || state.Safety != "blocked_pipeline_owned_ambiguous" {
 		return blockedPlan(state, state.State, "blocked_resolve_not_ambiguous", "this branch has no ambiguous preserved head to resolve; no files, refs, or custody state were changed")
 	}
@@ -656,7 +678,10 @@ func (s *Service) ResolveAmbiguousHead(ctx context.Context, chosen string) State
 		return blockedPlan(state, StatePipelineOwned, "blocked_resolve_run_active", "a run is active on this branch; drive it to completion or abort it before resolving preserved-head ambiguity; no files or refs were changed")
 	}
 
-	refs := s.loadPreservedHeads(ctx)
+	refs, refsErr := s.loadPreservedHeads(ctx)
+	if refsErr != nil {
+		return blockedPlan(state, StateAmbiguousContext, "blocked_resolve_preservation_unreadable", preservationUnreadableMessage)
+	}
 	runRef, crashRef := git.RunHeadRef(run.ID), git.CrashHeadRef(run.ID)
 	recorded := strings.TrimSpace(run.HeadSHA)
 	runRefHead, runRefExists := refs[runRef]
@@ -943,7 +968,17 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		state.Error = "could not load pipeline push provenance"
 		return state, nil, false
 	}
-	refs := s.loadPreservedHeads(ctx)
+	// The snapshot is an input to run selection as well as to the ambiguity
+	// classification, so an unreadable refs backend makes every downstream
+	// answer unreliable. Reporting one anyway would be the same fail-open in a
+	// different disguise.
+	refs, refsErr := s.loadPreservedHeads(ctx)
+	if refsErr != nil {
+		state.State = StateAmbiguousContext
+		state.Safety = safetyPreservationUnreadable
+		state.Error = preservationUnreadableMessage
+		return state, nil, false
+	}
 	var run *db.Run
 	for _, candidate := range runs {
 		if candidate.Branch != branch {
@@ -1274,25 +1309,33 @@ func (s *Service) classifyPipelineOwned(_ context.Context, state *State, run *db
 	state.NextAction = &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
 }
 
+// safetyPreservationUnreadable marks the one direction this guard may not fail
+// in: the gate's preservation refs could not be read, so no surface may claim a
+// branch is free of preserved-head ambiguity.
+const safetyPreservationUnreadable = "blocked_preservation_unreadable"
+
+const preservationUnreadableMessage = "the managed gate's preservation refs could not be read, so preserved-head ambiguity cannot be ruled out; every head is retained and no files, refs, or custody state were changed"
+
 // preservedHeads is one snapshot of every run-owned and crash preservation ref
 // in the gate, keyed by full ref name. It is read once per inspection: probing
 // per candidate run cost up to three Git subprocesses each and grew linearly
 // with never-pruned run history on every status, home, and TUI refresh.
 type preservedHeads map[string]string
 
-func (s *Service) loadPreservedHeads(ctx context.Context) preservedHeads {
+// loadPreservedHeads separates "there is no managed gate to read" from "the
+// gate's refs could not be read". Only the first is an empty snapshot: an
+// unreadable refs backend must never collapse into "no ambiguity", because that
+// is the one direction in which this guard may not fail. A missing or
+// unconfigured gate is owned by the downstream gate-unavailable refusals.
+func (s *Service) loadPreservedHeads(ctx context.Context) (preservedHeads, error) {
 	gateDir := strings.TrimSpace(s.GateDir)
 	if gateDir == "" {
-		return nil
+		return nil, nil
 	}
 	if _, err := os.Stat(gateDir); err != nil {
-		return nil
+		return nil, nil
 	}
-	refs, err := git.PreservedHeads(ctx, gateDir)
-	if err != nil {
-		return nil
-	}
-	return refs
+	return git.PreservedHeads(ctx, gateDir)
 }
 
 func ambiguousPreservedHead(refs preservedHeads, run *db.Run) (string, bool) {

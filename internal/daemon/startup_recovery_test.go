@@ -237,6 +237,20 @@ func TestCleanupPreservesTerminalOutcomeWhileRecordingCustodyDiagnostic(t *testi
 			if strings.Count(recordedError, db.RunCustodyDiagnosticMarker) != 1 {
 				t.Fatalf("custody diagnostic appended more than once: %q", recordedError)
 			}
+			// A genuinely different later diagnostic must still land: deduping
+			// on the marker prefix would leave `axi status` showing only the
+			// first reason while the real one lived in the daemon log.
+			later := db.RunCustodyDiagnosticMarker + " run ref names a third head"
+			if err := d.RecordRunCustodyDiagnostic(run.ID, later); err != nil {
+				t.Fatal(err)
+			}
+			again, _ := d.GetRun(run.ID)
+			if again.Error == nil || !strings.Contains(*again.Error, later) {
+				t.Fatalf("different custody diagnostic was swallowed: %v", again.Error)
+			}
+			if !strings.Contains(*again.Error, tc.rootError) || again.Status != tc.status {
+				t.Fatalf("second diagnostic lost root cause or status: %v / %s", again.Error, again.Status)
+			}
 		})
 	}
 }
