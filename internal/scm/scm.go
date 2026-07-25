@@ -246,7 +246,7 @@ func (p Provider) CLIName() string {
 	case ProviderGitLab:
 		return "glab"
 	case ProviderBitbucket:
-		return "bb"
+		return "bkt"
 	case ProviderAzureDevOps:
 		return "az"
 	default:
@@ -261,7 +261,7 @@ func (p Provider) AuthCheckCommand() []string {
 	case ProviderGitLab:
 		return []string{"glab", "auth", "status"}
 	case ProviderBitbucket:
-		return []string{"bb", "profile", "which"}
+		return []string{"bkt", "auth", "status", "--json"}
 	case ProviderAzureDevOps:
 		return []string{"az", "account", "show"}
 	default:

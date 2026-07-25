@@ -14,7 +14,7 @@ func TestAuthCheckCommand(t *testing.T) {
 	}{
 		{ProviderGitHub, []string{"gh", "auth", "status"}},
 		{ProviderGitLab, []string{"glab", "auth", "status"}},
-		{ProviderBitbucket, []string{"bb", "profile", "which"}},
+		{ProviderBitbucket, []string{"bkt", "auth", "status", "--json"}},
 		{ProviderAzureDevOps, []string{"az", "account", "show"}},
 	}
 
@@ -33,7 +33,7 @@ func TestAuthCheckCommand(t *testing.T) {
 
 func TestCLIAvailable(t *testing.T) {
 	binDir := t.TempDir()
-	for _, name := range []string{"gh", "bb"} {
+	for _, name := range []string{"gh", "bkt"} {
 		if runtime.GOOS == "windows" {
 			name += ".exe"
 		}
@@ -50,7 +50,7 @@ func TestCLIAvailable(t *testing.T) {
 		t.Fatal("expected gh to be available")
 	}
 	if !CLIAvailable(ProviderBitbucket) {
-		t.Fatal("expected bb to be available")
+		t.Fatal("expected bkt to be available")
 	}
 	if CLIAvailable(ProviderGitLab) {
 		t.Fatal("did not expect glab to be available")

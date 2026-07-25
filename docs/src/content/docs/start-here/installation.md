@@ -51,7 +51,7 @@ make install
 - **Optional, for PRs and CI:**
   - `gh` CLI (GitHub)
   - `glab` CLI (GitLab)
-  - `NO_MISTAKES_BITBUCKET_EMAIL` and `NO_MISTAKES_BITBUCKET_API_TOKEN` (Bitbucket Cloud)
+  - authenticated [`bkt`](https://github.com/avivsinai/bitbucket-cli) v0.30.0+ with a Bitbucket Cloud Keychain context, or `NO_MISTAKES_BITBUCKET_EMAIL` plus `NO_MISTAKES_BITBUCKET_API_TOKEN` (Bitbucket Cloud)
   - `az` CLI with the `azure-devops` extension (Azure DevOps)
 
 Run `no-mistakes doctor` to check native agents, ACP aliases such as `cursor`, provider tools, and whether the configured global runner can start a validation gate.

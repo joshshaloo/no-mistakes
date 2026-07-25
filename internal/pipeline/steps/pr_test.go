@@ -460,12 +460,16 @@ func TestPRStep_BitbucketCreatesNewPRWithoutHTMLLink(t *testing.T) {
 	}
 }
 
-func TestPRStep_BitbucketMissingEnvSkipsBeforeBuildingContent(t *testing.T) {
-	t.Parallel()
+func TestPRStep_BitbucketUnavailableBKTWithoutEnvSkipsBeforeBuildingContent(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
 	ag := &mockAgent{name: "test"}
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = []string{
+		"PATH=" + t.TempDir(),
+		"NO_MISTAKES_BITBUCKET_EMAIL=",
+		"NO_MISTAKES_BITBUCKET_API_TOKEN=",
+	}
 	sctx.Repo.UpstreamURL = "https://bitbucket.org/test/repo.git"
 
 	step := &PRStep{}

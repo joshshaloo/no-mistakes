@@ -18,8 +18,8 @@ import (
 // (unknown provider, missing Bitbucket config, etc) it returns nil and a
 // human-readable skip reason suitable for logging.
 func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, string) {
-	cmdFactory := func(_ context.Context, name string, args ...string) *exec.Cmd {
-		return stepCmd(sctx, name, args...)
+	cmdFactory := func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return stepCmdContext(sctx, ctx, name, args...)
 	}
 	switch provider {
 	case scm.ProviderGitHub:
@@ -66,11 +66,11 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 			// this provider can safely consume fork_url for PR creation.
 			return nil, "fork PR routing for Bitbucket is not implemented"
 		}
-		client, err := bitbucket.NewClientFromEnv(sctx.Env)
+		repo, err := resolveBitbucketRepoRef(sctx.Repo.UpstreamURL, sctx.Run.PRURL)
 		if err != nil {
 			return nil, err.Error()
 		}
-		repo, err := resolveBitbucketRepoRef(sctx.Repo.UpstreamURL, sctx.Run.PRURL)
+		client, err := bitbucket.NewAPIFromEnvOrBKT(sctx.Env, cmdFactory)
 		if err != nil {
 			return nil, err.Error()
 		}
