@@ -17,6 +17,8 @@ func renderLocalBranchStatus(state *branchsync.State, refreshing bool, width int
 	footer := ""
 	if refreshing {
 		message = "Refreshing the exact configured push target..."
+	} else if branchsync.PreservationUnreadable(*state) {
+		message = "The local gate's preservation refs could not be read, so a preserved head differing from the recorded one cannot be ruled out. Every head is retained; custody recovery and fresh runs stay blocked until the gate is readable."
 	} else {
 		switch state.State {
 		case branchsync.StatePipelineOwned:

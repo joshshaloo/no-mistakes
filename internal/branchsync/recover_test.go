@@ -781,8 +781,16 @@ func TestUnreadablePreservationEvidenceFailsClosed(t *testing.T) {
 	service := &Service{DB: f.db, Repo: f.repo, WorkDir: f.local, GateDir: unreadable}
 
 	state := service.InspectCached(f.ctx)
-	if state.Safety != "blocked_preservation_unreadable" {
+	if !PreservationUnreadable(state) {
 		t.Fatalf("unreadable evidence inspection = %#v", state)
+	}
+	// Presenters and fresh-run preflight key off this predicate, so the state
+	// must carry branch-scoped guidance even though no run can be named.
+	if state.Local.Branch == "" || state.Error == "" {
+		t.Fatalf("unreadable state lacks branch-scoped context: %#v", state)
+	}
+	if state.NextAction == nil || state.NextAction.Code != "inspect_gate_preservation" {
+		t.Fatalf("unreadable state next action = %#v", state.NextAction)
 	}
 	for _, keepLocal := range []bool{false, true} {
 		recovered := service.Recover(f.ctx, keepLocal)

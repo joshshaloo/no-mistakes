@@ -335,6 +335,9 @@ func printHumanSyncState(cmd *cobra.Command, state branchsync.State) {
 }
 
 func humanSyncSummary(state branchsync.State) string {
+	if branchsync.PreservationUnreadable(state) {
+		return "the local gate's preservation refs could not be read, so preserved-head ambiguity cannot be ruled out; recovery and fresh runs are blocked until the gate is readable"
+	}
 	switch state.State {
 	case branchsync.StatePipelineOwned:
 		if state.Safety == "blocked_pipeline_owned_recoverable" {
@@ -555,7 +558,10 @@ func cachedBranchSyncField(ctxCmd *cobra.Command, runID string) *toON.Field {
 	}
 	defer closeFn()
 	state := service.InspectCached(ctxCmd.Context())
-	if runID != "" && state.Pipeline.RunID != runID {
+	// Unreadable preservation evidence is branch-scoped: no run can be named
+	// while it holds, so a run-scoped call must still surface it rather than
+	// filter the whole refusal out on an empty pipeline run id.
+	if runID != "" && state.Pipeline.RunID != runID && !branchsync.PreservationUnreadable(state) {
 		return nil
 	}
 	if !relevantCachedSyncState(state) {
@@ -566,6 +572,9 @@ func cachedBranchSyncField(ctxCmd *cobra.Command, runID string) *toON.Field {
 }
 
 func relevantCachedSyncState(state branchsync.State) bool {
+	if branchsync.PreservationUnreadable(state) {
+		return true
+	}
 	switch state.State {
 	case branchsync.StatePipelineOwned, branchsync.StatePushInProgress, branchsync.StateBehind,
 		branchsync.StateLocalAhead, branchsync.StateDiverged, branchsync.StateDirty,

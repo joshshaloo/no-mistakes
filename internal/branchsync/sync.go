@@ -487,7 +487,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		return refusal
 	}
 	state, run, _ := s.inspect(ctx)
-	if state.Safety == safetyPreservationUnreadable {
+	if PreservationUnreadable(state) {
 		return blockedPlan(state, StateAmbiguousContext, "blocked_recover_preservation_unreadable", preservationUnreadableMessage)
 	}
 	if run != nil && run.CustodyReturnedAt != nil {
@@ -664,7 +664,7 @@ func (s *Service) ResolveAmbiguousHead(ctx context.Context, chosen string) State
 		return refusal
 	}
 	state, run, _ := s.inspect(ctx)
-	if state.Safety == safetyPreservationUnreadable {
+	if PreservationUnreadable(state) {
 		return blockedPlan(state, StateAmbiguousContext, "blocked_resolve_preservation_unreadable", preservationUnreadableMessage)
 	}
 	if run == nil || state.State != StatePipelineOwned || state.Safety != "blocked_pipeline_owned_ambiguous" {
@@ -975,8 +975,9 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	refs, refsErr := s.loadPreservedHeads(ctx)
 	if refsErr != nil {
 		state.State = StateAmbiguousContext
-		state.Safety = safetyPreservationUnreadable
+		state.Safety = SafetyPreservationUnreadable
 		state.Error = preservationUnreadableMessage
+		state.NextAction = &NextAction{Code: "inspect_gate_preservation", Command: "no-mistakes doctor"}
 		return state, nil, false
 	}
 	var run *db.Run
@@ -1309,12 +1310,22 @@ func (s *Service) classifyPipelineOwned(_ context.Context, state *State, run *db
 	state.NextAction = &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
 }
 
-// safetyPreservationUnreadable marks the one direction this guard may not fail
+// SafetyPreservationUnreadable marks the one direction this guard may not fail
 // in: the gate's preservation refs could not be read, so no surface may claim a
-// branch is free of preserved-head ambiguity.
-const safetyPreservationUnreadable = "blocked_preservation_unreadable"
+// branch is free of preserved-head ambiguity. It is branch-scoped rather than
+// run-scoped, because the unreadable snapshot is an input to run selection
+// itself - no run can be named while it holds. Presenters must render it and
+// fresh-run preflight must refuse on it; see PreservationUnreadable.
+const SafetyPreservationUnreadable = "blocked_preservation_unreadable"
 
-const preservationUnreadableMessage = "the managed gate's preservation refs could not be read, so preserved-head ambiguity cannot be ruled out; every head is retained and no files, refs, or custody state were changed"
+const preservationUnreadableMessage = "the managed gate's preservation refs could not be read, so preserved-head ambiguity cannot be ruled out for this branch; every head is retained and no files, refs, or custody state were changed"
+
+// PreservationUnreadable reports the branch-scoped unreadable-evidence block.
+// Every surface that filters or renders branch-sync state must consult it, so
+// the refusal cannot become invisible by falling through a state-only switch.
+func PreservationUnreadable(state State) bool {
+	return state.State == StateAmbiguousContext && state.Safety == SafetyPreservationUnreadable
+}
 
 // preservedHeads is one snapshot of every run-owned and crash preservation ref
 // in the gate, keyed by full ref name. It is read once per inspection: probing

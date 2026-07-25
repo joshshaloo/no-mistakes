@@ -564,6 +564,41 @@ func cliGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(out)
 }
 
+// TestUnreadablePreservationEvidenceStaysVisibleAndBlocking pins the presenter
+// half of the fail-closed guard. The refusal is branch-scoped, so it must
+// survive the cached-relevance filter (including a run-scoped call, where no
+// run can be named), carry a human summary, and refuse a fresh run exactly as
+// an outright ambiguity does.
+func TestUnreadablePreservationEvidenceStaysVisibleAndBlocking(t *testing.T) {
+	state := branchsync.State{
+		State:      branchsync.StateAmbiguousContext,
+		Safety:     branchsync.SafetyPreservationUnreadable,
+		Local:      branchsync.LocalState{Branch: "feature/x", Head: "abc", Clean: true},
+		Error:      "the managed gate's preservation refs could not be read",
+		NextAction: &branchsync.NextAction{Code: "inspect_gate_preservation", Command: "no-mistakes doctor"},
+	}
+	if !relevantCachedSyncState(state) {
+		t.Fatal("unreadable preservation evidence was filtered out of cached branch_sync")
+	}
+	summary := humanSyncSummary(state)
+	if !strings.Contains(summary, "preservation refs could not be read") {
+		t.Fatalf("human summary = %q", summary)
+	}
+	rendered := branchSyncField(state)
+	encoded := fmt.Sprintf("%v", rendered.Value)
+	for _, want := range []string{branchsync.SafetyPreservationUnreadable, "inspect_gate_preservation"} {
+		if !strings.Contains(encoded, want) {
+			t.Fatalf("structured branch_sync omits %q: %s", want, encoded)
+		}
+	}
+	// Other ambiguous-context states stay filtered, as before.
+	unrelated := state
+	unrelated.Safety = "blocked_wrong_branch"
+	if relevantCachedSyncState(unrelated) {
+		t.Fatal("unrelated ambiguous context leaked into cached branch_sync")
+	}
+}
+
 func asExitError(err error, target **exitError) bool {
 	for err != nil {
 		if typed, ok := err.(*exitError); ok {

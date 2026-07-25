@@ -266,6 +266,12 @@ func inspectAxiBranchSync(ctx context.Context, env *axiEnv) branchsync.State {
 
 func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.State {
 	state := inspectAxiBranchSync(ctx, env)
+	// Unreadable preservation evidence cannot rule out a terminal run still
+	// holding unresolved custody of this branch, so a fresh run must refuse for
+	// the same reason an outright ambiguity does.
+	if branchsync.PreservationUnreadable(state) {
+		return &state
+	}
 	switch state.State {
 	case branchsync.StatePipelineOwned, branchsync.StatePushInProgress:
 		return &state
