@@ -597,17 +597,15 @@ func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
 // `git rev-parse --verify --quiet` so a missing ref is a clean (nil, false)
 // result rather than a loud error.
 func RefExists(ctx context.Context, dir, ref string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	cmd.Env = NonInteractiveEnv(dir)
-	winproc.Harden(cmd)
-	if err := cmd.Run(); err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && ee.ExitCode() == 1 {
-			return false, nil
-		}
-		return false, fmt.Errorf("git rev-parse %s: %w", ref, err)
+	_, err := Run(ctx, dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if err == nil {
+		return true, nil
 	}
-	return true, nil
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		return false, nil
+	}
+	return false, fmt.Errorf("git rev-parse %s: %w", ref, err)
 }
 
 // ShowFile returns the content of path as stored at the given ref (e.g.

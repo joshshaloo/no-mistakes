@@ -28,9 +28,10 @@ func newSyncCmd() *cobra.Command {
 			"merges genuine divergence, rebases, switches branches, or updates a remote.\n" +
 			"--check performs the fresh proof without applying it.\n" +
 			"--recover returns custody of a branch whose run went terminal with unpublished\n" +
-			"pipeline commits: it anchors the preserved head, fast-forwards a clean behind\n" +
-			"worktree to it, and frees the branch for a fresh run. --recover --keep-local keeps\n" +
-			"the current local head instead and never touches the worktree.",
+			"pipeline commits: it byte-verifies the exact run-owned gate ref, anchors that\n" +
+			"head, and fast-forwards only a clean behind worktree. --recover --keep-local\n" +
+			"preserves both heads, keeps the current local head, and never touches files.\n" +
+			"Missing, raced, third-head, or ambiguous evidence always refuses.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if check && yes {
@@ -68,7 +69,8 @@ func newAxiSyncCmd() *cobra.Command {
 			"verified pipeline head with reset semantics.\n" +
 			"--check performs the same fresh read-only plan. Blocked states change nothing.\n" +
 			"--recover performs the guarded custody return offered by\n" +
-			"next_action.code: recover_custody; --keep-local keeps the current local head.",
+			"next_action.code: recover_custody after byte-verifying the exact run-owned head;\n" +
+			"--keep-local preserves both heads and keeps the current local head.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -201,8 +203,8 @@ func runHumanRecover(cmd *cobra.Command, keepLocal, yes bool) error {
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "  Recovery returns custody of this branch from its terminal run. The only")
 		if keepLocal {
-			fmt.Fprintln(cmd.OutOrStdout(), "  possible changes are anchoring the preserved pipeline commits and moving the")
-			fmt.Fprintln(cmd.OutOrStdout(), "  local gate branch to your current head; the worktree is never touched.")
+			fmt.Fprintln(cmd.OutOrStdout(), "  possible changes are exact preservation refs and a compare-and-swap of the")
+			fmt.Fprintln(cmd.OutOrStdout(), "  local gate branch when needed; both heads survive and files are never touched.")
 		} else {
 			fmt.Fprintln(cmd.OutOrStdout(), "  possible worktree change is a strict fast-forward of this clean branch to the")
 			fmt.Fprintln(cmd.OutOrStdout(), "  preserved pipeline head; anything else refuses without changes.")
@@ -259,7 +261,10 @@ func humanSyncSummary(state branchsync.State) string {
 	switch state.State {
 	case branchsync.StatePipelineOwned:
 		if state.Safety == "blocked_pipeline_owned_recoverable" {
-			return "run ended without publishing its pipeline commits; recover custody with `no-mistakes sync --recover` (or `no-mistakes rerun` to resume validation)"
+			return "run ended without publishing its pipeline commits; recover custody with `no-mistakes sync --recover` (`no-mistakes rerun` resumes only an exact verified run-owned head)"
+		}
+		if state.Safety == "blocked_pipeline_owned_ambiguous" {
+			return "recorded and independently preserved pipeline/live heads differ; both are retained and automatic recovery or rerun is blocked"
 		}
 		return "pipeline fix is not pushed yet; do not make local follow-up commits"
 	case branchsync.StateCustodyReturned:

@@ -24,7 +24,6 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	newHeadSHA := ""
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return nil, err
 	}
@@ -59,7 +58,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		if err != nil {
 			return nil, fmt.Errorf("resolve head after commit: %w", err)
 		}
-		newHeadSHA = headSHA
+		if err := publishPipelineHead(sctx, headSHA); err != nil {
+			return nil, fmt.Errorf("publish push-stage commit: %w", err)
+		}
 	}
 
 	ref := normalizedBranchRef(sctx.Run.Branch)
@@ -78,6 +79,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	headBeingPushed, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve head before push: %w", err)
+	}
+	if headBeingPushed != sctx.Run.HeadSHA {
+		if err := publishPipelineHead(sctx, headBeingPushed); err != nil {
+			return nil, fmt.Errorf("publish exact pre-push head: %w", err)
+		}
 	}
 	if err := assertReviewApprovedPushHead(sctx, headBeingPushed); err != nil {
 		return nil, err
@@ -124,21 +130,6 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		Ref:               ref,
 	}); err != nil {
 		return nil, err
-	}
-
-	if newHeadSHA != "" {
-		if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, newHeadSHA); err != nil {
-			return nil, fmt.Errorf("update local branch ref: %w", err)
-		}
-	}
-
-	// Persist the immutable source that was verified and delivered, never a
-	// fresh read of mutable worktree HEAD after the push.
-	if headBeingPushed != sctx.Run.HeadSHA {
-		sctx.Run.HeadSHA = headBeingPushed
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headBeingPushed); err != nil {
-			return nil, err
-		}
 	}
 
 	sctx.Log("pushed successfully")

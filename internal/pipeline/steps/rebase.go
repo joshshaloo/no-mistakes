@@ -503,11 +503,10 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		return nil, fmt.Errorf("resolve head after rebase: %w", err)
 	}
 	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
-		sctx.Run.HeadSHA = headSHA
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
-			return nil, err
+		if err := publishPipelineHead(sctx, headSHA); err != nil {
+			return nil, fmt.Errorf("publish rebased head: %w", err)
 		}
-		sctx.Log(fmt.Sprintf("updated head SHA to %s", shortSHA(headSHA)))
+		sctx.Log(fmt.Sprintf("published rebased head %s", shortSHA(headSHA)))
 	}
 
 	// Check if the branch has any diff against the default branch.

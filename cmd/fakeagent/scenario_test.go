@@ -73,6 +73,15 @@ func TestApplyActionStagesFiles(t *testing.T) {
 	}
 }
 
+func TestActionFailure(t *testing.T) {
+	if err := actionFailure(Action{}); err != nil {
+		t.Fatalf("empty failure = %v", err)
+	}
+	if err := actionFailure(Action{Failure: "spend limit reached"}); err == nil || err.Error() != "spend limit reached" {
+		t.Fatalf("provider failure = %v", err)
+	}
+}
+
 func TestApplyActionHonorsDelay(t *testing.T) {
 	start := time.Now()
 	if err := applyActionInDir(t.TempDir(), Action{DelayMS: 20}); err != nil {

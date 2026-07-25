@@ -401,6 +401,37 @@ func TestRunOnBareRepoUnderSafeBareRepositoryExplicit(t *testing.T) {
 	}
 }
 
+func TestPreservedHeadRefsOnBareRepoUnderSafeBareRepositoryExplicit(t *testing.T) {
+	setSafeBareRepositoryExplicit(t)
+	ctx := context.Background()
+	work := initTestRepo(t)
+	bare := filepath.Join(t.TempDir(), "gate.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	run(t, work, "git", "push", bare, "HEAD:refs/heads/main")
+	oldHead := run(t, work, "git", "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(work, "preserved.txt"), "preserved\n")
+	run(t, work, "git", "add", "preserved.txt")
+	run(t, work, "git", "commit", "-m", "preserved")
+	newHead := run(t, work, "git", "rev-parse", "HEAD")
+	// Stage only the object; PublishRunHead owns the branch transition.
+	run(t, work, "git", "push", bare, "HEAD:refs/no-mistakes/staging")
+
+	if err := PublishRunHead(ctx, bare, "run-safe-bare", "main", oldHead, newHead); err != nil {
+		t.Fatalf("publish preserved head on bare gate: %v", err)
+	}
+	if exists, err := RefExists(ctx, bare, RunHeadRef("run-safe-bare")); err != nil || !exists {
+		t.Fatalf("run ref exists = %t, %v", exists, err)
+	}
+	if exists, err := RefExists(ctx, bare, RunHeadRef("missing")); err != nil || exists {
+		t.Fatalf("missing run ref exists = %t, %v", exists, err)
+	}
+	if err := VerifyExactRef(ctx, bare, RunHeadRef("run-safe-bare"), newHead); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestWorktreeAddRemoveOnBareRepoUnderSafeBareRepositoryExplicit(t *testing.T) {
 	setSafeBareRepositoryExplicit(t)
 	ctx := context.Background()

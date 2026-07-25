@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -24,6 +25,7 @@ type recoverFixture struct {
 	service   *Service
 	local     string
 	gate      string
+	pipeline  string
 	remote    string
 	base      string
 	submitted string
@@ -93,12 +95,31 @@ func newRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixture {
 	return &recoverFixture{
 		t: t, ctx: ctx, db: database, repo: repo, run: run,
 		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate},
-		local:   local, gate: gate, remote: remote,
+		local:   local, gate: gate, pipeline: pipeline, remote: remote,
 		base: base, submitted: submitted, preserved: preserved,
 	}
 }
 
 func (f *recoverFixture) anchorRef() string { return "refs/no-mistakes/recover/" + f.run.ID }
+
+func (f *recoverFixture) runHeadRef() string { return git.RunHeadRef(f.run.ID) }
+
+func makeLegacyRebaseMismatch(t *testing.T, f *recoverFixture) {
+	t.Helper()
+	// Model a detached rebase R rather than the fixture's ordinary descendant
+	// fix commit: preserve the same final tree on the immutable base, stage the
+	// object into the gate, then remove every ref that names it.
+	tree := mustRun(t, f.pipeline, "rev-parse", f.preserved+"^{tree}")
+	rebased := mustRun(t, f.pipeline, "commit-tree", tree, "-p", f.base, "-m", "historical detached rebase")
+	mustRun(t, f.pipeline, "push", f.gate, rebased+":refs/no-mistakes/legacy-stage")
+	mustRun(t, f.gate, "update-ref", "-d", "refs/no-mistakes/legacy-stage")
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, rebased); err != nil {
+		t.Fatal(err)
+	}
+	f.run.HeadSHA = rebased
+	f.preserved = rebased
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.submitted)
+}
 
 func (f *recoverFixture) custodyReturned() bool {
 	f.t.Helper()
@@ -439,6 +460,204 @@ func TestRecoverGateDivergenceAndUnavailabilityFailClosed(t *testing.T) {
 			t.Fatal("unverifiable preservation stamped custody")
 		}
 	})
+}
+
+// TestRecoverLegacySubmittedHeadMismatchKeepLocalPreservesBothHeads is the
+// exact historical rebase-failure shape: the clean operator and mutable gate
+// branch still name submitted A, while the terminal row records rebased R and
+// R remains as an otherwise-unreferenced gate object. The bounded fallback
+// must pin and byte-verify R without moving A, then return custody.
+func TestRecoverLegacySubmittedHeadMismatchKeepLocalPreservesBothHeads(t *testing.T) {
+	f := newRecoverFixture(t, types.RunFailed)
+	makeLegacyRebaseMismatch(t, f)
+
+	defaultState := f.service.Recover(f.ctx, false)
+	if defaultState.Recovered || defaultState.Safety != "blocked_recover_diverged" || defaultState.Relation != RelationDiverged {
+		t.Fatalf("legacy default recovery = %#v", defaultState)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {
+		t.Fatalf("legacy default did not preserve run head: %s", got)
+	}
+	if got := mustRun(t, f.local, "rev-parse", f.anchorRef()); got != f.preserved {
+		t.Fatalf("legacy default did not fetch exact recovery head: %s", got)
+	}
+	if f.custodyReturned() {
+		t.Fatal("legacy default divergence stamped custody")
+	}
+
+	state := f.service.Recover(f.ctx, true)
+	if !state.Recovered || state.Changed || state.Safety != "custody_returned" {
+		t.Fatalf("legacy keep-local recover = %#v", state)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatalf("local head = %s, want submitted %s", got, f.submitted)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.submitted {
+		t.Fatalf("gate head = %s, want submitted %s", got, f.submitted)
+	}
+	for label, location := range map[string][2]string{
+		"gate run head":  {f.gate, f.runHeadRef()},
+		"local recovery": {f.local, f.anchorRef()},
+	} {
+		if got := mustRun(t, location[0], "rev-parse", location[1]); got != f.preserved {
+			t.Fatalf("%s = %s, want preserved %s", label, got, f.preserved)
+		}
+	}
+	if !f.custodyReturned() {
+		t.Fatal("legacy keep-local recovery did not stamp custody")
+	}
+}
+
+func TestRecoverLegacySubmittedHeadMismatchDirectKeepLocalPreservesBothHeads(t *testing.T) {
+	f := newRecoverFixture(t, types.RunFailed)
+	makeLegacyRebaseMismatch(t, f)
+
+	state := f.service.Recover(f.ctx, true)
+	if !state.Recovered || state.Changed || state.Safety != "custody_returned" {
+		t.Fatalf("direct legacy keep-local recovery = %#v", state)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatalf("direct keep-local moved local head to %s", got)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.submitted {
+		t.Fatalf("direct keep-local moved submitted gate head to %s", got)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {
+		t.Fatalf("direct keep-local run ref = %s", got)
+	}
+	if got := mustRun(t, f.local, "rev-parse", f.anchorRef()); got != f.preserved {
+		t.Fatalf("direct keep-local recovery ref = %s", got)
+	}
+}
+
+func TestRecoverLegacySubmittedHeadMismatchMissingObjectRefuses(t *testing.T) {
+	f := newRecoverFixture(t, types.RunFailed)
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.submitted, f.preserved)
+	mustRun(t, f.gate, "reflog", "expire", "--expire=now", "--all")
+	mustRun(t, f.gate, "gc", "--prune=now")
+	if _, err := git.Run(f.ctx, f.gate, "cat-file", "-e", f.preserved+"^{commit}"); err == nil {
+		t.Fatal("fixture preserved object still exists after prune")
+	}
+
+	state := f.service.Recover(f.ctx, true)
+	if state.Recovered || state.Changed || state.Safety != "blocked_recover_preserve_failed" {
+		t.Fatalf("missing-object recovery = %#v", state)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatal("missing-object recovery moved local head")
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.submitted {
+		t.Fatal("missing-object recovery moved gate branch")
+	}
+	if exists, _ := git.RefExists(f.ctx, f.gate, f.runHeadRef()); exists {
+		t.Fatal("missing-object recovery created a run head ref")
+	}
+	if f.custodyReturned() {
+		t.Fatal("missing-object recovery stamped custody")
+	}
+}
+
+func TestRecoverLegacySubmittedHeadMismatchNewerActiveOwnerBlocks(t *testing.T) {
+	f := newRecoverFixture(t, types.RunFailed)
+	makeLegacyRebaseMismatch(t, f)
+	active, err := f.db.InsertRun(f.repo.ID, "feature/recover", f.submitted, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunHeadSHA(active.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunStatus(active.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+
+	state := f.service.Recover(f.ctx, true)
+	if state.Recovered || state.Safety != "blocked_recover_run_active" {
+		t.Fatalf("legacy recovery with newer owner = %#v", state)
+	}
+	if exists, _ := git.RefExists(f.ctx, f.gate, f.runHeadRef()); exists {
+		t.Fatal("legacy recovery pinned the old run while a newer owner was active")
+	}
+	if f.custodyReturned() {
+		t.Fatal("legacy recovery stamped old custody while a newer owner was active")
+	}
+}
+
+func TestRecoverLegacySubmittedHeadMismatchThirdGateHeadRefuses(t *testing.T) {
+	f := newRecoverFixture(t, types.RunFailed)
+	writer := filepath.Join(t.TempDir(), "writer")
+	mustRun(t, filepath.Dir(writer), "clone", f.gate, writer)
+	configureIdentity(t, writer)
+	mustRun(t, writer, "checkout", "feature/recover")
+	mustWrite(t, filepath.Join(writer, "third.txt"), "third\n")
+	mustRun(t, writer, "add", "third.txt")
+	mustRun(t, writer, "commit", "-m", "unexplained third head")
+	third := mustRun(t, writer, "rev-parse", "HEAD")
+	mustRun(t, writer, "push", "origin", "HEAD:refs/heads/feature/recover")
+
+	state := f.service.Recover(f.ctx, true)
+	if state.Recovered || state.Safety != "blocked_recover_gate_diverged" {
+		t.Fatalf("third-head recovery = %#v", state)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != third {
+		t.Fatal("third-head recovery clobbered gate winner")
+	}
+	if exists, _ := git.RefExists(f.ctx, f.gate, f.runHeadRef()); exists {
+		t.Fatal("third-head recovery treated loose object existence as authority")
+	}
+	if f.custodyReturned() {
+		t.Fatal("third-head recovery stamped custody")
+	}
+}
+
+func TestRecoverLegacySubmittedHeadMismatchRechecksGateAfterPin(t *testing.T) {
+	f := newRecoverFixture(t, types.RunFailed)
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.submitted, f.preserved)
+	var winner string
+	f.service.beforeLegacyRecoveryRecheck = func() {
+		writer := filepath.Join(t.TempDir(), "racer")
+		mustRun(t, filepath.Dir(writer), "clone", f.gate, writer)
+		configureIdentity(t, writer)
+		mustRun(t, writer, "checkout", "feature/recover")
+		mustWrite(t, filepath.Join(writer, "race.txt"), "race\n")
+		mustRun(t, writer, "add", "race.txt")
+		mustRun(t, writer, "commit", "-m", "recovery race")
+		winner = mustRun(t, writer, "rev-parse", "HEAD")
+		mustRun(t, writer, "push", "origin", "HEAD:refs/heads/feature/recover")
+	}
+
+	state := f.service.Recover(f.ctx, true)
+	if state.Recovered || state.Safety != "blocked_recover_assumptions_changed" {
+		t.Fatalf("racing legacy recovery = %#v", state)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != winner {
+		t.Fatal("racing legacy recovery clobbered gate winner")
+	}
+	if f.custodyReturned() {
+		t.Fatal("racing legacy recovery stamped custody")
+	}
+}
+
+func TestAmbiguousPublishedRefBlocksFreshRunBeforeCleanupWhenDatabaseStayedSubmitted(t *testing.T) {
+	f := newRecoverFixture(t, types.RunFailed)
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, f.submitted); err != nil {
+		t.Fatal(err)
+	}
+	f.run.HeadSHA = f.submitted
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+
+	state := f.service.InspectCached(f.ctx)
+	if state.State != StatePipelineOwned || state.Safety != "blocked_pipeline_owned_ambiguous" {
+		t.Fatalf("submitted-authority ambiguous state = %#v", state)
+	}
+	if state.NextAction == nil || state.NextAction.Code != "inspect_ambiguous_custody" {
+		t.Fatalf("ambiguous next action = %#v", state.NextAction)
+	}
+	if recovered := f.service.Recover(f.ctx, true); recovered.Recovered || recovered.Safety != "blocked_recover_ambiguous_head" {
+		t.Fatalf("ambiguous submitted-authority recover = %#v", recovered)
+	}
 }
 
 // TestRecoverTerminalPostPushRunWithMovedHead covers the post-push class cell:

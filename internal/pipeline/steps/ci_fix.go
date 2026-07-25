@@ -149,6 +149,14 @@ func (s *CIStep) commitAndPush(sctx *pipeline.StepContext) (bool, error) {
 func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA string) (bool, error) {
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	pushURL := resolvePushURL(sctx)
+	lastSeenSHA := sctx.Run.HeadSHA
+	if newHeadSHA != lastSeenSHA {
+		if err := publishPipelineHeadWithRunner(sctx, newHeadSHA, func(args ...string) (string, error) {
+			return stepGitRun(sctx, args...)
+		}); err != nil {
+			return false, fmt.Errorf("publish CI fix head before push: %w", err)
+		}
+	}
 
 	// Anchor the force-with-lease to the head the run last recorded for this
 	// branch (what the pipeline last pushed/observed), NOT to a SHA freshly read
@@ -157,7 +165,7 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 	// commit that reached origin out of band. resolveForcePushDecision refuses
 	// the push when the remote carries commits this run never incorporated.
 	gitRun := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
-	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, newHeadSHA, sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, newHeadSHA, lastSeenSHA, sctx.Run.BaseSHA)
 	if err != nil {
 		return false, err
 	}
@@ -189,27 +197,12 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		if err := persistBinding(); err != nil {
 			return false, err
 		}
-		if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
-			return false, fmt.Errorf("update local branch ref: %w", err)
-		}
-		sctx.Run.HeadSHA = newHeadSHA
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, newHeadSHA); err != nil {
-			return false, err
-		}
 		return false, nil
 	}
 	if err := stepGitPush(sctx, pushURL, ref, decision.remoteSHA, !decision.newBranch); err != nil {
 		return false, fmt.Errorf("push: %w", err)
 	}
 	if err := persistBinding(); err != nil {
-		return false, err
-	}
-
-	if _, err := stepGitRun(sctx, "update-ref", ref, newHeadSHA); err != nil {
-		return false, fmt.Errorf("update local branch ref: %w", err)
-	}
-	sctx.Run.HeadSHA = newHeadSHA
-	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, newHeadSHA); err != nil {
 		return false, err
 	}
 

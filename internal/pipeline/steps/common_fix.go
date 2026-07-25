@@ -148,15 +148,44 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return err
 	}
-	ref := normalizedBranchRef(sctx.Run.Branch)
-	if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, headSHA); err != nil {
-		return fmt.Errorf("update local branch ref: %w", err)
-	}
-	sctx.Run.HeadSHA = headSHA
-	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
-		return err
+	if err := publishPipelineHead(sctx, headSHA); err != nil {
+		return fmt.Errorf("publish %s fix head: %w", stepName, err)
 	}
 	sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
+	return nil
+}
+
+// publishPipelineHead is the single ordering boundary for pre-push pipeline
+// commits. Git first proves and pins the exact commit under the run-owned ref,
+// then compare-and-swaps the mutable branch from the previously recorded head.
+// Durable and in-memory run authority advance only after both publications
+// succeed. If the DB write fails, Git still retains the exact new head and the
+// cleanup guard leaves the worktree for reconciliation.
+func publishPipelineHead(sctx *pipeline.StepContext, headSHA string) error {
+	return publishPipelineHeadWithRunner(sctx, headSHA, func(args ...string) (string, error) {
+		return git.Run(sctx.Ctx, sctx.WorkDir, args...)
+	})
+}
+
+func publishPipelineHeadWithRunner(sctx *pipeline.StepContext, headSHA string, run git.CommandRunner) error {
+	oldHead := strings.TrimSpace(sctx.Run.HeadSHA)
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" {
+		return fmt.Errorf("new pipeline head is empty")
+	}
+	if headSHA == oldHead {
+		if err := git.PinExactCommitWithRunner(run, git.RunHeadRef(sctx.Run.ID), headSHA); err != nil {
+			return fmt.Errorf("preserve unchanged pipeline head: %w", err)
+		}
+		return nil
+	}
+	if err := git.PublishRunHeadWithRunner(run, sctx.Run.ID, sctx.Run.Branch, oldHead, headSHA); err != nil {
+		return err
+	}
+	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
+		return fmt.Errorf("record published pipeline head %s (preserved at %s): %w", headSHA, git.RunHeadRef(sctx.Run.ID), err)
+	}
+	sctx.Run.HeadSHA = headSHA
 	return nil
 }
 

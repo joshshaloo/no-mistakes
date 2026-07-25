@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"os"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -36,11 +38,8 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 	}
 	defer d.Close()
 
-	repo, err := d.InsertRepoWithID("repo1", "/nonexistent/work", "https://example.com/owner/repo1", "main")
-	if err != nil {
-		t.Fatal(err)
-	}
-	activeRun, err := d.InsertRun(repo.ID, "feature", "headsha", "basesha")
+	repo, headSHA := setupTestGitRepo(t, p, d, "repo1")
+	activeRun, err := d.InsertRun(repo.ID, "feature", headSHA, headSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,15 +48,13 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 	}
 
 	activeWT := p.WorktreeDir(repo.ID, activeRun.ID)
-	if err := os.MkdirAll(activeWT, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(activeWT+"/marker", []byte("still running"), 0o644); err != nil {
+	if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), activeWT, headSHA); err != nil {
 		t.Fatal(err)
 	}
 
-	// A terminal run's worktree, for contrast: cleanup should remove this one.
-	terminalRun, err := d.InsertRun(repo.ID, "old-branch", "headsha2", "basesha2")
+	// A terminal run's real managed worktree, for contrast: cleanup should pin
+	// its exact recorded head and then remove it.
+	terminalRun, err := d.InsertRun(repo.ID, "old-branch", headSHA, headSHA)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +62,7 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 		t.Fatal(err)
 	}
 	terminalWT := p.WorktreeDir(repo.ID, terminalRun.ID)
-	if err := os.MkdirAll(terminalWT, 0o755); err != nil {
+	if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), terminalWT, headSHA); err != nil {
 		t.Fatal(err)
 	}
 
@@ -84,6 +81,165 @@ func TestRecoverOnStartup_DoesNotDeleteActiveRunWorktree(t *testing.T) {
 	}
 	if got.Status != types.RunPending {
 		t.Fatalf("expected active run to remain pending, got %s", got.Status)
+	}
+}
+
+func TestCleanupRunWorktreePinsRecordedHeadBeforeRemoval(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	repo, head := setupTestGitRepo(t, p, d, "cleanup-pin")
+	run, err := d.InsertRun(repo.ID, "feature", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	worktree := p.WorktreeDir(repo.ID, run.ID)
+	if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, head); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cleanupRunWorktree(context.Background(), d, p.RepoDir(repo.ID), worktree, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("worktree was not removed: %v", err)
+	}
+	if err := git.VerifyExactRef(context.Background(), p.RepoDir(repo.ID), git.RunHeadRef(run.ID), head); err != nil {
+		t.Fatalf("recorded head not pinned before removal: %v", err)
+	}
+}
+
+func TestCleanupRunWorktreeRetainsAmbiguousLiveHead(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	repo, recorded := setupTestGitRepo(t, p, d, "cleanup-ambiguous")
+	run, err := d.InsertRun(repo.ID, "feature", recorded, recorded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktree := p.WorktreeDir(repo.ID, run.ID)
+	if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, recorded); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, worktree, "config", "user.name", "test")
+	gitCmd(t, worktree, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(worktree+"/ambiguous.txt", []byte("pipeline candidate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, worktree, "add", "ambiguous.txt")
+	gitCmd(t, worktree, "commit", "-m", "unrecorded pipeline candidate")
+	live := gitOutput(t, worktree, "rev-parse", "HEAD")
+	// Model Git publication succeeding before the run-head DB write failed.
+	if err := git.PinRunHead(context.Background(), p.RepoDir(repo.ID), run.ID, live); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := cleanupRunWorktree(context.Background(), d, p.RepoDir(repo.ID), worktree, run.ID); err == nil || !errors.Is(err, errAmbiguousWorktreeHead) {
+		t.Fatalf("cleanup error = %v, want ambiguous refusal", err)
+	}
+	if _, err := os.Stat(worktree); err != nil {
+		t.Fatalf("ambiguous worktree was removed: %v", err)
+	}
+	if err := git.VerifyExactRef(context.Background(), p.RepoDir(repo.ID), git.CrashHeadRef(run.ID), live); err != nil {
+		t.Fatalf("ambiguous live head was not separately pinned: %v", err)
+	}
+	if err := git.VerifyExactRef(context.Background(), p.RepoDir(repo.ID), git.RunHeadRef(run.ID), recorded); err != nil {
+		t.Fatalf("recorded authority was not separately pinned: %v", err)
+	}
+	reloaded, _ := d.GetRun(run.ID)
+	if reloaded.HeadSHA != recorded {
+		t.Fatalf("ambiguous live head was silently promoted: %s", reloaded.HeadSHA)
+	}
+}
+
+func TestCrashRecoveryPinsRecordedHeadBeforeFailureAndRetainsAmbiguity(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ambiguous bool
+	}{
+		{name: "recorded head"},
+		{name: "ambiguous live head", ambiguous: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			d, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			repo, recorded := setupTestGitRepo(t, p, d, "startup-"+tc.name)
+			run, err := d.InsertRun(repo.ID, "feature", recorded, recorded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			worktree := p.WorktreeDir(repo.ID, run.ID)
+			if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, recorded); err != nil {
+				t.Fatal(err)
+			}
+			live := recorded
+			if tc.ambiguous {
+				gitCmd(t, worktree, "config", "user.name", "test")
+				gitCmd(t, worktree, "config", "user.email", "test@example.com")
+				if err := os.WriteFile(worktree+"/candidate.txt", []byte("candidate\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, worktree, "add", "candidate.txt")
+				gitCmd(t, worktree, "commit", "-m", "crash candidate")
+				live = gitOutput(t, worktree, "rev-parse", "HEAD")
+			}
+
+			preserved := preserveActiveRunHeadsBeforeCrashRecovery(d, p, nil)
+			if _, retainedActive := preserved[run.ID]; retainedActive {
+				t.Fatal("verifiable crash evidence unnecessarily retained the row active")
+			}
+			if !tc.ambiguous {
+				if err := git.VerifyExactRef(context.Background(), p.RepoDir(repo.ID), git.RunHeadRef(run.ID), recorded); err != nil {
+					t.Fatalf("recorded head was not pinned before stale failure: %v", err)
+				}
+			} else if err := git.VerifyExactRef(context.Background(), p.RepoDir(repo.ID), git.CrashHeadRef(run.ID), live); err != nil {
+				t.Fatalf("crash candidate was not pinned: %v", err)
+			}
+			if _, err := d.RecoverStaleRunsExcept("daemon crashed during execution", preserved); err != nil {
+				t.Fatal(err)
+			}
+			cleanupOrphanWorktrees(d, p)
+			if tc.ambiguous {
+				if _, err := os.Stat(worktree); err != nil {
+					t.Fatalf("ambiguous crash worktree was removed: %v", err)
+				}
+			} else if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+				t.Fatalf("exactly pinned crash worktree was not removed: %v", err)
+			}
+			reloaded, _ := d.GetRun(run.ID)
+			if reloaded.Status != types.RunFailed || reloaded.HeadSHA != recorded {
+				t.Fatalf("recovered run = %#v", reloaded)
+			}
+		})
 	}
 }
 

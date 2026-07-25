@@ -14,7 +14,11 @@ func newRerunCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "rerun",
 		Short: "Rerun the pipeline for the current branch",
-		Args:  cobra.NoArgs,
+		Long: "Reruns the current branch. When a terminal run has unpublished pipeline\n" +
+			"commits, rerun starts only from its exact verified run-owned gate head. A\n" +
+			"missing, mismatched, stale, or ambiguous head refuses with custody-recovery\n" +
+			"guidance instead of silently rerunning the mutable branch.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return trackCommand("rerun", func() error {
 				p, d, err := openResources()

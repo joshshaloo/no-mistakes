@@ -51,6 +51,11 @@ type Action struct {
 
 	// DelayMS pauses before responding, for e2e tests that need an observable active run.
 	DelayMS int `yaml:"delay_ms,omitempty"`
+
+	// Failure makes the fake invocation fail after any requested edits/staging.
+	// It lets lifecycle e2e tests model provider failures (for example a spend
+	// limit) at an exact pipeline phase without replacing the whole fake binary.
+	Failure string `yaml:"failure,omitempty"`
 }
 
 // Edit performs a Replace of Old with New in Path. If Old is empty the
@@ -128,6 +133,13 @@ func applyAction(action Action) error {
 		return fmt.Errorf("get working directory: %w", err)
 	}
 	return applyActionInDir(wd, action)
+}
+
+func actionFailure(action Action) error {
+	if strings.TrimSpace(action.Failure) == "" {
+		return nil
+	}
+	return errors.New(action.Failure)
 }
 
 func applyActionInDir(wd string, action Action) error {

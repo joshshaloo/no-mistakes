@@ -386,6 +386,10 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	}
 	logStartupPhase("parked_runs", parkedStarted, "preserved", len(plans))
 
+	preserveHeadsStarted := time.Now()
+	preserved = preserveActiveRunHeadsBeforeCrashRecovery(d, p, preserved)
+	logStartupPhase("stale_run_heads", preserveHeadsStarted, "retained_active", len(preserved))
+
 	staleStarted := time.Now()
 	count, err := d.RecoverStaleRunsExcept("daemon crashed during execution", preserved)
 	if err != nil {
@@ -444,13 +448,26 @@ func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths) {
 				slog.Info("skipping worktree cleanup", "path", wtPath, "reason", reason)
 				continue
 			}
+			run, lookupErr := d.GetRun(runID)
+			if lookupErr != nil {
+				slog.Warn("failed to load run before orphan cleanup", "path", wtPath, "error", lookupErr)
+				continue
+			}
+			if run != nil {
+				if err := cleanupRunWorktree(ctx, d, gateDir, wtPath, runID); err != nil {
+					slog.Warn("retained orphaned worktree because its recorded head was not safely pinned", "path", wtPath, "error", err)
+					continue
+				}
+				slog.Info("removed safely preserved orphaned worktree", "path", wtPath)
+				continue
+			}
 			if err := git.WorktreeRemove(ctx, gateDir, wtPath); err != nil {
-				slog.Warn("git worktree remove failed, falling back to os.RemoveAll", "path", wtPath, "error", err)
+				slog.Warn("unowned git worktree remove failed, falling back to os.RemoveAll", "path", wtPath, "error", err)
 				if err := os.RemoveAll(wtPath); err != nil {
-					slog.Warn("failed to remove orphaned worktree", "path", wtPath, "error", err)
+					slog.Warn("failed to remove unowned orphaned worktree", "path", wtPath, "error", err)
 				}
 			} else {
-				slog.Info("removed orphaned worktree", "path", wtPath)
+				slog.Info("removed unowned orphaned worktree", "path", wtPath)
 			}
 		}
 		// Remove empty repo dir.
