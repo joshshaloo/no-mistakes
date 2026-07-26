@@ -356,6 +356,10 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if err := actionFailure(action); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
 		framed, err := rewriteOpencodeFixtureSSE(s.fixture, action, sessionID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "fakeagent: opencode sse patch: %v\n", err)
@@ -377,6 +381,10 @@ func (s *fakeOpencodeServer) handleMessage(w http.ResponseWriter, r *http.Reques
 	action := s.scenario.Match(prompt)
 	if err := applyActionInDir(s.sessionDir(sessionID), action); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := actionFailure(action); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
 

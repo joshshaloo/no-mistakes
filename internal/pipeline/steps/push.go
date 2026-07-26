@@ -24,7 +24,6 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	newHeadSHA := ""
 	if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
 		return nil, err
 	}
@@ -59,7 +58,16 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		if err != nil {
 			return nil, fmt.Errorf("resolve head after commit: %w", err)
 		}
-		newHeadSHA = headSHA
+		// Review approval gates publication, not just the network push. A head
+		// that fails this check must never become run-owned authority or move
+		// the gate branch, or custody recovery and rerun would treat an
+		// unreviewed commit as authoritative pipeline work.
+		if err := assertReviewApprovedPushHead(sctx, headSHA); err != nil {
+			return nil, err
+		}
+		if err := publishPipelineHead(sctx, headSHA); err != nil {
+			return nil, fmt.Errorf("publish push-stage commit: %w", err)
+		}
 	}
 
 	ref := normalizedBranchRef(sctx.Run.Branch)
@@ -81,6 +89,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	if err := assertReviewApprovedPushHead(sctx, headBeingPushed); err != nil {
 		return nil, err
+	}
+	if headBeingPushed != sctx.Run.HeadSHA {
+		if err := publishPipelineHead(sctx, headBeingPushed); err != nil {
+			return nil, fmt.Errorf("publish exact pre-push head: %w", err)
+		}
 	}
 
 	// Decide whether force-pushing would discard commits the pipeline never saw.
@@ -124,21 +137,6 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		Ref:               ref,
 	}); err != nil {
 		return nil, err
-	}
-
-	if newHeadSHA != "" {
-		if _, err := git.Run(ctx, sctx.WorkDir, "update-ref", ref, newHeadSHA); err != nil {
-			return nil, fmt.Errorf("update local branch ref: %w", err)
-		}
-	}
-
-	// Persist the immutable source that was verified and delivered, never a
-	// fresh read of mutable worktree HEAD after the push.
-	if headBeingPushed != sctx.Run.HeadSHA {
-		sctx.Run.HeadSHA = headBeingPushed
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headBeingPushed); err != nil {
-			return nil, err
-		}
 	}
 
 	sctx.Log("pushed successfully")

@@ -44,6 +44,13 @@ var canonicalBranchSyncPhrases = []string{
 	"recover_custody",
 	"no-mistakes axi sync --recover",
 	"preserved in the local gate",
+	"exact run-owned ref",
+	// Ambiguous preservation evidence has exactly one supported exit and the
+	// tool must never pick a head: the operator-named resolution and the
+	// archive-never-discard promise must stay on every guidance surface.
+	"resolve_ambiguous_custody",
+	"--resolve-head",
+	"archived",
 }
 
 const canonicalPipelineAgentPrerequisite = "a supported native agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through `acpx`"

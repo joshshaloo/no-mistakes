@@ -168,6 +168,7 @@ no-mistakes axi status
 no-mistakes axi sync --check
 no-mistakes axi sync
 no-mistakes axi sync --recover
+no-mistakes axi sync --recover --resolve-head <commit>
 no-mistakes axi respond --action approve
 no-mistakes axi logs --step review --full
 no-mistakes axi abort
@@ -176,7 +177,8 @@ no-mistakes axi abort --run <id>
 
 Before any post-pipeline local commit or fresh run, read `branch_sync`.
 Only when its structured `next_action.code` is `sync`, run `no-mistakes axi sync` first.
-When `next_action.code` is `recover_custody` - a terminal run left unpublished pipeline commits preserved in the local gate - run `no-mistakes axi sync --recover` to return custody, or `no-mistakes rerun` to resume validating the preserved head.
+When `next_action.code` is `recover_custody` - a terminal run left unpublished pipeline commits preserved in the local gate under an exact run-owned ref - run `no-mistakes axi sync --recover` to return custody. `no-mistakes rerun` resumes validation only when that exact ref and gate branch still agree; otherwise it refuses with custody-recovery guidance.
+When `next_action.code` is `resolve_ambiguous_custody`, preservation evidence names more than one head and nothing may be chosen for the user: relay the candidate commits and run `no-mistakes axi sync --recover --resolve-head <commit>` only with the exact commit they name. Every losing head is archived, never discarded.
 When `next_action.code` is `continue_active_run`, run the reported command and keep driving the active run.
 If synchronization is blocked, process that state instead of improvising reset, stash, merge, rebase, force, or branch replacement.
 Then commit follow-up work on top so every pipeline fix commit remains in the branch.

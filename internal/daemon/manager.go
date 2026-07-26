@@ -306,8 +306,8 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
-			if err := git.WorktreeRemove(context.Background(), plan.gateDir, plan.workDir); err != nil {
-				slog.Warn("failed to remove recovered worktree", "path", plan.workDir, "error", err)
+			if err := cleanupRunWorktree(context.Background(), m.db, plan.gateDir, plan.workDir, plan.run.ID); err != nil {
+				slog.Warn("failed to safely remove recovered worktree", "path", plan.workDir, "error", err)
 			}
 			m.mu.Lock()
 			delete(m.executors, plan.run.ID)
@@ -539,8 +539,11 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	return m.startRun(ctx, repo, branch, params.New, params.Old, "push", params.SkipSteps, params.Intent)
 }
 
-// HandleRerun creates a new run for the latest gate head on a branch. An
-// optional intent is stamped onto the new run.
+// HandleRerun creates a new run from exact verified run authority. A terminal
+// unpublished head is consumed from its run-owned gate ref, never inferred
+// from the mutable branch. If that proof or branch continuity is absent, rerun
+// refuses with custody-recovery guidance instead of silently validating stale
+// submitted work.
 func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, skipSteps []types.StepName, intent string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
@@ -549,19 +552,35 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 	if repo == nil {
 		return "", fmt.Errorf("unknown repo %s", repoID)
 	}
+	headSHA, baseSHA, err := m.resolveRerunHead(ctx, repo, branch)
+	if err != nil {
+		return "", err
+	}
+	return m.startRun(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent)
+}
 
+func (m *RunManager) resolveRerunHead(ctx context.Context, repo *db.Repo, branch string) (string, string, error) {
 	gateDir := m.paths.RepoDir(repo.ID)
-	headSHA, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
+	gateHead, err := git.ResolveRef(ctx, gateDir, "refs/heads/"+branch)
 	if err != nil {
-		return "", fmt.Errorf("resolve gate head: %w", err)
+		return "", "", fmt.Errorf("resolve gate head: %w", err)
 	}
-
-	runs, err := m.db.GetRunsByRepo(repoID)
+	runs, err := m.db.GetRunsByRepo(repo.ID)
 	if err != nil {
-		return "", fmt.Errorf("get runs: %w", err)
+		return "", "", fmt.Errorf("get runs: %w", err)
 	}
-
+	// One Git read of every preservation ref: probing per candidate walked
+	// unbounded run history with three subprocesses each.
+	preservedRefs, err := git.PreservedHeads(ctx, gateDir)
+	if err != nil {
+		return "", "", fmt.Errorf("verify run-owned preservation refs: %w", err)
+	}
+	// Custody ownership is selected exactly once, newest first, using the same
+	// rule branch inspection uses. Choosing an ambiguous run independently of
+	// an unresolved one made rerun refuse about a different, older run than the
+	// one the operator was told to recover.
 	var latestForBranch *db.Run
+	var owner *db.Run
 	var matchingHead *db.Run
 	for _, run := range runs {
 		if run.Branch != branch {
@@ -570,21 +589,66 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch string, ski
 		if latestForBranch == nil {
 			latestForBranch = run
 		}
-		if run.HeadSHA == headSHA {
+		if owner == nil && (terminalUnpublishedHead(run) || ambiguousPreservedRun(preservedRefs, run)) {
+			owner = run
+		}
+		if run.HeadSHA == gateHead && matchingHead == nil {
 			matchingHead = run
-			break
 		}
 	}
 	if latestForBranch == nil {
-		return "", fmt.Errorf("no previous run for branch %s", branch)
+		return "", "", fmt.Errorf("no previous run for branch %s", branch)
 	}
-
+	if owner != nil {
+		if ambiguousPreservedRun(preservedRefs, owner) {
+			return "", "", rerunAmbiguityError(owner)
+		}
+		exact := strings.TrimSpace(owner.HeadSHA)
+		if preservedRefs[git.RunHeadRef(owner.ID)] != exact {
+			return "", "", rerunCustodyError(owner, "the exact run-owned head is not verified")
+		}
+		if gateHead != exact {
+			return "", "", rerunCustodyError(owner, "the mutable gate branch no longer equals the exact preserved head")
+		}
+		return exact, owner.BaseSHA, nil
+	}
 	baseSHA := latestForBranch.BaseSHA
 	if matchingHead != nil {
 		baseSHA = matchingHead.BaseSHA
 	}
+	return gateHead, baseSHA, nil
+}
 
-	return m.startRun(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent)
+// ambiguousPreservedRun reports preservation evidence that names a head other
+// than durable run authority. Neither head may be promoted or discarded
+// automatically, so rerun refuses until an operator names the exact commit.
+func ambiguousPreservedRun(preservedRefs map[string]string, run *db.Run) bool {
+	if run == nil || run.CustodyReturnedAt != nil || !terminalRunStatus(run.Status) {
+		return false
+	}
+	if candidate, exists := preservedRefs[git.CrashHeadRef(run.ID)]; exists && candidate != run.HeadSHA {
+		return true
+	}
+	candidate, exists := preservedRefs[git.RunHeadRef(run.ID)]
+	return exists && candidate != run.HeadSHA
+}
+
+func terminalUnpublishedHead(run *db.Run) bool {
+	if run == nil || run.CustodyReturnedAt != nil || (run.Status != types.RunCompleted && run.Status != types.RunFailed && run.Status != types.RunCancelled) {
+		return false
+	}
+	if run.LastPushedSHA != nil {
+		return run.HeadSHA != *run.LastPushedSHA
+	}
+	return run.SubmittedHeadSHA != nil && run.HeadSHA != *run.SubmittedHeadSHA
+}
+
+func rerunCustodyError(run *db.Run, reason string) error {
+	return fmt.Errorf("refusing rerun: terminal run %s has unresolved unpublished pipeline head %s (%s); recover custody with `no-mistakes axi sync --recover` before starting another run", run.ID, run.HeadSHA, reason)
+}
+
+func rerunAmbiguityError(run *db.Run) error {
+	return fmt.Errorf("refusing rerun: terminal run %s retains preservation evidence naming a head other than recorded head %s; no head was discarded, so recover custody by naming the exact commit to keep with `no-mistakes axi sync --recover --resolve-head <commit>` before starting another run", run.ID, run.HeadSHA)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
@@ -640,8 +704,17 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		}
 	}
 
-	// Create worktree from the gate bare repo.
+	// Pin the submitted head immediately after the run ID exists. Submitted
+	// commits are already gate branch authority, but creating the run-owned ref
+	// here means every later cleanup and rerun has one exact preservation path.
 	gateDir := m.paths.RepoDir(repo.ID)
+	if err := git.PinRunHead(ctx, gateDir, run.ID, headSHA); err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("preserve initial run head: %s", err))
+		trackStartFailure("preserve_initial_head")
+		return "", fmt.Errorf("preserve initial run head: %w", err)
+	}
+
+	// Create worktree from the gate bare repo.
 	wtDir := m.paths.WorktreeDir(repo.ID, run.ID)
 	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
@@ -678,8 +751,8 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	bgOwnsWorktree := false
 	defer func() {
 		if !bgOwnsWorktree {
-			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
-				slog.Warn("failed to remove worktree during setup cleanup", "path", wtDir, "error", rmErr)
+			if rmErr := cleanupRunWorktree(context.Background(), m.db, gateDir, wtDir, run.ID); rmErr != nil {
+				slog.Warn("failed to safely remove worktree during setup cleanup", "path", wtDir, "error", rmErr)
 			}
 		}
 	}()
@@ -836,9 +909,10 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			ag.Close()
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
-			// Clean up worktree.
-			if rmErr := git.WorktreeRemove(context.Background(), gateDir, wtDir); rmErr != nil {
-				slog.Warn("failed to remove worktree", "path", wtDir, "error", rmErr)
+			// Clean up only after the exact recorded head is pinned. A mismatch
+			// retains the worktree and a separately named crash candidate.
+			if rmErr := cleanupRunWorktree(context.Background(), m.db, gateDir, wtDir, run.ID); rmErr != nil {
+				slog.Warn("failed to safely remove worktree", "path", wtDir, "error", rmErr)
 			}
 			// Remove tracking.
 			m.mu.Lock()

@@ -94,6 +94,30 @@ func TestLocalBranchStatusIsCompactAndOnlyOffersEligibleAction(t *testing.T) {
 	}
 }
 
+// TestLocalBranchStatusRendersUnreadablePreservationEvidence pins the surface
+// half of the fail-closed guard: the box must not silently disappear when the
+// gate's preservation refs cannot be read, and it must never offer an action
+// that would proceed through the unverified evidence.
+func TestLocalBranchStatusRendersUnreadablePreservationEvidence(t *testing.T) {
+	state := branchsync.State{
+		State:  branchsync.StateAmbiguousContext,
+		Safety: branchsync.SafetyPreservationUnreadable,
+		Local:  branchsync.LocalState{Branch: "feature/x", Clean: true},
+	}
+	view := stripANSI(renderLocalBranchStatus(&state, false, 80))
+	if !strings.Contains(view, "preservation refs could not be read") {
+		t.Fatalf("unreadable evidence view:\n%s", view)
+	}
+	if strings.Contains(view, "u sync branch") || strings.Contains(view, "u recover custody") {
+		t.Fatalf("unreadable evidence view offered an action:\n%s", view)
+	}
+	// Other ambiguous-context states stay silent, as before.
+	state.Safety = "blocked_wrong_branch"
+	if got := stripANSI(renderLocalBranchStatus(&state, false, 80)); got != "" {
+		t.Fatalf("unrelated ambiguous context rendered:\n%s", got)
+	}
+}
+
 func TestBranchSyncActionRefreshesEquivalentDivergedBeforeConfirmation(t *testing.T) {
 	m := NewModel("socket", nil, &ipc.RunInfo{ID: "run-1", Branch: "feature", Status: types.RunRunning})
 	cached := branchsync.State{

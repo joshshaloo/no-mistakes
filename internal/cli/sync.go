@@ -17,6 +17,7 @@ var syncInteractive = terminalInteractive
 
 func newSyncCmd() *cobra.Command {
 	var check, yes, recover, keepLocal bool
+	var resolveHead string
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Safely move the current branch to an exact pipeline-pushed head",
@@ -28,9 +29,13 @@ func newSyncCmd() *cobra.Command {
 			"merges genuine divergence, rebases, switches branches, or updates a remote.\n" +
 			"--check performs the fresh proof without applying it.\n" +
 			"--recover returns custody of a branch whose run went terminal with unpublished\n" +
-			"pipeline commits: it anchors the preserved head, fast-forwards a clean behind\n" +
-			"worktree to it, and frees the branch for a fresh run. --recover --keep-local keeps\n" +
-			"the current local head instead and never touches the worktree.",
+			"pipeline commits: it byte-verifies the exact run-owned gate ref, anchors that\n" +
+			"head, and fast-forwards only a clean behind worktree. --recover --keep-local\n" +
+			"preserves both heads, keeps the current local head, and never touches files.\n" +
+			"Missing, raced, or third-head evidence always refuses. When preservation evidence\n" +
+			"names more than one head, --recover --resolve-head <commit> publishes the exact\n" +
+			"commit you name as run authority and archives every losing head instead of\n" +
+			"discarding it; the tool never chooses for you.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if check && yes {
@@ -42,6 +47,15 @@ func newSyncCmd() *cobra.Command {
 			if keepLocal && !recover {
 				return &exitError{code: 2, err: fmt.Errorf("--keep-local requires --recover")}
 			}
+			if strings.TrimSpace(resolveHead) != "" {
+				if !recover {
+					return &exitError{code: 2, err: fmt.Errorf("--resolve-head requires --recover")}
+				}
+				if keepLocal {
+					return &exitError{code: 2, err: fmt.Errorf("--resolve-head and --keep-local cannot be used together")}
+				}
+				return runHumanResolveAmbiguity(cmd, resolveHead, yes)
+			}
 			if recover {
 				return runHumanRecover(cmd, keepLocal, yes)
 			}
@@ -52,11 +66,13 @@ func newSyncCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "apply an eligible guarded synchronization without prompting")
 	cmd.Flags().BoolVar(&recover, "recover", false, "return custody of a branch stranded by a terminal run with unpublished pipeline commits")
 	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "with --recover: keep the current local head; the preserved commits stay anchored and the gate follows the kept head")
+	cmd.Flags().StringVar(&resolveHead, "resolve-head", "", "with --recover: the exact commit that becomes run authority when preservation evidence is ambiguous; losing heads are archived, never discarded")
 	return cmd
 }
 
 func newAxiSyncCmd() *cobra.Command {
 	var check, recover, keepLocal bool
+	var resolveHead string
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Check or apply guarded current-branch synchronization",
@@ -68,7 +84,11 @@ func newAxiSyncCmd() *cobra.Command {
 			"verified pipeline head with reset semantics.\n" +
 			"--check performs the same fresh read-only plan. Blocked states change nothing.\n" +
 			"--recover performs the guarded custody return offered by\n" +
-			"next_action.code: recover_custody; --keep-local keeps the current local head.",
+			"next_action.code: recover_custody after byte-verifying the exact run-owned head;\n" +
+			"--keep-local preserves both heads and keeps the current local head.\n" +
+			"--recover --resolve-head <commit> answers next_action.code: resolve_ambiguous_custody\n" +
+			"by publishing the exact commit you name as run authority; losing heads are archived,\n" +
+			"never discarded, and the tool never chooses a head automatically.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -79,12 +99,21 @@ func newAxiSyncCmd() *cobra.Command {
 			if keepLocal && !recover {
 				return emitError(cmd, 2, "--keep-local requires --recover")
 			}
-			return runAxiSync(cmd, check, recover, keepLocal)
+			if strings.TrimSpace(resolveHead) != "" {
+				if !recover {
+					return emitError(cmd, 2, "--resolve-head requires --recover")
+				}
+				if keepLocal {
+					return emitError(cmd, 2, "--resolve-head and --keep-local cannot be used together")
+				}
+			}
+			return runAxiSync(cmd, check, recover, keepLocal, resolveHead)
 		},
 	}
 	cmd.Flags().BoolVar(&check, "check", false, "freshly verify and return the plan without changing HEAD")
 	cmd.Flags().BoolVar(&recover, "recover", false, "return custody of a branch stranded by a terminal run with unpublished pipeline commits")
 	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "with --recover: keep the current local head; the preserved commits stay anchored and the gate follows the kept head")
+	cmd.Flags().StringVar(&resolveHead, "resolve-head", "", "with --recover: the exact commit that becomes run authority when preservation evidence is ambiguous; losing heads are archived, never discarded")
 	return cmd
 }
 
@@ -201,8 +230,8 @@ func runHumanRecover(cmd *cobra.Command, keepLocal, yes bool) error {
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), "  Recovery returns custody of this branch from its terminal run. The only")
 		if keepLocal {
-			fmt.Fprintln(cmd.OutOrStdout(), "  possible changes are anchoring the preserved pipeline commits and moving the")
-			fmt.Fprintln(cmd.OutOrStdout(), "  local gate branch to your current head; the worktree is never touched.")
+			fmt.Fprintln(cmd.OutOrStdout(), "  possible changes are exact preservation refs and a compare-and-swap of the")
+			fmt.Fprintln(cmd.OutOrStdout(), "  local gate branch when needed; both heads survive and files are never touched.")
 		} else {
 			fmt.Fprintln(cmd.OutOrStdout(), "  possible worktree change is a strict fast-forward of this clean branch to the")
 			fmt.Fprintln(cmd.OutOrStdout(), "  preserved pipeline head; anything else refuses without changes.")
@@ -236,6 +265,56 @@ func runHumanRecover(cmd *cobra.Command, keepLocal, yes bool) error {
 	return &exitError{code: 1}
 }
 
+// runHumanResolveAmbiguity publishes an operator-named exact commit as run
+// authority. It never picks a head, so the confirmation restates exactly which
+// commit is being published and that every other candidate is archived.
+func runHumanResolveAmbiguity(cmd *cobra.Command, chosen string, yes bool) error {
+	started := time.Now()
+	var observed branchsync.State
+	result := "error"
+	defer func() { trackSyncAttempt("sync", "human_cli", "recover_resolve_head", observed, result, started) }()
+
+	service, closeFn, err := openSyncService()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+
+	state := service.InspectCached(cmd.Context())
+	observed = state
+	if !yes {
+		printHumanSyncState(cmd, state)
+		if !syncInteractive() {
+			fmt.Fprintln(cmd.OutOrStdout(), "  Non-interactive input cannot confirm this resolution. Re-run with `no-mistakes sync --recover --resolve-head <commit> --yes`.")
+			result = "refused"
+			return &exitError{code: 1}
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "  Publish %s as this run's authority? Every other preserved head is archived\n", strings.TrimSpace(chosen))
+		fmt.Fprint(cmd.OutOrStdout(), "  under refs/no-mistakes/archive/, never discarded. [y/N] ")
+		line, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+		if readErr != nil && strings.TrimSpace(line) == "" {
+			return readErr
+		}
+		answer := strings.ToLower(strings.TrimSpace(line))
+		if answer != "y" && answer != "yes" {
+			fmt.Fprintln(cmd.OutOrStdout(), "  Cancelled; no files or refs were changed.")
+			result = "cancelled"
+			return nil
+		}
+	}
+
+	resolved := service.ResolveAmbiguousHead(cmd.Context(), chosen)
+	observed = resolved
+	printHumanSyncState(cmd, resolved)
+	if !resolved.Changed {
+		result = "refused"
+		return &exitError{code: 1}
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "  Ambiguity resolved; return custody with `no-mistakes sync --recover`.")
+	result = "applied"
+	return nil
+}
+
 func printHumanSyncState(cmd *cobra.Command, state branchsync.State) {
 	w := cmd.OutOrStdout()
 	fmt.Fprintf(w, "\n  Local branch: %s\n", humanSyncSummary(state))
@@ -256,10 +335,16 @@ func printHumanSyncState(cmd *cobra.Command, state branchsync.State) {
 }
 
 func humanSyncSummary(state branchsync.State) string {
+	if branchsync.PreservationUnreadable(state) {
+		return "the local gate's preservation refs could not be read, so preserved-head ambiguity cannot be ruled out; recovery and fresh runs are blocked until the gate is readable"
+	}
 	switch state.State {
 	case branchsync.StatePipelineOwned:
 		if state.Safety == "blocked_pipeline_owned_recoverable" {
-			return "run ended without publishing its pipeline commits; recover custody with `no-mistakes sync --recover` (or `no-mistakes rerun` to resume validation)"
+			return "run ended without publishing its pipeline commits; recover custody with `no-mistakes sync --recover` (`no-mistakes rerun` resumes only an exact verified run-owned head)"
+		}
+		if state.Safety == "blocked_pipeline_owned_ambiguous" {
+			return "recorded and independently preserved pipeline/live heads differ; every head is retained - name the exact commit to keep with `no-mistakes sync --recover --resolve-head <commit>`"
 		}
 		return "pipeline fix is not pushed yet; do not make local follow-up commits"
 	case branchsync.StateCustodyReturned:
@@ -292,12 +377,15 @@ func humanSyncSummary(state branchsync.State) string {
 	}
 }
 
-func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool) error {
+func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool, resolveHead string) error {
 	started := time.Now()
+	resolving := strings.TrimSpace(resolveHead) != ""
 	mode := "apply"
 	switch {
 	case check:
 		mode = "check"
+	case recover && resolving:
+		mode = "recover_resolve_head"
 	case recover && keepLocal:
 		mode = "recover_keep_local"
 	case recover:
@@ -316,6 +404,8 @@ func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool) error {
 	switch {
 	case check:
 		state = service.Refresh(cmd.Context())
+	case recover && resolving:
+		state = service.ResolveAmbiguousHead(cmd.Context(), resolveHead)
 	case recover:
 		state = service.Recover(cmd.Context(), keepLocal)
 	default:
@@ -332,12 +422,18 @@ func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool) error {
 	if state.Safety == "blocked_pipeline_owned_recoverable" {
 		help = append(help, "Run `no-mistakes rerun` instead to resume validating the preserved pipeline head")
 	}
+	if state.Safety == "blocked_pipeline_owned_ambiguous" {
+		help = append(help, "Name one exact candidate commit from the note; every other preserved head is archived under refs/no-mistakes/archive/, never discarded")
+	}
 	if len(help) > 0 {
 		fields = append(fields, toON.Field{Key: "help", Value: help})
 	}
 	emitDoc(cmd, fields...)
 	successful := syncStateSuccessful(state, check)
-	if recover {
+	switch {
+	case recover && resolving:
+		successful = state.Changed
+	case recover:
 		successful = state.Recovered
 	}
 	if successful {
@@ -462,7 +558,10 @@ func cachedBranchSyncField(ctxCmd *cobra.Command, runID string) *toON.Field {
 	}
 	defer closeFn()
 	state := service.InspectCached(ctxCmd.Context())
-	if runID != "" && state.Pipeline.RunID != runID {
+	// Unreadable preservation evidence is branch-scoped: no run can be named
+	// while it holds, so a run-scoped call must still surface it rather than
+	// filter the whole refusal out on an empty pipeline run id.
+	if runID != "" && state.Pipeline.RunID != runID && !branchsync.PreservationUnreadable(state) {
 		return nil
 	}
 	if !relevantCachedSyncState(state) {
@@ -473,6 +572,9 @@ func cachedBranchSyncField(ctxCmd *cobra.Command, runID string) *toON.Field {
 }
 
 func relevantCachedSyncState(state branchsync.State) bool {
+	if branchsync.PreservationUnreadable(state) {
+		return true
+	}
 	switch state.State {
 	case branchsync.StatePipelineOwned, branchsync.StatePushInProgress, branchsync.StateBehind,
 		branchsync.StateLocalAhead, branchsync.StateDiverged, branchsync.StateDirty,

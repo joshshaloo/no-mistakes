@@ -107,6 +107,29 @@ func branchSyncScenario(t *testing.T) string {
 	return path
 }
 
+func rebaseReviewFailureScenario(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "rebase-review-failure.yaml")
+	content := `actions:
+  - match: "Review the code changes and return structured findings"
+    failure: "provider spend limit reached after rebase"
+  - text: "no issues found"
+    structured:
+      findings: []
+      summary: "no issues found"
+      risk_level: low
+      risk_rationale: "no risks detected"
+      tested: ["fakeagent: focused verification"]
+      testing_summary: "simulated tests passed"
+      title: "feat: preserved rebase head"
+      body: "preserved rebase head journey"
+`
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write rebase failure scenario: %v", err)
+	}
+	return path
+}
+
 // TestAxiBranchSyncJourney reproduces the end-user stale-local journey with the
 // real binary, fake agent, isolated daemon, and local bare push target.
 func TestAxiBranchSyncJourney(t *testing.T) {
@@ -312,6 +335,116 @@ func TestAxiRunReattachesAfterManagedFix(t *testing.T) {
 	stillActive = h.ActiveRun(branch)
 	if stillActive == nil || stillActive.ID != originalRun.ID || stillActive.Status != types.RunRunning {
 		t.Fatalf("pipeline-owned fresh run replaced or cancelled the original: %#v", stillActive)
+	}
+}
+
+// TestAxiRebaseFailureKeepLocalRecoveryJourney proves the causal DEV-451
+// sequence with the real binary and daemon: Rebase creates R in a detached
+// worktree, the next Review invocation fails fatally, cleanup keeps R exactly
+// pinned, and --recover --keep-local returns custody while retaining submitted
+// A as both local and gate mutable head. A fresh run is then permitted.
+func TestAxiRebaseFailureKeepLocalRecoveryJourney(t *testing.T) {
+	scenario := rebaseReviewFailureScenario(t)
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: scenario})
+	h.CommitChange("init-rebase-recovery", "seed.txt", "seed\n", "seed rebase recovery")
+	initWorktree := h.AddWorktree("init-rebase-recovery")
+	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+
+	submitted := h.CommitChange("feature/rebase-recovery", "feature.txt", "feature\n", "feature before main advance")
+	operator := h.AddWorktree("feature/rebase-recovery")
+	// Advance only the authoritative upstream default branch after feature A
+	// exists, forcing the daemon's detached pipeline worktree to rebase.
+	h.CommitChange("main", "main-advance.txt", "advanced\n", "advance main")
+	if out, err := h.runGit(context.Background(), h.WorkDir, "push", "origin", "main"); err != nil {
+		t.Fatalf("push advanced main: %v\n%s", err, out)
+	}
+
+	out, runErr := h.RunInDir(operator, "axi", "run", "--intent", "preserve a rebased head across review provider failure")
+	if runErr == nil {
+		t.Fatalf("fatal review provider failure unexpectedly succeeded:\n%s", out)
+	}
+	run := h.WaitForRun("feature/rebase-recovery", 30*time.Second)
+	if run.Status != types.RunFailed {
+		t.Fatalf("run status = %s, want failed", run.Status)
+	}
+	preserved := run.HeadSHA
+	if preserved == submitted || preserved == "" {
+		t.Fatalf("rebase did not record a distinct preserved head: submitted=%s preserved=%s", submitted, preserved)
+	}
+	gateDir := filepath.Join(h.NMHome, "repos", h.repoID()+".git")
+	pipelineWorktree := filepath.Join(h.NMHome, "worktrees", h.repoID(), run.ID)
+	cleanupDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(cleanupDeadline) {
+		if _, statErr := os.Stat(pipelineWorktree); os.IsNotExist(statErr) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, statErr := os.Stat(pipelineWorktree); !os.IsNotExist(statErr) {
+		t.Fatalf("terminal pipeline worktree was not safely cleaned up: %v", statErr)
+	}
+	runRef := "refs/no-mistakes/run-head/" + run.ID
+	for label, ref := range map[string]string{"gate branch": "refs/heads/feature/rebase-recovery", "run head": runRef} {
+		got, err := h.runGit(context.Background(), gateDir, "rev-parse", ref)
+		if err != nil || strings.TrimSpace(string(got)) != preserved {
+			t.Fatalf("%s %s = %s (err %v), want %s", label, ref, strings.TrimSpace(string(got)), err, preserved)
+		}
+	}
+	if got := strings.TrimSpace(h.WorktreeRefSHA("feature/rebase-recovery")); got != submitted {
+		t.Fatalf("operator moved before recovery: %s", got)
+	}
+
+	recoverOut, err := h.RunInDir(operator, "axi", "sync", "--recover", "--keep-local")
+	if err != nil {
+		t.Fatalf("keep-local recovery: %v\n%s", err, recoverOut)
+	}
+	for _, want := range []string{"recovered: true", "safety: custody_returned", "changed: false"} {
+		if !strings.Contains(recoverOut, want) {
+			t.Errorf("keep-local output missing %q:\n%s", want, recoverOut)
+		}
+	}
+	for _, check := range []struct {
+		label string
+		dir   string
+		ref   string
+		want  string
+	}{
+		{"operator", operator, "HEAD", submitted},
+		{"gate submitted branch", gateDir, "refs/heads/feature/rebase-recovery", submitted},
+		{"gate run head", gateDir, runRef, preserved},
+		{"local recovery head", operator, "refs/no-mistakes/recover/" + run.ID, preserved},
+	} {
+		got, gitErr := h.runGit(context.Background(), check.dir, "rev-parse", check.ref)
+		if gitErr != nil || strings.TrimSpace(string(got)) != check.want {
+			t.Fatalf("%s = %s (err %v), want %s", check.label, strings.TrimSpace(string(got)), gitErr, check.want)
+		}
+	}
+
+	// Let the next review succeed. The fresh invocation must pass custody
+	// preflight and create a different run rather than being refused at A.
+	if err := os.WriteFile(scenario, []byte(`actions:
+  - text: "no issues found"
+    structured:
+      findings: []
+      summary: "no issues found"
+      risk_level: low
+      risk_rationale: "no risks detected"
+      tested: ["fakeagent: focused verification"]
+      testing_summary: "simulated tests passed"
+      title: "feat: fresh after custody"
+      body: "fresh run"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	freshOut, err := h.RunInDir(operator, "axi", "run", "--intent", "fresh validation after custody return")
+	if err != nil {
+		t.Fatalf("fresh run after recovery was not permitted: %v\n%s", err, freshOut)
+	}
+	fresh := h.WaitForRun("feature/rebase-recovery", 30*time.Second)
+	if fresh.ID == run.ID {
+		t.Fatal("fresh run did not replace recovered terminal ownership")
 	}
 }
 

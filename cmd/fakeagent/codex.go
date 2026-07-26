@@ -16,6 +16,10 @@ func runCodex(args []string, scenario *Scenario) int {
 	if err := applyAction(action); err != nil {
 		return 1
 	}
+	if err := actionFailure(action); err != nil {
+		fmt.Fprintf(os.Stderr, "fakeagent: codex provider failure: %v\n", err)
+		return 1
+	}
 
 	// Real codex constrains output to --output-schema, so the fake
 	// mirrors that by trimming the scenario's catch-all structured map

@@ -17,12 +17,16 @@ func renderLocalBranchStatus(state *branchsync.State, refreshing bool, width int
 	footer := ""
 	if refreshing {
 		message = "Refreshing the exact configured push target..."
+	} else if branchsync.PreservationUnreadable(*state) {
+		message = "The local gate's preservation refs could not be read, so a preserved head differing from the recorded one cannot be ruled out. Every head is retained; custody recovery and fresh runs stay blocked until the gate is readable."
 	} else {
 		switch state.State {
 		case branchsync.StatePipelineOwned:
 			if recoverableBranchSync(state) {
-				message = "Run ended without publishing its pipeline commits; they are preserved in the local gate. Recover custody to take the branch back, or rerun to resume validation."
+				message = "Run ended without publishing its pipeline commits; the exact run-owned head is preserved in the local gate. Recover custody to take the branch back; rerun works only while that ref and gate branch agree."
 				footer = "u recover custody"
+			} else if state.Safety == "blocked_pipeline_owned_ambiguous" {
+				message = "Preservation evidence retained different recorded and pipeline/live worktree heads. No head was discarded; name the exact commit to keep with `no-mistakes sync --recover --resolve-head <commit>` and every losing head is archived."
 			} else {
 				message = "Local branch unchanged; the pipeline fix is not pushed yet. Do not make follow-up commits."
 			}
@@ -109,12 +113,12 @@ func renderRecoverConfirmation(state branchsync.State, width int) string {
 		width = 80
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "The run ended %s without publishing its pipeline commits. Recovery returns\n", state.Pipeline.Status)
-	fmt.Fprintf(&b, "custody of this branch and fast-forwards only a clean behind worktree.\n\n")
+	fmt.Fprintf(&b, "The run ended %s without publishing its pipeline commits. Recovery byte-verifies\n", state.Pipeline.Status)
+	fmt.Fprintf(&b, "the exact run-owned head and fast-forwards only a clean behind worktree.\n\n")
 	fmt.Fprintf(&b, "Local branch:   %s\n", state.Local.Branch)
 	fmt.Fprintf(&b, "Local HEAD:     %s\n", state.Local.Head)
 	fmt.Fprintf(&b, "Preserved HEAD: %s\n\n", state.Pipeline.CurrentHead)
-	b.WriteString("Dirty or diverged worktrees refuse without changes; `no-mistakes sync --recover\n--keep-local` keeps the current head instead. `no-mistakes rerun` resumes validation.")
+	b.WriteString("Dirty or diverged worktrees refuse without changes; `no-mistakes sync --recover\n--keep-local` preserves both heads and keeps the current head. `no-mistakes rerun` resumes only an exact verified gate head.")
 	return renderBoxWithFooter("Confirm custody recovery", b.String(), width, "u/enter recover  ·  esc cancel")
 }
 

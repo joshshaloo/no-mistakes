@@ -271,7 +271,11 @@ If the run is genuinely stuck and you want to discard it, use `no-mistakes axi a
 
 Symptom: `~/.no-mistakes/worktrees/<repoID>/<runID>/` sticks around after a run ends.
 
-The daemon removes worktrees at run completion, and also on daemon startup (crash recovery). If one is still there:
+The daemon removes worktrees at run completion, and also on daemon startup (crash recovery).
+
+First check whether the leftover is deliberate. When a run's recorded, preserved, and live heads disagree, the daemon keeps the worktree on purpose as independent evidence of pipeline commits that exist nowhere else, and logs that it retained it; [Crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns that rule. In that case run `no-mistakes sync --check` in the working repo and follow the custody state it reports - see [Custody recovery](/no-mistakes/reference/cli/#custody-recovery) - instead of deleting the directory.
+
+If the run is settled and the directory is simply stale:
 
 ```sh
 # From inside the repo the worktree belongs to:
@@ -298,6 +302,7 @@ no-mistakes daemon start
 
 This keeps your gate repos, database, and config but clears transient state. For a full wipe, see the [Uninstall section](/no-mistakes/start-here/installation/#uninstall).
 Wedged state often means a run is stuck `pending` or `running`, so `daemon stop` refuses without `--force`; only force through once you've confirmed it's fine for the listed runs to fail.
+Deleting `worktrees` also discards any worktree the daemon deliberately retained, so resolve custody first when the checks above say a leftover is evidence rather than junk.
 
 ## Still stuck
 
