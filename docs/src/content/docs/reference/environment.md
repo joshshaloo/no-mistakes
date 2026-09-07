@@ -214,4 +214,4 @@ The daemon stamps two read-only markers into every subprocess a run launches, so
 | `NO_MISTAKES_RUN_ID`           | The ID of the run that owns this process                   |
 | `NO_MISTAKES_DAEMON_INSTANCE`  | An identifier for the daemon process that started the run  |
 
-They are how worktree cleanup proves a background process belongs to a run before signalling it, including after the process has been reparented away or the daemon has restarted. See [Daemon](/concepts/daemon/) for the lifecycle guarantee they support.
+They are how worktree cleanup proves a background process belongs to a run before signalling it, including after the process has been reparented away, moved to another directory, or outlived a daemon restart. See [Daemon](/concepts/daemon/) for the lifecycle guarantee they support.

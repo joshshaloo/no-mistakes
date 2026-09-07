@@ -2,4 +2,4 @@
 
 package shellenv
 
-func discoverWorktreeProcessGroups(string, runOwnership) []int { return nil }
+func discoverRunProcesses(runOwnership, string) []discoveredProcess { return nil }

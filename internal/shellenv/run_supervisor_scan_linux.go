@@ -10,26 +10,31 @@ import (
 	"syscall"
 )
 
-// discoverWorktreeProcessGroups finds process groups that must be reaped before
-// the run worktree is deleted. A candidate has to satisfy both halves of the
-// proof: its cwd is inside the worktree, and its environment carries the run
-// marker owner accepts. cwd alone would target a developer's shell; the marker
-// alone would target a run process that legitimately moved elsewhere.
-func discoverWorktreeProcessGroups(workDir string, owner runOwnership) []int {
-	workDir = strings.TrimSpace(workDir)
-	if workDir == "" || owner.runID == "" {
+// discoverRunProcesses finds processes that must be reaped before the run
+// worktree is deleted. Ownership is proven by the inherited run marker in
+// /proc/<pid>/environ, not by where the process happens to be standing: a
+// daemonized dashboard that called setsid and chdir("/") is still this run's to
+// clean up. The worktree path is only consulted for the weaker stranded-run
+// adoption, and is otherwise recorded for the termination log.
+func discoverRunProcesses(owner runOwnership, workDir string) []discoveredProcess {
+	if owner.runID == "" {
 		return nil
 	}
-	workDir = filepath.Clean(workDir)
-	if resolved, err := filepath.EvalSymlinks(workDir); err == nil {
-		workDir = resolved
+	workDir = strings.TrimSpace(workDir)
+	if workDir != "" {
+		workDir = filepath.Clean(workDir)
+		if resolved, err := filepath.EvalSymlinks(workDir); err == nil {
+			workDir = resolved
+		}
 	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
 	}
 	self := os.Getpid()
+	selfGroup := syscall.Getpgrp()
 	seen := make(map[int]struct{})
+	var found []discoveredProcess
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -38,32 +43,26 @@ func discoverWorktreeProcessGroups(workDir string, owner runOwnership) []int {
 		if err != nil || pid <= 1 || pid == self {
 			continue
 		}
-		cwd, err := os.Readlink(filepath.Join("/proc", entry.Name(), "cwd"))
-		if err != nil {
+		environ := readProcEnviron(entry.Name())
+		owned := owner.ownsRun(environ)
+		if !owned && !owner.adoptsStrandedRun(environ) {
 			continue
 		}
-		cwd = strings.TrimSuffix(cwd, " (deleted)")
-		cwd = filepath.Clean(cwd)
-		if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
-			cwd = resolved
-		}
-		if !pathInside(cwd, workDir) {
-			continue
-		}
-		if !owner.owns(readProcEnviron(entry.Name())) {
+		cwd, inWorktree := processCwd(entry.Name(), workDir)
+		if !owned && !inWorktree {
 			continue
 		}
 		group, err := syscall.Getpgid(pid)
-		if err != nil || group <= 1 || group == syscall.Getpgrp() {
+		if err != nil || group <= 1 || group == selfGroup {
+			continue
+		}
+		if _, duplicate := seen[group]; duplicate {
 			continue
 		}
 		seen[group] = struct{}{}
+		found = append(found, discoveredProcess{pid: pid, group: group, cwd: cwd, inWorktree: inWorktree})
 	}
-	groups := make([]int, 0, len(seen))
-	for group := range seen {
-		groups = append(groups, group)
-	}
-	return groups
+	return found
 }
 
 // readProcEnviron returns the process environment block, or nil when it cannot
@@ -77,13 +76,14 @@ func readProcEnviron(pid string) []byte {
 	return environ
 }
 
-func pathInside(path, root string) bool {
-	if path == root {
-		return true
-	}
-	rel, err := filepath.Rel(root, path)
+func processCwd(pid, workDir string) (string, bool) {
+	cwd, err := os.Readlink(filepath.Join("/proc", pid, "cwd"))
 	if err != nil {
-		return false
+		return "", false
 	}
-	return rel != "." && rel != "" && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".."
+	cwd = filepath.Clean(strings.TrimSuffix(cwd, " (deleted)"))
+	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
+		cwd = resolved
+	}
+	return cwd, pathInside(cwd, workDir)
 }

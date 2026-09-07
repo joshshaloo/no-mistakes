@@ -24,16 +24,17 @@ import (
 // dashboard or dev server that puts itself in a new session, so terminating the
 // command's own process group leaves it running with the worktree as its cwd.
 type escapedProcessStep struct {
-	pidDir  string
-	started chan string
-	release chan struct{}
+	pidDir    string
+	escapeDir string
+	started   chan string
+	release   chan struct{}
 }
 
 func (s *escapedProcessStep) Name() types.StepName { return types.StepName("escape") }
 
 func (s *escapedProcessStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	pidPath := filepath.Join(s.pidDir, sctx.Run.ID+".escaped.pid")
-	if err := launchEscapedRunProcess(sctx.Ctx, sctx.WorkDir, pidPath); err != nil {
+	if err := launchEscapedRunProcess(sctx.Ctx, sctx.WorkDir, pidPath, s.escapeDir); err != nil {
 		return nil, err
 	}
 	if s.started != nil {
@@ -48,7 +49,7 @@ func (s *escapedProcessStep) Execute(sctx *pipeline.StepContext) (*pipeline.Step
 // TestRunCleanupReapsEscapedProcessDiscoveredInWorktree proves the discovery
 // fail-safe actually fires. The launcher's process group is terminated and
 // unregistered while the step is still running, so the supervisor holds no
-// tracked group for the escapee; only the cwd-plus-run-marker scan can find it.
+// tracked group for the escapee; only the run-marker scan can find it.
 func TestRunCleanupReapsEscapedProcessDiscoveredInWorktree(t *testing.T) {
 	requireSetsid(t)
 	p, database, repo, head := newRunCleanupFixture(t)
@@ -107,7 +108,7 @@ func TestOrphanWorktreeCleanupReapsEscapedProcess(t *testing.T) {
 	supervisor := shellenv.NewRunSupervisor(run.ID, worktree)
 	ctx := shellenv.WithRunSupervisor(context.Background(), supervisor)
 	pidPath := filepath.Join(pidDir, "escaped.pid")
-	if err := launchEscapedRunProcess(ctx, worktree, pidPath); err != nil {
+	if err := launchEscapedRunProcess(ctx, worktree, pidPath, ""); err != nil {
 		t.Fatalf("launch escaped run process: %v", err)
 	}
 	escaped := adoptEscapedProcess(t, pidPath)
@@ -124,15 +125,63 @@ func TestOrphanWorktreeCleanupReapsEscapedProcess(t *testing.T) {
 	}
 }
 
+// TestRunCleanupReapsEscapedProcessThatLeftTheWorktree covers the canonical
+// daemonization recipe: setsid plus chdir("/"), which dev servers and dashboards
+// use so they do not pin a directory. The inherited run marker is the proof of
+// ownership, so cleanup must still reap it even though its cwd is nowhere near
+// the worktree.
+func TestRunCleanupReapsEscapedProcessThatLeftTheWorktree(t *testing.T) {
+	requireSetsid(t)
+	p, database, repo, head := newRunCleanupFixture(t)
+	pidDir := t.TempDir()
+	step := &escapedProcessStep{pidDir: pidDir, escapeDir: "/", started: make(chan string, 1), release: make(chan struct{})}
+	mgr := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+
+	runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	<-step.started
+	escaped := adoptEscapedProcess(t, filepath.Join(pidDir, runID+".escaped.pid"))
+	if cwd := processCwdForTest(t, escaped); cwd != "/" {
+		t.Fatalf("escaped process cwd = %q, want %q so the test really covers the chdir case", cwd, "/")
+	}
+	foreign := startForeignWorktreeProcess(t, p.WorktreeDir(repo.ID, runID), filepath.Join(pidDir, "foreign.pid"))
+
+	close(step.release)
+	waitForRunDone(t, mgr, runID)
+	waitForWorktreeRemoved(t, p.WorktreeDir(repo.ID, runID))
+	waitForTestProcessExit(t, escaped)
+
+	if ok, err := processRunning(foreign); err != nil || !ok {
+		t.Fatalf("unmarked foreign process %d was killed (ok=%v err=%v)", foreign, ok, err)
+	}
+}
+
+func processCwdForTest(t *testing.T, pid int) string {
+	t.Helper()
+	cwd, err := os.Readlink(filepath.Join("/proc", strconv.Itoa(pid), "cwd"))
+	if err != nil {
+		t.Fatalf("read cwd of %d: %v", pid, err)
+	}
+	return cwd
+}
+
 // launchEscapedRunProcess starts a supervised command whose child calls setsid
 // and outlives it, then reaps the launcher's own process group so the survivor
 // is no longer reachable through RunSupervisor's registered groups. The child
 // inherits the run marker StartShellCommand stamped on the launcher.
-func launchEscapedRunProcess(ctx context.Context, workDir, pidPath string) error {
-	script := `setsid sh -c 'echo $$ > "$NM_TEST_ESCAPED_PIDFILE"; while :; do sleep 1; done' &`
+func launchEscapedRunProcess(ctx context.Context, workDir, pidPath, escapeDir string) error {
+	if escapeDir == "" {
+		escapeDir = "."
+	}
+	script := `setsid sh -c 'cd "$NM_TEST_ESCAPE_DIR" || exit 1; echo $$ > "$NM_TEST_ESCAPED_PIDFILE"; while :; do sleep 1; done' &`
 	cmd := exec.CommandContext(ctx, "sh", "-c", script)
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(), "NM_TEST_ESCAPED_PIDFILE="+pidPath)
+	cmd.Env = append(os.Environ(),
+		"NM_TEST_ESCAPED_PIDFILE="+pidPath,
+		"NM_TEST_ESCAPE_DIR="+escapeDir,
+	)
 	shellenv.ConfigureShellCommandForContext(ctx, cmd)
 	if err := shellenv.StartShellCommand(cmd); err != nil {
 		return err

@@ -90,37 +90,59 @@ func TestStartShellCommand_LeavesUnsupervisedCommandUnmarked(t *testing.T) {
 }
 
 func TestRunOwnership_OwnsOnlyMarkedProcesses(t *testing.T) {
-	marked := environBlock(RunIDEnvVar+"=run-a", DaemonInstanceEnvVar+"=instance-1", "PATH=/usr/bin")
-	otherRun := environBlock(RunIDEnvVar+"=run-b", DaemonInstanceEnvVar+"=instance-1")
-	previousInstance := environBlock(RunIDEnvVar+"=run-b", DaemonInstanceEnvVar+"=instance-0")
+	ownRun := environBlock(RunIDEnvVar+"=run-a", DaemonInstanceEnvVar+"=instance-1", "PATH=/usr/bin")
+	ownRunOtherInstance := environBlock(RunIDEnvVar+"=run-a", DaemonInstanceEnvVar+"=instance-0")
+	siblingRun := environBlock(RunIDEnvVar+"=run-b", DaemonInstanceEnvVar+"=instance-1")
+	strandedRun := environBlock(RunIDEnvVar+"=run-b", DaemonInstanceEnvVar+"=instance-0")
 	foreign := environBlock("PATH=/usr/bin", "SHELL=/bin/sh")
 
 	current := runOwnership{runID: "run-a", instanceID: "instance-1"}
-	if !current.owns(marked) {
+	if !current.ownsRun(ownRun) {
 		t.Error("current run must own its own marked process")
 	}
-	if current.owns(otherRun) {
+	if !current.ownsRun(ownRunOtherInstance) {
+		t.Error("a globally unique run ID must identify the run across daemon instances")
+	}
+	if current.ownsRun(siblingRun) {
 		t.Error("current run must not own a sibling run's process")
 	}
-	if current.owns(previousInstance) {
-		t.Error("run-end cleanup must not adopt another run from a previous instance")
-	}
-	if current.owns(foreign) {
+	if current.ownsRun(foreign) {
 		t.Error("an unmarked foreign process must never be owned")
 	}
-	if current.owns(nil) {
+	if current.ownsRun(nil) {
 		t.Error("an unreadable environment must fail closed")
+	}
+	if current.adoptsStrandedRun(strandedRun) {
+		t.Error("run-end cleanup must never adopt another run's process")
 	}
 
 	orphan := runOwnership{runID: "run-a", instanceID: "instance-1", adoptPreviousInstances: true}
-	if !orphan.owns(previousInstance) {
-		t.Error("startup cleanup must adopt a marked process from a previous daemon instance")
+	if !orphan.adoptsStrandedRun(strandedRun) {
+		t.Error("startup cleanup must be able to adopt another run stranded by a previous instance")
 	}
-	if orphan.owns(otherRun) {
+	if orphan.adoptsStrandedRun(siblingRun) {
 		t.Error("startup cleanup must not adopt a live sibling run of this instance")
 	}
-	if orphan.owns(foreign) {
+	if orphan.adoptsStrandedRun(foreign) {
 		t.Error("startup cleanup must never adopt an unmarked foreign process")
+	}
+}
+
+func TestPathInside(t *testing.T) {
+	if !pathInside("/a/b", "/a/b") {
+		t.Error("a path is inside itself")
+	}
+	if !pathInside("/a/b/c", "/a/b") {
+		t.Error("a descendant must be inside")
+	}
+	if pathInside("/a/bc", "/a/b") {
+		t.Error("a sibling sharing a name prefix must not be inside")
+	}
+	if pathInside("/a", "/a/b") {
+		t.Error("an ancestor must not be inside")
+	}
+	if pathInside("", "/a/b") || pathInside("/a/b", "") {
+		t.Error("an empty path or root must not match")
 	}
 }
 
