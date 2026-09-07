@@ -94,7 +94,8 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
-	shellenv.ConfigureShellCommandForContext(ctx, cmd)
+	shellenv.ConfigureShellCommand(cmd)
+	shellenv.SuperviseShellCommand(ctx, cmd)
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup

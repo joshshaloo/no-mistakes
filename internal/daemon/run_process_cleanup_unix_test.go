@@ -131,6 +131,59 @@ func TestRunCleanupDoesNotKillDaemonOrSiblingRun(t *testing.T) {
 	waitForTestProcessExit(t, siblingPID)
 }
 
+// TestRunCleanupSparesForeignProcessInWorktree pins the containment half of the
+// cwd-discovery fail-safe: a process that merely has its working directory
+// inside the run worktree - a developer's shell or editor inspecting a retained
+// or custody worktree - does not descend from the daemon and must survive run
+// cleanup untouched, even though the run's own escaped child is reaped.
+func TestRunCleanupSparesForeignProcessInWorktree(t *testing.T) {
+	p, database, repo, head := newRunCleanupFixture(t)
+	pidDir := t.TempDir()
+	step := &runProcessStep{pidDir: pidDir, started: make(chan string, 1), release: make(chan struct{})}
+	mgr := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
+
+	runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "")
+	if err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	<-step.started
+	runChildPID := readPID(t, filepath.Join(pidDir, runID+".pid"))
+	foreignPID := startForeignWorktreeProcess(t, p.WorktreeDir(repo.ID, runID), filepath.Join(pidDir, "foreign.pid"))
+
+	close(step.release)
+	waitForRunDone(t, mgr, runID)
+	waitForWorktreeRemoved(t, p.WorktreeDir(repo.ID, runID))
+	waitForTestProcessExit(t, runChildPID)
+
+	if ok, err := processRunning(foreignPID); err != nil || !ok {
+		t.Fatalf("foreign process %d sharing the worktree cwd was killed by run cleanup (ok=%v err=%v)", foreignPID, ok, err)
+	}
+}
+
+// startForeignWorktreeProcess leaves a process running with its cwd inside
+// workDir that is not part of the daemon's process tree. The launching shell
+// exits immediately, so the surviving background process reparents away from
+// the test binary while keeping the dead shell's process group.
+func startForeignWorktreeProcess(t *testing.T, workDir, pidPath string) int {
+	t.Helper()
+	script := fmt.Sprintf("(while :; do sleep 1; done) & echo $! > %s", shellQuoteForTest(pidPath))
+	cmd := exec.Command("sh", "-c", script)
+	cmd.Dir = workDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("start foreign worktree process: %v", err)
+	}
+	pid := readPID(t, pidPath)
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	})
+	if ok, err := processRunning(pid); err != nil || !ok {
+		t.Fatalf("foreign process %d did not start (ok=%v err=%v)", pid, ok, err)
+	}
+	return pid
+}
+
 func newRunCleanupFixture(t *testing.T) (*paths.Paths, *db.DB, *db.Repo, string) {
 	t.Helper()
 	root := t.TempDir()

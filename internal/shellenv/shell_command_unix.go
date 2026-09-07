@@ -91,6 +91,13 @@ func TerminateShellCommandGroup(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
+	// Only a command ConfigureShellCommand isolated leads a group of its own.
+	// Without Setpgid the child sits in the caller's group and its PID is not a
+	// group ID, so signalling -PID would target a group this process never
+	// created - and, after Wait, one a recycled PID could have made real.
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
+		return
+	}
 	// Negative PID targets the whole group (Setpgid made the leader's PID the
 	// group ID). errors.Is(ESRCH) is the expected, benign "no survivors" case.
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)

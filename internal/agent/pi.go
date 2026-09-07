@@ -38,7 +38,8 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Env = gitSafeEnv(opts.CWD)
-	shellenv.ConfigureShellCommandForContext(ctx, cmd)
+	shellenv.ConfigureShellCommand(cmd)
+	shellenv.SuperviseShellCommand(ctx, cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

@@ -265,7 +265,8 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	}
-	shellenv.ConfigureShellCommandForContext(ctx, cmd)
+	shellenv.ConfigureShellCommand(cmd)
+	shellenv.SuperviseShellCommand(ctx, cmd)
 	cmd.Dir = dir
 	if len(env) > 0 {
 		cmd.Env = mergeEnv(env)

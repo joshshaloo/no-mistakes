@@ -150,6 +150,12 @@ func TerminateShellCommandGroup(cmd *exec.Cmd) {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
+	// A command ConfigureShellCommand never prepared owns no job object and no
+	// process group of its own; taskkill /T on its PID would tear down whatever
+	// tree a recycled PID belongs to after Wait has returned.
+	if _, prepared := shellCommandJob(cmd); !prepared {
+		return
+	}
 	if terminateShellCommandJob(cmd, true) {
 		return
 	}

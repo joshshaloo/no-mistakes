@@ -27,9 +27,16 @@ type RunSupervisor struct {
 }
 
 // NewRunSupervisor creates a process-group supervisor for one run. workDir is
-// used as an additional fail-safe during cleanup: processes whose cwd is inside
-// the run worktree are discovered even if their command leader has already
-// exited, while unrelated daemon or sibling-run groups are ignored.
+// used as an additional fail-safe during cleanup: a process group is discovered
+// when one of its members both has a cwd inside the run worktree and descends
+// from this daemon process, so a run child that escaped its command leader is
+// still reaped while unrelated daemon groups, sibling-run groups, and foreign
+// processes that merely sit in the worktree (a developer's shell or editor
+// inspecting a retained or custody worktree) are never signalled.
+//
+// The cwd-based discovery fail-safe is implemented on Linux only; on Windows
+// the kill-on-close job object covers escaped descendants, and on other
+// platforms cleanup is limited to the registered command groups.
 func NewRunSupervisor(runID, workDir string) *RunSupervisor {
 	return &RunSupervisor{
 		runID:   runID,
@@ -57,11 +64,37 @@ func RunSupervisorFromContext(ctx context.Context) *RunSupervisor {
 	return supervisor
 }
 
-// ConfigureShellCommandForContext prepares cmd for process-tree cleanup and, if
-// ctx carries a RunSupervisor, registers the command's process group with that
-// run after StartShellCommand succeeds.
+// ConfigureShellCommandForContext prepares cmd for process-tree cleanup and
+// registers its process group with the RunSupervisor carried by ctx once
+// StartShellCommand succeeds.
+//
+// When ctx carries no supervisor the command is deliberately left in the
+// caller's process group. Short-lived Git and SCM subprocesses are also invoked
+// straight from the CLI and the TUI, which install no signal handler: moving
+// them into their own group would stop a terminal Ctrl-C from reaching them and
+// leave an orphaned network fetch holding gate lock files. Only run-owned
+// subprocesses get the process-group boundary.
+//
+// Long-lived subprocesses that must always be reaped as a tree regardless of
+// who launched them (agents, configured repo commands) call ConfigureShellCommand
+// directly and then SuperviseShellCommand to attach run ownership.
 func ConfigureShellCommandForContext(ctx context.Context, cmd *exec.Cmd) {
+	supervisor := RunSupervisorFromContext(ctx)
+	if supervisor == nil {
+		return
+	}
 	ConfigureShellCommand(cmd)
+	supervisedCommands.Store(cmd, supervisor)
+}
+
+// SuperviseShellCommand attaches run ownership to a command that the caller has
+// already prepared with ConfigureShellCommand, so the run supervisor can reap
+// its process group at final cleanup. It is a no-op when ctx carries no
+// RunSupervisor.
+func SuperviseShellCommand(ctx context.Context, cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
 	if supervisor := RunSupervisorFromContext(ctx); supervisor != nil {
 		supervisedCommands.Store(cmd, supervisor)
 	}
