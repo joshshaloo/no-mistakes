@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
@@ -56,11 +58,16 @@ func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 	cmd.Env = NonInteractiveEnv(dir)
 	winproc.Harden(cmd)
-	out, err := cmd.Output()
+	shellenv.ConfigureShellCommandForContext(ctx, cmd)
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
-		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(ee.Stderr))
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr == "" {
+			if ee, ok := err.(*exec.ExitError); ok {
+				stderr = strings.TrimSpace(string(ee.Stderr))
+			}
 		}
 		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
 	}
@@ -117,7 +124,8 @@ func isBareGitDir(dir string) bool {
 func InitBare(ctx context.Context, path string) error {
 	cmd := exec.CommandContext(ctx, "git", "init", "--bare", path)
 	winproc.Harden(cmd)
-	out, err := cmd.CombinedOutput()
+	shellenv.ConfigureShellCommandForContext(ctx, cmd)
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		return fmt.Errorf("git init --bare: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -373,7 +381,8 @@ func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
 	cmd.Dir = dir
 	winproc.Harden(cmd)
-	if err := cmd.Run(); err != nil {
+	shellenv.ConfigureShellCommandForContext(ctx, cmd)
+	if err := shellenv.RunShellCommand(cmd); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			// Exit 1 means HEAD is not a symbolic ref — detached.
 			if ee.ExitCode() == 1 {

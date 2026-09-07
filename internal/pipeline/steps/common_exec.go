@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -167,6 +168,7 @@ func stepCmdContext(sctx *pipeline.StepContext, ctx context.Context, name string
 	cmd := exec.CommandContext(ctx, resolved, args...)
 	cmd.Dir = sctx.WorkDir
 	winproc.Harden(cmd)
+	shellenv.ConfigureShellCommandForContext(ctx, cmd)
 	if len(sctx.Env) > 0 {
 		cmd.Env = mergeEnv(sctx.Env)
 	}
@@ -182,11 +184,15 @@ func stepCmdContext(sctx *pipeline.StepContext, ctx context.Context, name string
 func stepGitRun(sctx *pipeline.StepContext, args ...string) (string, error) {
 	cmd := stepCmd(sctx, "git", args...)
 	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
-	out, err := cmd.Output()
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
-		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(ee.Stderr))
+		stderr := strings.TrimSpace(stderrBuf.String())
+		if stderr == "" {
+			if ee, ok := err.(*exec.ExitError); ok {
+				stderr = strings.TrimSpace(string(ee.Stderr))
+			}
 		}
 		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
 	}
@@ -239,7 +245,7 @@ func stepAuthConfigured(sctx *pipeline.StepContext, provider scm.Provider) bool 
 		return false
 	}
 	cmd := stepCmd(sctx, args[0], args[1:]...)
-	return cmd.Run() == nil
+	return shellenv.RunShellCommand(cmd) == nil
 }
 
 // runShellCommand executes a shell command and returns stdout+stderr, exit code, and error.
@@ -259,7 +265,7 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", cmdStr)
 	}
-	shellenv.ConfigureShellCommand(cmd)
+	shellenv.ConfigureShellCommandForContext(ctx, cmd)
 	cmd.Dir = dir
 	if len(env) > 0 {
 		cmd.Env = mergeEnv(env)

@@ -59,7 +59,12 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 // process-group lifecycle. Unix needs no extra setup beyond cmd.Start, but the
 // wrapper keeps call sites aligned with Windows job-object setup.
 func StartShellCommand(cmd *exec.Cmd) error {
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		unregisterShellCommand(cmd)
+		return err
+	}
+	registerStartedShellCommand(cmd)
+	return nil
 }
 
 // TerminateShellCommandGroup SIGKILLs the whole process group led by a command
@@ -82,6 +87,7 @@ func StartShellCommand(cmd *exec.Cmd) error {
 // a member is alive, so when the leader exited cleanly with no survivors the
 // kill is a harmless no-op (ESRCH). A nil or never-started command is a no-op.
 func TerminateShellCommandGroup(cmd *exec.Cmd) {
+	defer unregisterShellCommand(cmd)
 	if cmd == nil || cmd.Process == nil {
 		return
 	}

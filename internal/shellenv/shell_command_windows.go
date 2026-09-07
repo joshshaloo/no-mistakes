@@ -115,23 +115,29 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 // fails instead of running without clean-exit descendant cleanup.
 func StartShellCommand(cmd *exec.Cmd) error {
 	if err, ok := takeShellCommandJobSetupError(cmd); ok {
+		unregisterShellCommand(cmd)
 		return fmt.Errorf("windows job object setup: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
+		unregisterShellCommand(cmd)
 		closeShellCommandJob(cmd)
 		return err
 	}
 	job, ok := shellCommandJob(cmd)
 	if !ok {
+		registerStartedShellCommand(cmd)
 		return nil
 	}
 	if err := assignShellCommandJobFunc(job.handle, uint32(cmd.Process.Pid)); err != nil {
+		unregisterShellCommand(cmd)
 		return failStartedShellCommand(cmd, fmt.Errorf("assign process to job object: %w", err))
 	}
 	job.assigned.Store(true)
 	if err := resumeProcessThreadsFunc(uint32(cmd.Process.Pid)); err != nil {
+		unregisterShellCommand(cmd)
 		return failStartedShellCommand(cmd, err)
 	}
+	registerStartedShellCommand(cmd)
 	return nil
 }
 
@@ -140,6 +146,7 @@ func StartShellCommand(cmd *exec.Cmd) error {
 // errors get the same process-tree cleanup as context cancellation. A nil or
 // never-started command is a no-op.
 func TerminateShellCommandGroup(cmd *exec.Cmd) {
+	defer unregisterShellCommand(cmd)
 	if cmd == nil || cmd.Process == nil {
 		return
 	}

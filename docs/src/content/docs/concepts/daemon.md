@@ -84,12 +84,14 @@ When a push arrives via the post-receive hook:
 1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`
 2. Starts the pipeline executor in that worktree
 3. Streams events to any connected TUI clients and serves request/response state to AXI clients
-4. Cleans up the worktree when the run finishes (success or failure), but only after byte-verifying that the run's exact recorded head is pinned under its own gate reference
+4. Terminates the run-owned process groups with `SIGTERM`, waits a bounded grace period, then uses `SIGKILL` for survivors before deleting the worktree
+5. Cleans up the worktree when the run finishes (success or failure), but only after byte-verifying that the run's exact recorded head is pinned under its own gate reference
 
 Pipeline agents are prompted to keep intentional writes inside that detached worktree and avoid changing system state outside it, such as Homebrew packages, apps under `/Applications`, or global tool configuration.
 That reduces surprising machine-level side effects and macOS App Management prompts, but it is prompt steering rather than a true sandbox.
 While executing steps, the daemon also owns child-process cleanup.
-Configured commands and one-shot agent subprocesses are terminated as a process tree on completion, failure, or cancellation so leaked test workers, build watchers, or dev servers cannot accumulate across runs.
+Configured commands, SCM CLI calls, Git subprocesses, and agent subprocesses are registered with the run's process supervisor instead of the daemon's own process group.
+One-shot commands are still terminated as a process tree on completion, failure, or cancellation, and final run cleanup reaps any remaining run-owned groups before worktree removal so leaked test workers, build watchers, dashboards, or dev servers cannot survive with a deleted cwd or hold a port for the next run.
 
 ## Concurrent push handling
 
@@ -114,7 +116,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
-- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`; only leftovers from terminal runs or directories with no matching run record are removed. A worktree that still belongs to a run row is removed only after its recorded head is exactly pinned; when the pinned, recorded, and live heads disagree, every head is preserved under its own reference and the worktree is deliberately retained as independent evidence
+- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`; only leftovers from terminal runs or directories with no matching run record are removed. Before any orphaned worktree is removed, cleanup reaps process groups still rooted in that worktree without signalling the daemon or sibling runs. A worktree that still belongs to a run row is removed only after its recorded head is exactly pinned; when the pinned, recorded, and live heads disagree, every head is preserved under its own reference and the worktree is deliberately retained as independent evidence
 - Retires a run's preserved head reference only when the run is terminal, the reference still matches durable run authority exactly, it carries no crash candidate, no run is active on that branch, and either custody was returned or that exact head reached the push target and its pull request merged. That lets the managed gate reclaim objects without ever dropping the last evidence of unpublished work; crash candidates, resolution archives, and every uncertain head are always retained
 - Migrates gates named by authoritative repository records, plus legacy directories with the strict `<repoID>.git` shape. Before changing an unstamped candidate, it validates that the directory is a bare repository without relying on the current directory or ancestor Git discovery; unrelated and malformed directories are rejected without hook or Git mutation
 - For a validated legacy gate, installs or refreshes the no-mistakes-managed pre-receive admission and post-receive notification hooks, preserving an existing custom pre-receive hook behind the admission wrapper, then enables push-option support and reapplies per-worktree hook-path isolation

@@ -20,6 +20,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -280,7 +281,8 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		_ = plan.agent.Close()
 		return
 	}
-	runCtx, cancel := context.WithCancelCause(context.Background())
+	supervisor := shellenv.NewRunSupervisor(plan.run.ID, plan.workDir)
+	runCtx, cancel := context.WithCancelCause(shellenv.WithRunSupervisor(context.Background(), supervisor))
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
 	done := make(chan struct{})
 	m.mu.Lock()
@@ -306,7 +308,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
-			if err := cleanupRunWorktree(context.Background(), m.db, plan.gateDir, plan.workDir, plan.run.ID); err != nil {
+			if err := cleanupRunWorktreeWithSupervisor(context.Background(), m.db, plan.gateDir, plan.workDir, plan.run.ID, supervisor); err != nil {
 				slog.Warn("failed to safely remove recovered worktree", "path", plan.workDir, "error", err)
 			}
 			m.mu.Lock()
@@ -714,14 +716,20 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 		return "", fmt.Errorf("preserve initial run head: %w", err)
 	}
 
-	// Create worktree from the gate bare repo.
+	// Create a run supervisor before any worktree-scoped subprocess starts so
+	// setup-failure cleanup and the background lifecycle share one process-group
+	// owner.
 	wtDir := m.paths.WorktreeDir(repo.ID, run.ID)
-	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
+	supervisor := shellenv.NewRunSupervisor(run.ID, wtDir)
+	setupCtx := shellenv.WithRunSupervisor(ctx, supervisor)
+
+	// Create worktree from the gate bare repo.
+	if err := git.WorktreeAdd(setupCtx, gateDir, wtDir, headSHA); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
-	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
+	if err := git.CopyLocalUserIdentity(setupCtx, repo.WorkingPath, wtDir); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
 		trackStartFailure("configure_worktree_identity")
 		return "", fmt.Errorf("configure worktree git identity: %w", err)
@@ -737,9 +745,9 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// branch has already removed - silently running stale shell.
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
-		if err := git.FetchRemoteBranch(ctx, wtDir, "origin", repo.DefaultBranch); err != nil {
+		if err := git.FetchRemoteBranch(setupCtx, wtDir, "origin", repo.DefaultBranch); err != nil {
 			slog.Warn("failed to fetch default branch into worktree; trusted config disabled (commands/agent from pushed branch will be dropped)", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
-		} else if sha, err := git.ResolveRef(ctx, wtDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
+		} else if sha, err := git.ResolveRef(setupCtx, wtDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
 			slog.Warn("failed to resolve fetched default-branch ref; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
 		} else {
 			trustedSHA = sha
@@ -751,7 +759,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	bgOwnsWorktree := false
 	defer func() {
 		if !bgOwnsWorktree {
-			if rmErr := cleanupRunWorktree(context.Background(), m.db, gateDir, wtDir, run.ID); rmErr != nil {
+			if rmErr := cleanupRunWorktreeWithSupervisor(context.Background(), m.db, gateDir, wtDir, run.ID, supervisor); rmErr != nil {
 				slog.Warn("failed to safely remove worktree during setup cleanup", "path", wtDir, "error", rmErr)
 			}
 		}
@@ -785,12 +793,12 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	// commands/agent empty. An unreadable trusted tree aborts below.
 	// SECURITY: a trusted-config fetch failure must abort, not silently disable
 	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
-	if err := assertGateTrustedConfigReadable(ctx, wtDir, repo.DefaultBranch, trustedSHA); err != nil {
+	if err := assertGateTrustedConfigReadable(setupCtx, wtDir, repo.DefaultBranch, trustedSHA); err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("trusted_config_unreadable")
 		return "", err
 	}
-	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
+	trustedRepoCfg := loadTrustedRepoConfig(setupCtx, wtDir, trustedSHA, run.ID)
 	allowRepoCommands := trustedRepoCfg != nil && trustedRepoCfg.AllowRepoCommands
 	effectiveRepoCfg := config.EffectiveRepoConfig(repoCfg, trustedRepoCfg, allowRepoCommands)
 	if allowRepoCommands {
@@ -859,7 +867,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	})
 
 	// Create executor with event broadcast.
-	runCtx, cancel := context.WithCancelCause(context.Background())
+	runCtx, cancel := context.WithCancelCause(shellenv.WithRunSupervisor(context.Background(), supervisor))
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
 	executor.SetSkippedSteps(skipSteps)
 
@@ -911,7 +919,7 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 			m.closeSubscribers(run.ID)
 			// Clean up only after the exact recorded head is pinned. A mismatch
 			// retains the worktree and a separately named crash candidate.
-			if rmErr := cleanupRunWorktree(context.Background(), m.db, gateDir, wtDir, run.ID); rmErr != nil {
+			if rmErr := cleanupRunWorktreeWithSupervisor(context.Background(), m.db, gateDir, wtDir, run.ID, supervisor); rmErr != nil {
 				slog.Warn("failed to safely remove worktree", "path", wtDir, "error", rmErr)
 			}
 			// Remove tracking.

@@ -286,5 +286,6 @@ func AuthConfigured(ctx context.Context, provider Provider, workDir string) bool
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = workDir
 	winproc.Harden(cmd)
-	return cmd.Run() == nil
+	shellenv.ConfigureShellCommandForContext(ctx, cmd)
+	return shellenv.RunShellCommand(cmd) == nil
 }

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // CmdFactory builds an exec.Cmd in the caller's workdir with the caller's env.
@@ -132,7 +133,7 @@ func (h *Host) Available(ctx context.Context) error {
 	if h.host != "" {
 		authArgs = append(authArgs, "--hostname", h.host)
 	}
-	if err := h.cmd(ctx, "glab", authArgs...).Run(); err != nil {
+	if err := shellenv.RunShellCommand(h.cmd(ctx, "glab", authArgs...)); err != nil {
 		return errors.New("glab CLI is not authenticated")
 	}
 	return nil
@@ -171,7 +172,7 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 	// whole command. Rely on the open-by-default behavior.
 	args = append(args, "--output", "json")
 	cmd := h.cmd(ctx, "glab", args...)
-	out, err := cmd.CombinedOutput()
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("glab mr list: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -198,7 +199,7 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 		"--description", content.Body,
 		"--yes",
 	)
-	out, err := cmd.CombinedOutput()
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("glab mr create: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -225,7 +226,7 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		"--description", content.Body,
 		"--yes",
 	)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := shellenv.CombinedOutputShellCommand(cmd); err != nil {
 		return nil, fmt.Errorf("glab mr update: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return pr, nil
@@ -266,7 +267,7 @@ func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.Mergeable
 
 func (h *Host) viewMR(ctx context.Context, id string) (mrPayload, error) {
 	cmd := h.cmd(ctx, "glab", "mr", "view", id, "--output", "json")
-	out, err := cmd.CombinedOutput()
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		return mrPayload{}, fmt.Errorf("glab mr view: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -281,7 +282,7 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	// glab ci status --mr <id> --output json lists jobs for the MR's latest pipeline.
 	// Not all glab versions support --mr; fall back to listing pipelines by branch via view.
 	cmd := h.cmd(ctx, "glab", "ci", "status", "--mr", pr.Number, "--output", "json")
-	out, err := cmd.CombinedOutput()
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		if !isUnsupportedMRFlagError(out) {
 			return nil, fmt.Errorf("glab ci status: %s: %w", strings.TrimSpace(string(out)), err)
@@ -318,7 +319,7 @@ func isUnsupportedMRFlagError(out []byte) bool {
 func (h *Host) getChecksFallback(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	// Try fetching the MR's pipeline and listing its jobs.
 	cmd := h.cmd(ctx, "glab", "mr", "view", pr.Number, "--output", "json")
-	out, err := cmd.CombinedOutput()
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("glab mr view: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -338,7 +339,7 @@ func (h *Host) getChecksFallback(ctx context.Context, pr *scm.PR) ([]scm.Check, 
 		return nil, nil
 	}
 	jobsCmd := h.cmd(ctx, "glab", h.pipelineJobsArgs(payload.HeadPipeline.ID)...)
-	jobsOut, err := jobsCmd.CombinedOutput()
+	jobsOut, err := shellenv.CombinedOutputShellCommand(jobsCmd)
 	if err != nil {
 		return nil, fmt.Errorf("glab pipeline jobs: %s: %w", strings.TrimSpace(string(jobsOut)), err)
 	}
@@ -351,7 +352,7 @@ func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, _ string, _
 	}
 	// Get the MR's pipeline jobs, find a failed one whose name matches, trace it.
 	viewCmd := h.cmd(ctx, "glab", "mr", "view", pr.Number, "--output", "json")
-	viewOut, err := viewCmd.CombinedOutput()
+	viewOut, err := shellenv.CombinedOutputShellCommand(viewCmd)
 	if err != nil {
 		return "", nil
 	}
@@ -364,7 +365,7 @@ func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, _ string, _
 		return "", nil
 	}
 	jobsCmd := h.cmd(ctx, "glab", h.pipelineJobsArgs(payload.HeadPipeline.ID)...)
-	jobsOut, err := jobsCmd.CombinedOutput()
+	jobsOut, err := shellenv.CombinedOutputShellCommand(jobsCmd)
 	if err != nil {
 		return "", nil
 	}
@@ -373,7 +374,7 @@ func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, _ string, _
 		return "", nil
 	}
 	traceCmd := h.cmd(ctx, "glab", "ci", "trace", fmt.Sprintf("%d", jobID))
-	traceOut, _ := traceCmd.Output()
+	traceOut, _ := shellenv.OutputShellCommand(traceCmd)
 	return strings.TrimSpace(string(traceOut)), nil
 }
 

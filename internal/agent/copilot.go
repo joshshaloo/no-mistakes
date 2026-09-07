@@ -41,7 +41,7 @@ func (a *copilotAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	cmd.Dir = opts.CWD
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
-	shellenv.ConfigureShellCommand(cmd)
+	shellenv.ConfigureShellCommandForContext(ctx, cmd)
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
