@@ -12,6 +12,7 @@ func ConfigureShellCommand(cmd *exec.Cmd) {}
 // StartShellCommand starts cmd on platforms without extra process-tree setup.
 // It exists so call sites can use the same lifecycle helpers on every platform.
 func StartShellCommand(cmd *exec.Cmd) error {
+	applySupervisedRunEnv(cmd)
 	if err := cmd.Start(); err != nil {
 		unregisterShellCommand(cmd)
 		return err

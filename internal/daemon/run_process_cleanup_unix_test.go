@@ -134,8 +134,8 @@ func TestRunCleanupDoesNotKillDaemonOrSiblingRun(t *testing.T) {
 // TestRunCleanupSparesForeignProcessInWorktree pins the containment half of the
 // cwd-discovery fail-safe: a process that merely has its working directory
 // inside the run worktree - a developer's shell or editor inspecting a retained
-// or custody worktree - does not descend from the daemon and must survive run
-// cleanup untouched, even though the run's own escaped child is reaped.
+// or custody worktree - carries no run marker and must survive run cleanup
+// untouched, even though the run's own leaked child is reaped.
 func TestRunCleanupSparesForeignProcessInWorktree(t *testing.T) {
 	p, database, repo, head := newRunCleanupFixture(t)
 	pidDir := t.TempDir()
@@ -161,9 +161,10 @@ func TestRunCleanupSparesForeignProcessInWorktree(t *testing.T) {
 }
 
 // startForeignWorktreeProcess leaves a process running with its cwd inside
-// workDir that is not part of the daemon's process tree. The launching shell
-// exits immediately, so the surviving background process reparents away from
-// the test binary while keeping the dead shell's process group.
+// workDir that no run ever launched, so it carries no run marker. The launching
+// shell exits immediately, giving the survivor the same shape as an escaped run
+// child - own process group, leader gone, cwd in the worktree - so only the
+// missing marker distinguishes it.
 func startForeignWorktreeProcess(t *testing.T, workDir, pidPath string) int {
 	t.Helper()
 	script := fmt.Sprintf("(while :; do sleep 1; done) & echo $! > %s", shellQuoteForTest(pidPath))

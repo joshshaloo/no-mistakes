@@ -459,7 +459,7 @@ func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths) {
 				continue
 			}
 			if run != nil {
-				if err := cleanupRunWorktreeWithSupervisor(ctx, d, gateDir, wtPath, runID, shellenv.NewRunSupervisor(runID, wtPath)); err != nil {
+				if err := cleanupRunWorktreeWithSupervisor(ctx, d, gateDir, wtPath, runID, shellenv.NewOrphanRunSupervisor(runID, wtPath)); err != nil {
 					if errors.Is(err, errWorktreeRetainedForCustody) {
 						slog.Warn("retained orphaned worktree because its recorded head was not safely pinned", "path", wtPath, "error", err)
 					} else {
@@ -470,7 +470,7 @@ func cleanupOrphanWorktrees(d *db.DB, p *paths.Paths) {
 				slog.Info("removed safely preserved orphaned worktree", "path", wtPath)
 				continue
 			}
-			if err := shellenv.NewRunSupervisor(runID, wtPath).Terminate(ctx); err != nil {
+			if err := shellenv.NewOrphanRunSupervisor(runID, wtPath).Terminate(ctx); err != nil {
 				slog.Warn("failed to terminate unowned orphaned worktree processes before removal", "path", wtPath, "error", err)
 				continue
 			}

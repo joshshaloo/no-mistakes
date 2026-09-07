@@ -64,8 +64,15 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.CreationFlags |= createNewProcessGroup
-	if job, err := newShellCommandJobFunc(); err == nil {
+	// ConfigureShellCommand can legitimately run twice on one command: a step
+	// factory prepares it and a client (bkt) prepares it again for the non-run
+	// case. Creating a second job would orphan the first KILL_ON_JOB_CLOSE
+	// handle for the daemon's lifetime, so reuse whatever is already stored.
+	if _, prepared := shellCommandJobs.Load(cmd); prepared {
+		cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
+	} else if job, err := newShellCommandJobFunc(); err == nil {
 		shellCommandJobs.Store(cmd, &shellCommandJobState{handle: job})
+		shellCommandJobSetupErrors.Delete(cmd)
 		cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
 	} else {
 		shellCommandJobSetupErrors.Store(cmd, err)
@@ -118,6 +125,7 @@ func StartShellCommand(cmd *exec.Cmd) error {
 		unregisterShellCommand(cmd)
 		return fmt.Errorf("windows job object setup: %w", err)
 	}
+	applySupervisedRunEnv(cmd)
 	if err := cmd.Start(); err != nil {
 		unregisterShellCommand(cmd)
 		closeShellCommandJob(cmd)

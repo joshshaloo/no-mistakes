@@ -1,15 +1,35 @@
 package shellenv
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
 
 const defaultRunSupervisorGrace = 2 * time.Second
+
+const (
+	// RunIDEnvVar and DaemonInstanceEnvVar stamp run ownership into every
+	// subprocess a run launches. Process ancestry cannot prove ownership: an
+	// escaped background process is by definition one whose command leader has
+	// exited, so it has already been reparented to init and its ppid chain no
+	// longer reaches the daemon. An inherited environment survives both
+	// reparenting and a daemon restart, so it is the durable proof that a
+	// process found sitting in a run worktree belongs to that run.
+	RunIDEnvVar          = "NO_MISTAKES_RUN_ID"
+	DaemonInstanceEnvVar = "NO_MISTAKES_DAEMON_INSTANCE"
+)
+
+// daemonInstanceID distinguishes this daemon process from any earlier one that
+// stamped the same run marker. The PID alone is reusable across restarts, so
+// the start timestamp is mixed in.
+var daemonInstanceID = fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
 
 type runSupervisorContextKey struct{}
 
@@ -22,17 +42,67 @@ type RunSupervisor struct {
 	workDir string
 	grace   time.Duration
 
+	// adoptPreviousInstances widens ownership to marked processes left behind
+	// by an earlier daemon instance. Only startup orphan cleanup sets it.
+	adoptPreviousInstances bool
+
 	mu     sync.Mutex
 	groups map[int]struct{}
 }
 
+// runOwnership is the proof a discovered process must satisfy before the
+// supervisor may signal its group.
+type runOwnership struct {
+	runID                  string
+	instanceID             string
+	adoptPreviousInstances bool
+}
+
+// owns reports whether a process environment block proves the process belongs
+// to this run. An unmarked process - a developer's shell or editor opened in a
+// retained or custody worktree - never qualifies, whatever its cwd.
+func (o runOwnership) owns(environ []byte) bool {
+	if o.runID == "" || len(environ) == 0 {
+		return false
+	}
+	runID, ok := environValue(environ, RunIDEnvVar)
+	if !ok || runID == "" {
+		return false
+	}
+	if runID == o.runID {
+		return true
+	}
+	if !o.adoptPreviousInstances {
+		return false
+	}
+	// A marked process from a different daemon instance belongs to a run that
+	// instance can no longer be executing, so startup cleanup may reap it.
+	instance, ok := environValue(environ, DaemonInstanceEnvVar)
+	return ok && instance != "" && instance != o.instanceID
+}
+
+// environValue reads name from a NUL-separated environment block.
+func environValue(environ []byte, name string) (string, bool) {
+	prefix := name + "="
+	for _, entry := range bytes.Split(environ, []byte{0}) {
+		if len(entry) == 0 {
+			continue
+		}
+		if text := string(entry); strings.HasPrefix(text, prefix) {
+			return strings.TrimPrefix(text, prefix), true
+		}
+	}
+	return "", false
+}
+
 // NewRunSupervisor creates a process-group supervisor for one run. workDir is
 // used as an additional fail-safe during cleanup: a process group is discovered
-// when one of its members both has a cwd inside the run worktree and descends
-// from this daemon process, so a run child that escaped its command leader is
-// still reaped while unrelated daemon groups, sibling-run groups, and foreign
-// processes that merely sit in the worktree (a developer's shell or editor
-// inspecting a retained or custody worktree) are never signalled.
+// when one of its members both has a cwd inside the run worktree and carries
+// this run's inherited environment marker, so a run child that escaped its
+// command leader and reparented away is still reaped while unrelated daemon
+// groups, sibling-run groups, and foreign processes that merely sit in the
+// worktree (a developer's shell or editor inspecting a retained or custody
+// worktree) are never signalled.
 //
 // The cwd-based discovery fail-safe is implemented on Linux only; on Windows
 // the kill-on-close job object covers escaped descendants, and on other
@@ -44,6 +114,17 @@ func NewRunSupervisor(runID, workDir string) *RunSupervisor {
 		grace:   defaultRunSupervisorGrace,
 		groups:  make(map[int]struct{}),
 	}
+}
+
+// NewOrphanRunSupervisor creates a supervisor for startup cleanup of a worktree
+// left behind by a run that is no longer executing. It has no registered
+// command groups to reap, so discovery is its only reach, and it additionally
+// adopts marked processes stamped by an earlier daemon instance - every run of
+// a previous instance is by definition finished.
+func NewOrphanRunSupervisor(runID, workDir string) *RunSupervisor {
+	supervisor := NewRunSupervisor(runID, workDir)
+	supervisor.adoptPreviousInstances = true
+	return supervisor
 }
 
 // WithRunSupervisor returns a child context that marks subprocesses as owned by
@@ -108,7 +189,7 @@ func (s *RunSupervisor) Terminate(ctx context.Context) error {
 		return nil
 	}
 	groups := s.snapshotGroups()
-	for _, group := range discoverWorktreeProcessGroups(s.workDir) {
+	for _, group := range discoverWorktreeProcessGroups(s.workDir, s.ownership()) {
 		groups[group] = struct{}{}
 	}
 	var errs []error
@@ -119,6 +200,54 @@ func (s *RunSupervisor) Terminate(ctx context.Context) error {
 	}
 	s.clearGroups()
 	return errors.Join(errs...)
+}
+
+func (s *RunSupervisor) ownership() runOwnership {
+	if s == nil {
+		return runOwnership{}
+	}
+	return runOwnership{
+		runID:                  s.runID,
+		instanceID:             daemonInstanceID,
+		adoptPreviousInstances: s.adoptPreviousInstances,
+	}
+}
+
+// applySupervisedRunEnv stamps the run marker into cmd's environment. It runs
+// at StartShellCommand, the one boundary every run-owned command passes through
+// after its caller has finished assembling cmd.Env, so no call site can drop the
+// marker by assigning Env afterwards.
+func applySupervisedRunEnv(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+	value, ok := supervisedCommands.Load(cmd)
+	if !ok {
+		return
+	}
+	supervisor, _ := value.(*RunSupervisor)
+	if supervisor == nil || supervisor.runID == "" {
+		return
+	}
+	base := cmd.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	env := make([]string, 0, len(base)+2)
+	for _, entry := range base {
+		if hasEnvName(entry, RunIDEnvVar) || hasEnvName(entry, DaemonInstanceEnvVar) {
+			continue
+		}
+		env = append(env, entry)
+	}
+	cmd.Env = append(env,
+		RunIDEnvVar+"="+supervisor.runID,
+		DaemonInstanceEnvVar+"="+daemonInstanceID,
+	)
+}
+
+func hasEnvName(entry, name string) bool {
+	return strings.HasPrefix(entry, name+"=")
 }
 
 func (s *RunSupervisor) trackGroup(group int) {

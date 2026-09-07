@@ -59,6 +59,7 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 // process-group lifecycle. Unix needs no extra setup beyond cmd.Start, but the
 // wrapper keeps call sites aligned with Windows job-object setup.
 func StartShellCommand(cmd *exec.Cmd) error {
+	applySupervisedRunEnv(cmd)
 	if err := cmd.Start(); err != nil {
 		unregisterShellCommand(cmd)
 		return err
