@@ -5,6 +5,7 @@ package shellenv
 import (
 	"context"
 	"os/exec"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -71,9 +72,6 @@ func TestStartShellCommand_StampsRunMarkerOnSupervisedCommand(t *testing.T) {
 	if !strings.Contains(string(out), RunIDEnvVar+"=run-marker") {
 		t.Fatalf("child environment missing %s marker:\n%s", RunIDEnvVar, out)
 	}
-	if !strings.Contains(string(out), DaemonInstanceEnvVar+"="+daemonInstanceID) {
-		t.Fatalf("child environment missing %s marker:\n%s", DaemonInstanceEnvVar, out)
-	}
 }
 
 func TestStartShellCommand_LeavesUnsupervisedCommandUnmarked(t *testing.T) {
@@ -90,31 +88,22 @@ func TestStartShellCommand_LeavesUnsupervisedCommandUnmarked(t *testing.T) {
 }
 
 // TestRunOwnership_OwnsOnlyMarkedProcesses pins the single ownership predicate.
-// Carrying this run's marker is the only thing that authorizes a kill: the
-// daemon instance that stamped it is irrelevant, and no other signal - another
-// run's marker, a shared working directory - may ever stand in for it, because
-// several daemons with different NM_HOME roots can be live at once and one of
-// them may still be executing that other run.
+// Carrying this run's marker is the only thing that authorizes a kill: no other
+// signal - another run's marker, a shared working directory - may ever stand in
+// for it, because several daemons with different NM_HOME roots can be live at
+// once and one of them may still be executing that other run.
 func TestRunOwnership_OwnsOnlyMarkedProcesses(t *testing.T) {
-	ownRun := environBlock(RunIDEnvVar+"=run-a", DaemonInstanceEnvVar+"=instance-1", "PATH=/usr/bin")
-	ownRunOtherInstance := environBlock(RunIDEnvVar+"=run-a", DaemonInstanceEnvVar+"=instance-0")
-	siblingRun := environBlock(RunIDEnvVar+"=run-b", DaemonInstanceEnvVar+"=instance-1")
-	otherRunOtherInstance := environBlock(RunIDEnvVar+"=run-b", DaemonInstanceEnvVar+"=instance-0")
-	emptyRunID := environBlock(RunIDEnvVar+"=", DaemonInstanceEnvVar+"=instance-1")
+	ownRun := environBlock(RunIDEnvVar+"=run-a", "PATH=/usr/bin")
+	siblingRun := environBlock(RunIDEnvVar+"=run-b", "PATH=/usr/bin")
+	emptyRunID := environBlock(RunIDEnvVar+"=", "PATH=/usr/bin")
 	foreign := environBlock("PATH=/usr/bin", "SHELL=/bin/sh")
 
 	current := runOwnership{runID: "run-a"}
 	if !current.ownsRun(ownRun) {
 		t.Error("current run must own its own marked process")
 	}
-	if !current.ownsRun(ownRunOtherInstance) {
-		t.Error("a globally unique run ID must identify the run across daemon instances")
-	}
 	if current.ownsRun(siblingRun) {
-		t.Error("current run must not own a sibling run's process")
-	}
-	if current.ownsRun(otherRunOtherInstance) {
-		t.Error("another run's process must be spared whatever daemon instance stamped it")
+		t.Error("another run's process must be spared, whichever daemon stamped it")
 	}
 	if current.ownsRun(emptyRunID) {
 		t.Error("an empty run ID must never match")
@@ -127,6 +116,44 @@ func TestRunOwnership_OwnsOnlyMarkedProcesses(t *testing.T) {
 	}
 	if (runOwnership{}).ownsRun(ownRun) {
 		t.Error("a supervisor without a run ID must own nothing")
+	}
+}
+
+// TestWithRunMarkers_ReplacesInheritedMarker pins that a marker already present
+// in the environment is removed rather than shadowed. A daemon running inside
+// another run - this repository dogfoods its own pipeline - would otherwise hand
+// its own marker down, and cleanup would attribute the escapee to the wrong run.
+func TestWithRunMarkers_ReplacesInheritedMarker(t *testing.T) {
+	supervisor := NewRunSupervisor("run-inner", t.TempDir())
+	marked := supervisor.WithRunMarkers([]string{
+		RunIDEnvVar + "=run-outer",
+		"PATH=/usr/bin",
+	})
+
+	var runIDs []string
+	for _, entry := range marked {
+		if hasEnvName(entry, RunIDEnvVar) {
+			runIDs = append(runIDs, entry)
+		}
+	}
+	if len(runIDs) != 1 {
+		t.Fatalf("expected exactly one %s entry, got %v", RunIDEnvVar, runIDs)
+	}
+	if runIDs[0] != RunIDEnvVar+"=run-inner" {
+		t.Fatalf("%s = %q, want the supervisor's own run", RunIDEnvVar, runIDs[0])
+	}
+	if !slices.Contains(marked, "PATH=/usr/bin") {
+		t.Errorf("unrelated environment entries must be preserved: %v", marked)
+	}
+}
+
+func TestWithRunMarkers_LeavesEnvAloneWithoutARun(t *testing.T) {
+	env := []string{"PATH=/usr/bin"}
+	if got := (*RunSupervisor)(nil).WithRunMarkers(env); !slices.Equal(got, env) {
+		t.Errorf("nil supervisor changed the environment: %v", got)
+	}
+	if got := NewRunSupervisor("", t.TempDir()).WithRunMarkers(env); !slices.Equal(got, env) {
+		t.Errorf("supervisor without a run ID changed the environment: %v", got)
 	}
 }
 

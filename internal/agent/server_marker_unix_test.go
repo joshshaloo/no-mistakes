@@ -41,9 +41,6 @@ func TestStartServerWithPort_StampsRunMarkerIntoServerEnvironment(t *testing.T) 
 	if !strings.Contains(child, shellenv.RunIDEnvVar+"=run-managed-server") {
 		t.Fatalf("managed-server child is missing %s:\n%s", shellenv.RunIDEnvVar, child)
 	}
-	if !strings.Contains(child, shellenv.DaemonInstanceEnvVar+"=") {
-		t.Fatalf("managed-server child is missing %s:\n%s", shellenv.DaemonInstanceEnvVar, child)
-	}
 }
 
 func TestStartServerWithPort_LeavesEnvironmentUnmarkedOutsideARun(t *testing.T) {

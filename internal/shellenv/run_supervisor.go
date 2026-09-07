@@ -16,22 +16,16 @@ import (
 
 const defaultRunSupervisorGrace = 2 * time.Second
 
-const (
-	// RunIDEnvVar and DaemonInstanceEnvVar stamp run ownership into every
-	// subprocess a run launches. Process ancestry cannot prove ownership: an
-	// escaped background process is by definition one whose command leader has
-	// exited, so it has already been reparented to init and its ppid chain no
-	// longer reaches the daemon. An inherited environment survives both
-	// reparenting and a daemon restart, so it is the durable proof that a
-	// process found sitting in a run worktree belongs to that run.
-	RunIDEnvVar          = "NO_MISTAKES_RUN_ID"
-	DaemonInstanceEnvVar = "NO_MISTAKES_DAEMON_INSTANCE"
-)
-
-// daemonInstanceID distinguishes this daemon process from any earlier one that
-// stamped the same run marker. The PID alone is reusable across restarts, so
-// the start timestamp is mixed in.
-var daemonInstanceID = fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+// RunIDEnvVar names the run-ownership marker stamped at every run-owned launch
+// boundary and inherited by every descendant. It is the durable proof that a
+// process belongs to a run, and the only thing that authorizes cleanup to
+// signal it. Process ancestry cannot serve: an escaped background process is by
+// definition one whose command leader has exited, so it has already been
+// reparented to init and its ppid chain no longer reaches the daemon. An
+// inherited environment survives that, and survives a daemon restart. A working
+// directory cannot serve either - that a process is standing in the worktree
+// says nothing about who started it - so cwd is diagnostic only.
+const RunIDEnvVar = "NO_MISTAKES_RUN_ID"
 
 type runSupervisorContextKey struct{}
 
@@ -219,10 +213,10 @@ func (s *RunSupervisor) ownership() runOwnership {
 	return runOwnership{runID: s.runID}
 }
 
-// WithRunMarkers returns env with this run's ownership markers applied,
-// replacing any inherited values so a stale marker can never win. It is the
-// single owner of the marker names and values; every launch boundary that
-// starts a run-owned process routes through it.
+// WithRunMarkers returns env with this run's ownership marker applied,
+// replacing any inherited value so a stale marker can never win. It is the
+// single owner of the marker name and value; every launch boundary that starts
+// a run-owned process routes through it.
 func (s *RunSupervisor) WithRunMarkers(env []string) []string {
 	if s == nil || s.runID == "" {
 		return env
@@ -230,20 +224,17 @@ func (s *RunSupervisor) WithRunMarkers(env []string) []string {
 	if env == nil {
 		env = os.Environ()
 	}
-	marked := make([]string, 0, len(env)+2)
+	marked := make([]string, 0, len(env)+1)
 	for _, entry := range env {
-		if hasEnvName(entry, RunIDEnvVar) || hasEnvName(entry, DaemonInstanceEnvVar) {
+		if hasEnvName(entry, RunIDEnvVar) {
 			continue
 		}
 		marked = append(marked, entry)
 	}
-	return append(marked,
-		RunIDEnvVar+"="+s.runID,
-		DaemonInstanceEnvVar+"="+daemonInstanceID,
-	)
+	return append(marked, RunIDEnvVar+"="+s.runID)
 }
 
-// ApplyRunMarkers stamps the markers of the run carried by ctx onto env. It is
+// ApplyRunMarkers stamps the marker of the run carried by ctx onto env. It is
 // for launch boundaries that build their own process environment and do not go
 // through StartShellCommand, such as the managed agent server. Without a
 // RunSupervisor in ctx the environment is returned unchanged.

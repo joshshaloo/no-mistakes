@@ -277,7 +277,7 @@ func readPID(t *testing.T, path string) int {
 	return pid
 }
 
-// unmarkedTestEnv strips the run-ownership markers from the inherited
+// unmarkedTestEnv strips the run-ownership marker from the inherited
 // environment. Fixtures that must model a process no run owns cannot rely on
 // the test binary being launched unmarked: this repository dogfoods its own
 // pipeline, so `go test` itself runs inside a no-mistakes run and would
@@ -286,8 +286,7 @@ func unmarkedTestEnv() []string {
 	inherited := os.Environ()
 	env := make([]string, 0, len(inherited))
 	for _, entry := range inherited {
-		if strings.HasPrefix(entry, shellenv.RunIDEnvVar+"=") ||
-			strings.HasPrefix(entry, shellenv.DaemonInstanceEnvVar+"=") {
+		if strings.HasPrefix(entry, shellenv.RunIDEnvVar+"=") {
 			continue
 		}
 		env = append(env, entry)

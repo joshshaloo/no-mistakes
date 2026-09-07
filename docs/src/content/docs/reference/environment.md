@@ -207,11 +207,10 @@ If your env vars aren't set in your login shell's rc files (`.zprofile`, `.zshrc
 
 ## Environment the daemon injects
 
-The daemon stamps two read-only markers into every subprocess a run launches, so they are visible to your configured commands and to pipeline agents. Do not set them yourself; a value you export is replaced.
+The daemon stamps one read-only marker into every subprocess a run launches, so it is visible to your configured commands and to pipeline agents. Do not set it yourself; a value you export is replaced.
 
-| Variable                       | Value                                                     |
-| ------------------------------ | --------------------------------------------------------- |
-| `NO_MISTAKES_RUN_ID`           | The ID of the run that owns this process                   |
-| `NO_MISTAKES_DAEMON_INSTANCE`  | An identifier for the daemon process that started the run  |
+| Variable             | Value                                    |
+| -------------------- | ---------------------------------------- |
+| `NO_MISTAKES_RUN_ID` | The ID of the run that owns this process |
 
-They are how worktree cleanup proves a background process belongs to a run before signalling it, including after the process has been reparented away, moved to another directory, or outlived a daemon restart. See [Daemon](/concepts/daemon/) for the lifecycle guarantee they support.
+It is how worktree cleanup proves a background process belongs to a run before signalling it, including after the process has been reparented away, moved to another directory, or outlived a daemon restart. See [Daemon](/concepts/daemon/) for the lifecycle guarantee it supports.
