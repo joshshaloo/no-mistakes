@@ -89,14 +89,21 @@ func TestStartShellCommand_LeavesUnsupervisedCommandUnmarked(t *testing.T) {
 	}
 }
 
+// TestRunOwnership_OwnsOnlyMarkedProcesses pins the single ownership predicate.
+// Carrying this run's marker is the only thing that authorizes a kill: the
+// daemon instance that stamped it is irrelevant, and no other signal - another
+// run's marker, a shared working directory - may ever stand in for it, because
+// several daemons with different NM_HOME roots can be live at once and one of
+// them may still be executing that other run.
 func TestRunOwnership_OwnsOnlyMarkedProcesses(t *testing.T) {
 	ownRun := environBlock(RunIDEnvVar+"=run-a", DaemonInstanceEnvVar+"=instance-1", "PATH=/usr/bin")
 	ownRunOtherInstance := environBlock(RunIDEnvVar+"=run-a", DaemonInstanceEnvVar+"=instance-0")
 	siblingRun := environBlock(RunIDEnvVar+"=run-b", DaemonInstanceEnvVar+"=instance-1")
-	strandedRun := environBlock(RunIDEnvVar+"=run-b", DaemonInstanceEnvVar+"=instance-0")
+	otherRunOtherInstance := environBlock(RunIDEnvVar+"=run-b", DaemonInstanceEnvVar+"=instance-0")
+	emptyRunID := environBlock(RunIDEnvVar+"=", DaemonInstanceEnvVar+"=instance-1")
 	foreign := environBlock("PATH=/usr/bin", "SHELL=/bin/sh")
 
-	current := runOwnership{runID: "run-a", instanceID: "instance-1"}
+	current := runOwnership{runID: "run-a"}
 	if !current.ownsRun(ownRun) {
 		t.Error("current run must own its own marked process")
 	}
@@ -106,25 +113,20 @@ func TestRunOwnership_OwnsOnlyMarkedProcesses(t *testing.T) {
 	if current.ownsRun(siblingRun) {
 		t.Error("current run must not own a sibling run's process")
 	}
+	if current.ownsRun(otherRunOtherInstance) {
+		t.Error("another run's process must be spared whatever daemon instance stamped it")
+	}
+	if current.ownsRun(emptyRunID) {
+		t.Error("an empty run ID must never match")
+	}
 	if current.ownsRun(foreign) {
 		t.Error("an unmarked foreign process must never be owned")
 	}
 	if current.ownsRun(nil) {
 		t.Error("an unreadable environment must fail closed")
 	}
-	if current.adoptsStrandedRun(strandedRun) {
-		t.Error("run-end cleanup must never adopt another run's process")
-	}
-
-	orphan := runOwnership{runID: "run-a", instanceID: "instance-1", adoptPreviousInstances: true}
-	if !orphan.adoptsStrandedRun(strandedRun) {
-		t.Error("startup cleanup must be able to adopt another run stranded by a previous instance")
-	}
-	if orphan.adoptsStrandedRun(siblingRun) {
-		t.Error("startup cleanup must not adopt a live sibling run of this instance")
-	}
-	if orphan.adoptsStrandedRun(foreign) {
-		t.Error("startup cleanup must never adopt an unmarked foreign process")
+	if (runOwnership{}).ownsRun(ownRun) {
+		t.Error("a supervisor without a run ID must own nothing")
 	}
 }
 

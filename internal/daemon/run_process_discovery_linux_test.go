@@ -77,8 +77,9 @@ func TestRunCleanupReapsEscapedProcessDiscoveredInWorktree(t *testing.T) {
 
 // TestOrphanWorktreeCleanupReapsEscapedProcess covers the startup trigger the
 // intent names: a worktree left behind by a run that is no longer executing
-// still has its marked escapee reaped before removal, while an unmarked process
-// sharing that directory survives.
+// still has its own marked escapee reaped before removal, while a process
+// sharing that directory survives unless it carries this exact run's marker -
+// whether it is unmarked or marked for some other run.
 func TestOrphanWorktreeCleanupReapsEscapedProcess(t *testing.T) {
 	requireSetsid(t)
 	p := paths.WithRoot(t.TempDir())
@@ -114,6 +115,16 @@ func TestOrphanWorktreeCleanupReapsEscapedProcess(t *testing.T) {
 	escaped := adoptEscapedProcess(t, pidPath)
 	foreign := startForeignWorktreeProcess(t, worktree, filepath.Join(pidDir, "foreign.pid"))
 
+	// A process marked for a different run - a live run of a concurrently
+	// running daemon that happens to be standing in this directory - must be
+	// spared, whichever daemon instance stamped it.
+	otherPidPath := filepath.Join(pidDir, "other-run.pid")
+	otherCtx := shellenv.WithRunSupervisor(context.Background(), shellenv.NewRunSupervisor("some-other-run", worktree))
+	if err := launchEscapedRunProcess(otherCtx, worktree, otherPidPath, ""); err != nil {
+		t.Fatalf("launch other run's process: %v", err)
+	}
+	otherRun := adoptEscapedProcess(t, otherPidPath)
+
 	cleanupOrphanWorktrees(database, p)
 
 	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
@@ -122,6 +133,9 @@ func TestOrphanWorktreeCleanupReapsEscapedProcess(t *testing.T) {
 	waitForTestProcessExit(t, escaped)
 	if ok, err := processRunning(foreign); err != nil || !ok {
 		t.Fatalf("unmarked foreign process %d in the worktree was killed (ok=%v err=%v)", foreign, ok, err)
+	}
+	if ok, err := processRunning(otherRun); err != nil || !ok {
+		t.Fatalf("process %d marked for a different run was killed (ok=%v err=%v)", otherRun, ok, err)
 	}
 }
 

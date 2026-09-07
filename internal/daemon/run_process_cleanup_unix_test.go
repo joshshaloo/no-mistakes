@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -170,6 +171,7 @@ func startForeignWorktreeProcess(t *testing.T, workDir, pidPath string) int {
 	script := fmt.Sprintf("(while :; do sleep 1; done) & echo $! > %s", shellQuoteForTest(pidPath))
 	cmd := exec.Command("sh", "-c", script)
 	cmd.Dir = workDir
+	cmd.Env = unmarkedTestEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("start foreign worktree process: %v", err)
@@ -275,10 +277,29 @@ func readPID(t *testing.T, path string) int {
 	return pid
 }
 
+// unmarkedTestEnv strips the run-ownership markers from the inherited
+// environment. Fixtures that must model a process no run owns cannot rely on
+// the test binary being launched unmarked: this repository dogfoods its own
+// pipeline, so `go test` itself runs inside a no-mistakes run and would
+// otherwise hand its own marker to every fixture it spawns.
+func unmarkedTestEnv() []string {
+	inherited := os.Environ()
+	env := make([]string, 0, len(inherited))
+	for _, entry := range inherited {
+		if strings.HasPrefix(entry, shellenv.RunIDEnvVar+"=") ||
+			strings.HasPrefix(entry, shellenv.DaemonInstanceEnvVar+"=") {
+			continue
+		}
+		env = append(env, entry)
+	}
+	return env
+}
+
 func startFakeDaemonProcess(t *testing.T) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command("sh", "-c", "while :; do sleep 1; done")
 	cmd.Dir = t.TempDir()
+	cmd.Env = unmarkedTestEnv()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start fake daemon process: %v", err)

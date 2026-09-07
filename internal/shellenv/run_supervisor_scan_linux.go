@@ -11,11 +11,11 @@ import (
 )
 
 // discoverRunProcesses finds processes that must be reaped before the run
-// worktree is deleted. Ownership is proven by the inherited run marker in
-// /proc/<pid>/environ, not by where the process happens to be standing: a
-// daemonized dashboard that called setsid and chdir("/") is still this run's to
-// clean up. The worktree path is only consulted for the weaker stranded-run
-// adoption, and is otherwise recorded for the termination log.
+// worktree is deleted. Ownership is proven solely by this run's inherited
+// marker in /proc/<pid>/environ, not by where the process happens to be
+// standing: a daemonized dashboard that called setsid and chdir("/") is still
+// this run's to clean up, while a process merely sitting in the worktree is
+// not. The worktree path is recorded for the termination log only.
 func discoverRunProcesses(owner runOwnership, workDir string) []discoveredProcess {
 	if owner.runID == "" {
 		return nil
@@ -43,15 +43,10 @@ func discoverRunProcesses(owner runOwnership, workDir string) []discoveredProces
 		if err != nil || pid <= 1 || pid == self {
 			continue
 		}
-		environ := readProcEnviron(entry.Name())
-		owned := owner.ownsRun(environ)
-		if !owned && !owner.adoptsStrandedRun(environ) {
+		if !owner.ownsRun(readProcEnviron(entry.Name())) {
 			continue
 		}
 		cwd, inWorktree := processCwd(entry.Name(), workDir)
-		if !owned && !inWorktree {
-			continue
-		}
 		group, err := syscall.Getpgid(pid)
 		if err != nil || group <= 1 || group == selfGroup {
 			continue

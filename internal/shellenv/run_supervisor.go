@@ -44,54 +44,33 @@ type RunSupervisor struct {
 	workDir string
 	grace   time.Duration
 
-	// adoptPreviousInstances widens ownership to marked processes left behind
-	// by an earlier daemon instance. Only startup orphan cleanup sets it.
-	adoptPreviousInstances bool
-
 	mu     sync.Mutex
 	groups map[int]struct{}
 }
 
 // runOwnership is the proof a discovered process must satisfy before the
-// supervisor may signal its group.
+// supervisor may signal its group. Carrying this run's marker is the only proof
+// there is: nothing else may authorize a kill.
 type runOwnership struct {
-	runID                  string
-	instanceID             string
-	adoptPreviousInstances bool
+	runID string
 }
 
 // ownsRun reports whether a process environment block carries this exact run's
-// marker. Run IDs are globally unique, so the marker alone is conclusive proof
-// of ownership wherever the process has since moved: a marked process that
-// outlives its run has no legitimate reason to still be running, including one
-// that daemonized with setsid plus chdir("/") and no longer sits in the
-// worktree. An unmarked process - a developer's shell or editor opened in a
-// retained or custody worktree - never qualifies.
+// marker, and is the single ownership predicate for run-end cleanup and startup
+// orphan cleanup alike. Run IDs are globally unique, so the marker is
+// conclusive proof wherever the process has since moved and whichever daemon
+// instance stamped it: a marked process that outlives its run has no legitimate
+// reason to still be running, including one that daemonized with setsid plus
+// chdir("/"). Everything else is spared - an unmarked process such as a
+// developer's shell or editor opened in a retained or custody worktree, and
+// equally a process carrying some *other* run's marker, which may still belong
+// to a live run of a concurrently running daemon.
 func (o runOwnership) ownsRun(environ []byte) bool {
 	if o.runID == "" || len(environ) == 0 {
 		return false
 	}
 	runID, ok := environValue(environ, RunIDEnvVar)
 	return ok && runID == o.runID
-}
-
-// adoptsStrandedRun reports whether a process carries some *other* run's marker
-// stamped by an earlier daemon instance. That is a weaker signal than ownsRun:
-// several daemons with different NM_HOME roots can be live at once (the e2e
-// harness runs temporary daemons alongside the installed service), so a foreign
-// instance ID does not by itself mean the run has finished. Callers therefore
-// pair this with the worktree path, which is what ties the process to this
-// installation's state directory.
-func (o runOwnership) adoptsStrandedRun(environ []byte) bool {
-	if !o.adoptPreviousInstances || len(environ) == 0 {
-		return false
-	}
-	runID, ok := environValue(environ, RunIDEnvVar)
-	if !ok || runID == "" || runID == o.runID {
-		return false
-	}
-	instance, ok := environValue(environ, DaemonInstanceEnvVar)
-	return ok && instance != "" && instance != o.instanceID
 }
 
 // discoveredProcess is a marked process found by scanning the process table.
@@ -151,17 +130,6 @@ func NewRunSupervisor(runID, workDir string) *RunSupervisor {
 		grace:   defaultRunSupervisorGrace,
 		groups:  make(map[int]struct{}),
 	}
-}
-
-// NewOrphanRunSupervisor creates a supervisor for startup cleanup of a worktree
-// left behind by a run that is no longer executing. It has no registered
-// command groups to reap, so discovery is its only reach, and it additionally
-// adopts a process stamped by an earlier daemon instance for a different run
-// when that process still sits in this worktree.
-func NewOrphanRunSupervisor(runID, workDir string) *RunSupervisor {
-	supervisor := NewRunSupervisor(runID, workDir)
-	supervisor.adoptPreviousInstances = true
-	return supervisor
 }
 
 // WithRunSupervisor returns a child context that marks subprocesses as owned by
@@ -248,11 +216,7 @@ func (s *RunSupervisor) ownership() runOwnership {
 	if s == nil {
 		return runOwnership{}
 	}
-	return runOwnership{
-		runID:                  s.runID,
-		instanceID:             daemonInstanceID,
-		adoptPreviousInstances: s.adoptPreviousInstances,
-	}
+	return runOwnership{runID: s.runID}
 }
 
 // WithRunMarkers returns env with this run's ownership markers applied,
