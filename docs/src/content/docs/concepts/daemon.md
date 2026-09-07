@@ -84,8 +84,8 @@ When a push arrives via the post-receive hook:
 1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`
 2. Starts the pipeline executor in that worktree
 3. Streams events to any connected TUI clients and serves request/response state to AXI clients
-4. Terminates the run-owned process groups with `SIGTERM`, waits a bounded grace period, then uses `SIGKILL` for survivors before deleting the worktree
-5. Cleans up the worktree when the run finishes (success or failure), but only after byte-verifying that the run's exact recorded head is pinned under its own gate reference
+4. When the run finishes (success or failure), terminates that run's own process groups first - `SIGTERM`, a bounded grace period, then `SIGKILL` for survivors, or a forced process-tree kill on Windows - so nothing it started is still holding the worktree or a port. This happens even when the head check below retains the worktree
+5. Removes the worktree, but only after byte-verifying that the run's exact recorded head is pinned under its own gate reference
 
 Pipeline agents are prompted to keep intentional writes inside that detached worktree and avoid changing system state outside it, such as Homebrew packages, apps under `/Applications`, or global tool configuration.
 That reduces surprising machine-level side effects and macOS App Management prompts, but it is prompt steering rather than a true sandbox.
@@ -93,10 +93,10 @@ While executing steps, the daemon also owns child-process cleanup.
 Configured commands, SCM CLI calls, Git subprocesses, and agent subprocesses are registered with the run's process supervisor instead of the daemon's own process group.
 One-shot commands are still terminated as a process tree on completion, failure, or cancellation, and final run cleanup reaps any remaining run-owned groups before worktree removal so leaked test workers, build watchers, dashboards, or dev servers cannot survive with a deleted cwd or hold a port for the next run.
 That guarantee covers every process still reachable through a registered command's process group on all platforms.
-Every subprocess a run launches - configured commands, Git and SCM calls, one-shot agents, and the managed agent server the opencode and rovodev adapters run through - inherits a run marker in its environment.
+Every subprocess a run launches - configured commands, Git and SCM calls, one-shot agents, and the managed agent server behind Rovo Dev and OpenCode - inherits a run marker in its environment.
 A process that also escaped its command's process group, such as a dev server or dashboard that started a session of its own, is caught by that marker on Linux and by the kill-on-close job object on Windows.
 On macOS neither of those applies, so an escaped process can outlive the run.
-The marker is the whole proof of ownership, and the only thing that authorizes a kill.
+For a process found outside those registered groups, that marker is the whole proof of ownership, and the only thing that authorizes a kill.
 It still identifies an escapee that reparented to init, moved to a session of its own, or changed directory out of the worktree entirely, and it survives a daemon restart - which is what lets startup cleanup of an orphaned worktree reap that run's own leftovers even though a different daemon process started them.
 Nothing else is ever signalled: not an unmarked process such as a shell or editor you opened inside a retained worktree, and not a process marked for a different run, which may still belong to a live run of another daemon on the same machine.
 Runs are matched only by their own globally unique run ID.
