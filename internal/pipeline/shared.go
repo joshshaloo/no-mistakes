@@ -24,7 +24,7 @@ type HousekeepingLintResult struct {
 //
 // This marker is an in-memory optimization and log label only: the authority
 // the push boundary re-verifies against is the run's durable
-// test_verified_head_sha anchor, which survives a daemon restart. Losing this
+// test_verified_tree_sha anchor, which survives a daemon restart. Losing this
 // marker across a process boundary therefore costs a step-name label, never
 // the invariant itself.
 type PostTestFixChange struct {

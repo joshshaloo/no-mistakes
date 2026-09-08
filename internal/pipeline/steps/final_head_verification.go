@@ -37,8 +37,15 @@ func recordPostTestHeadAdvance(sctx *pipeline.StepContext, step types.StepName, 
 // before the network push, so the run's recorded test evidence describes the
 // exact head being shipped.
 //
-// It is anchored on the run's durable test-verified head rather than on
+// It is anchored on the run's durable test-verified tree rather than on
 // in-memory state, so a run resumed after a parked fix round still re-verifies.
+// Comparing content rather than commit identity is what makes the boundary
+// cheap in the common case: the test agent's own new test files and the
+// pipeline's staged evidence artifacts are already inside the validated tree
+// when a later step commits them, so landing them is not a post-test change,
+// while any other edit to tracked content is. A tree that cannot be resolved
+// counts as changed, never as unchanged.
+//
 // When the Test step produced no green evidence (skipped, failed, approved with
 // failures, or absent) there is nothing to invalidate: the boundary records the
 // concrete reason and no-ops instead of manufacturing evidence or blocking.
@@ -56,17 +63,16 @@ func verifyFinalHeadAfterPostTestFixes(sctx *pipeline.StepContext) error {
 	if err != nil {
 		return fmt.Errorf("resolve final head for post-test verification: %w", err)
 	}
-	if currentHead == anchor.headSHA {
+	shippedTree, treeErr := git.HeadTreeSHA(sctx.Ctx, sctx.WorkDir)
+	if treeErr != nil {
+		shippedTree = ""
+		sctx.Log(fmt.Sprintf("could not resolve the final tree (%v), re-verifying the final head", treeErr))
+	}
+	if shippedTree != "" && shippedTree == anchor.treeSHA {
 		sctx.Shared.CompletePostTestFixVerification()
 		return nil
 	}
-	changedFiles, err := postTestChangedFiles(sctx, anchor.headSHA, currentHead)
-	if err != nil {
-		return err
-	}
-	if len(changedFiles) == 0 {
-		return completeFinalHeadVerification(sctx, currentHead)
-	}
+	changedFiles := postTestChangedFiles(sctx, anchor.treeSHA, shippedTree)
 
 	started := time.Now()
 	steps := joinStepNames(pendingPostTestSteps(sctx))
@@ -80,7 +86,7 @@ func verifyFinalHeadAfterPostTestFixes(sctx *pipeline.StepContext) error {
 		sctx.Log(fmt.Sprintf("re-running test verification on final head %s after post-test %s changes: %s", headLabel, steps, testCmd))
 		output, exitCode, err := runConfiguredStepShellCommand(sctx, configuredCommandTest, testCmd)
 		tested := []string{testCmd}
-		projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepTest)
+		projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepPush)
 		if err != nil {
 			findings := finalHeadVerificationFindings(currentHead, changedFiles, tested, err.Error(), []Finding{{
 				Severity:    "error",
@@ -108,7 +114,7 @@ func verifyFinalHeadAfterPostTestFixes(sctx *pipeline.StepContext) error {
 		if err := recordFinalHeadVerificationRound(sctx, anchor.stepResultID, findings, time.Since(started).Milliseconds()); err != nil {
 			return err
 		}
-		return completeFinalHeadVerification(sctx, currentHead)
+		return completeFinalHeadVerification(sctx, shippedTree)
 	}
 
 	if sctx.Agent == nil {
@@ -163,14 +169,14 @@ Task:
 	if hasBlockingFindings(verification.Items) {
 		return fmt.Errorf("final head verification failed after post-test fixes: %s", verification.Summary)
 	}
-	return completeFinalHeadVerification(sctx, currentHead)
+	return completeFinalHeadVerification(sctx, shippedTree)
 }
 
-// testVerifiedAnchor is the durable proof of which commit the run's recorded
+// testVerifiedAnchor is the durable proof of which content the run's recorded
 // test evidence describes. A non-empty reason means there is no such proof and
 // the boundary must no-op rather than invent one.
 type testVerifiedAnchor struct {
-	headSHA      string
+	treeSHA      string
 	stepResultID string
 	reason       string
 }
@@ -195,23 +201,28 @@ func resolveTestVerifiedAnchor(sctx *pipeline.StepContext) (testVerifiedAnchor, 
 	}
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
-		return testVerifiedAnchor{}, fmt.Errorf("load durable test-verified head for final-head verification: %w", err)
+		return testVerifiedAnchor{}, fmt.Errorf("load durable test-verified tree for final-head verification: %w", err)
 	}
-	if run == nil || run.TestVerifiedHeadSHA == nil || strings.TrimSpace(*run.TestVerifiedHeadSHA) == "" {
-		return testVerifiedAnchor{reason: "the test step recorded no verified head, so there is no green evidence to invalidate"}, nil
+	if run == nil || run.TestVerifiedTreeSHA == nil || strings.TrimSpace(*run.TestVerifiedTreeSHA) == "" {
+		return testVerifiedAnchor{reason: "the test step recorded no verified tree, so there is no green evidence to invalidate"}, nil
 	}
-	return testVerifiedAnchor{headSHA: strings.TrimSpace(*run.TestVerifiedHeadSHA), stepResultID: testStep.ID}, nil
+	return testVerifiedAnchor{treeSHA: strings.TrimSpace(*run.TestVerifiedTreeSHA), stepResultID: testStep.ID}, nil
 }
 
-// completeFinalHeadVerification moves the durable anchor onto the head just
+// completeFinalHeadVerification moves the durable anchor onto the tree just
 // verified, so a resumed or retried push boundary does not re-run the same
-// verification for a head that already carries fresh evidence.
-func completeFinalHeadVerification(sctx *pipeline.StepContext, headSHA string) error {
-	if err := sctx.DB.UpdateRunTestVerifiedHeadSHA(sctx.Run.ID, headSHA); err != nil {
-		return fmt.Errorf("record verified final head: %w", err)
+// verification for content that already carries fresh evidence. An unresolved
+// tree advances nothing, leaving the next boundary to re-verify.
+func completeFinalHeadVerification(sctx *pipeline.StepContext, verifiedTree string) error {
+	if verifiedTree == "" {
+		sctx.Shared.CompletePostTestFixVerification()
+		return nil
 	}
-	verified := headSHA
-	sctx.Run.TestVerifiedHeadSHA = &verified
+	if err := sctx.DB.UpdateRunTestVerifiedTreeSHA(sctx.Run.ID, verifiedTree); err != nil {
+		return fmt.Errorf("record verified final tree: %w", err)
+	}
+	verified := verifiedTree
+	sctx.Run.TestVerifiedTreeSHA = &verified
 	sctx.Shared.CompletePostTestFixVerification()
 	return nil
 }
@@ -224,10 +235,19 @@ func pendingPostTestSteps(sctx *pipeline.StepContext) []types.StepName {
 	return change.Steps
 }
 
-func postTestChangedFiles(sctx *pipeline.StepContext, fromHead, toHead string) ([]string, error) {
-	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "diff", "--name-only", strings.TrimSpace(fromHead)+".."+strings.TrimSpace(toHead))
+// postTestChangedFiles names the tracked content that changed since the tests
+// ran. It is descriptive input for the verification prompt and summary, not the
+// predicate that decides whether to verify, so an unresolved tree or a failed
+// diff degrades to an explicit placeholder rather than an empty "nothing
+// changed" list.
+func postTestChangedFiles(sctx *pipeline.StepContext, fromTree, toTree string) []string {
+	unknown := []string{"(files changed after the test step could not be determined)"}
+	if strings.TrimSpace(toTree) == "" {
+		return unknown
+	}
+	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "diff", "--name-only", strings.TrimSpace(fromTree), strings.TrimSpace(toTree))
 	if err != nil {
-		return nil, fmt.Errorf("resolve files changed after test step: %w", err)
+		return unknown
 	}
 	var files []string
 	for _, line := range strings.Split(out, "\n") {
@@ -236,7 +256,10 @@ func postTestChangedFiles(sctx *pipeline.StepContext, fromHead, toHead string) (
 			files = append(files, line)
 		}
 	}
-	return files, nil
+	if len(files) == 0 {
+		return unknown
+	}
+	return files
 }
 
 func finalHeadVerificationFindings(head string, changedFiles, tested []string, summary string, items []Finding) Findings {

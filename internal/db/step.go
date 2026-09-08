@@ -162,16 +162,16 @@ func (d *DB) CompleteReviewStep(id, runID, approvedHeadSHA string, exitCode int,
 }
 
 // CompleteTestStep atomically completes a successful test step and replaces
-// the run's exact test-verified head. The push boundary treats that head as
-// the only proof of which commit the recorded test evidence describes, so it
+// the run's exact test-verified tree. The push boundary treats that tree as
+// the only proof of which content the recorded test evidence describes, so it
 // must never exist without a completed test step, or vice versa.
-func (d *DB) CompleteTestStep(id, runID, verifiedHeadSHA string, exitCode int, durationMS int64, logPath string) error {
+func (d *DB) CompleteTestStep(id, runID, verifiedTreeSHA string, exitCode int, durationMS int64, logPath string) error {
 	return d.completeStepWithRunHeadAnchor(runHeadAnchor{
 		stepLabel:  "test step",
-		headLabel:  "test-verified head",
-		updateRun:  `UPDATE runs SET test_verified_head_sha = ?, updated_at = ? WHERE id = ?`,
+		headLabel:  "test-verified tree",
+		updateRun:  `UPDATE runs SET test_verified_tree_sha = ?, updated_at = ? WHERE id = ?`,
 		commitVerb: "completed test",
-	}, id, runID, verifiedHeadSHA, exitCode, durationMS, logPath)
+	}, id, runID, verifiedTreeSHA, exitCode, durationMS, logPath)
 }
 
 // runHeadAnchor describes one durable run-level head binding that a step

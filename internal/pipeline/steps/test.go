@@ -246,7 +246,7 @@ Rules:
 		}
 
 		findingsJSON, _ := json.Marshal(findings)
-		return withTestVerifiedHead(sctx, &pipeline.StepOutcome{
+		return withTestVerifiedTree(sctx, &pipeline.StepOutcome{
 			NeedsApproval: needsApproval,
 			AutoFixable:   autoFixable,
 			Findings:      string(findingsJSON),
@@ -271,7 +271,7 @@ Rules:
 			})
 		}
 		findingsJSON, _ := json.Marshal(findings)
-		return withTestVerifiedHead(sctx, &pipeline.StepOutcome{
+		return withTestVerifiedTree(sctx, &pipeline.StepOutcome{
 			NeedsApproval: false,
 			Findings:      string(findingsJSON),
 			FixSummary:    fixSummary,
@@ -280,21 +280,24 @@ Rules:
 
 	sctx.Log("all tests passed")
 	findingsJSON, _ := json.Marshal(Findings{Tested: tested})
-	return withTestVerifiedHead(sctx, &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary})
+	return withTestVerifiedTree(sctx, &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary})
 }
 
-// withTestVerifiedHead stamps the exact commit this round validated onto the
-// outcome so the executor can persist it as the run's durable anchor. A round
-// that parks for approval produced no green evidence, so it deliberately
-// leaves the anchor empty rather than claiming a head was tested.
-func withTestVerifiedHead(sctx *pipeline.StepContext, outcome *pipeline.StepOutcome) (*pipeline.StepOutcome, error) {
+// withTestVerifiedTree stamps the exact working-tree content this round
+// validated onto the outcome so the executor can persist it as the run's
+// durable anchor. It is the tree rather than HEAD because the test agent
+// routinely writes focused tests and evidence files that only a later step
+// commits: that content was validated here, so landing it is not a post-test
+// change. A round that parks for approval produced no green evidence, so it
+// deliberately leaves the anchor empty rather than claiming content was tested.
+func withTestVerifiedTree(sctx *pipeline.StepContext, outcome *pipeline.StepOutcome) (*pipeline.StepOutcome, error) {
 	if outcome.NeedsApproval {
 		return outcome, nil
 	}
-	head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+	tree, err := git.WorktreeTreeSHA(sctx.Ctx, sctx.WorkDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolve tested head: %w", err)
+		return nil, fmt.Errorf("resolve tested working tree: %w", err)
 	}
-	outcome.TestVerifiedHeadSHA = head
+	outcome.TestVerifiedTreeSHA = tree
 	return outcome, nil
 }

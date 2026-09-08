@@ -52,9 +52,16 @@ func RunBare(ctx context.Context, bareDir string, args ...string) (string, error
 }
 
 func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
+	return runInDirWithEnv(ctx, dir, nil, args...)
+}
+
+func runInDirWithEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = NonInteractiveEnv(dir)
+	if env == nil {
+		env = NonInteractiveEnv(dir)
+	}
+	cmd.Env = env
 	winproc.Harden(cmd)
 	out, err := cmd.Output()
 	if err != nil {
@@ -359,6 +366,76 @@ func Log(ctx context.Context, dir, base, head string) (string, error) {
 // HeadSHA returns the full SHA of HEAD.
 func HeadSHA(ctx context.Context, dir string) (string, error) {
 	return Run(ctx, dir, "rev-parse", "HEAD")
+}
+
+// HeadTreeSHA returns the tree object ID of the commit at HEAD - the exact
+// content a push of HEAD would ship.
+func HeadTreeSHA(ctx context.Context, dir string) (string, error) {
+	return Run(ctx, dir, "rev-parse", "HEAD^{tree}")
+}
+
+// WorktreeTreeSHA returns the tree object ID of the working tree's content:
+// everything HEAD already tracks plus every uncommitted or untracked
+// non-ignored file, exactly as a `git add -A` commit would record it.
+//
+// Content, not commit identity, is what test evidence describes, so this is
+// the anchor a later step's commit is compared against: a commit that only
+// lands files that were already in the working tree when the tests ran
+// produces the same tree and is therefore not a change to validated content.
+//
+// The repository's own index is never touched. A scratch copy of it seeds a
+// temporary index so Git keeps its stat cache and only re-hashes files that
+// actually changed; when there is no index yet the scratch one is seeded from
+// HEAD instead.
+func WorktreeTreeSHA(ctx context.Context, dir string) (string, error) {
+	scratch, err := os.CreateTemp("", "no-mistakes-index-*")
+	if err != nil {
+		return "", fmt.Errorf("create scratch index: %w", err)
+	}
+	scratchPath := scratch.Name()
+	scratch.Close()
+	defer os.Remove(scratchPath)
+
+	seeded := false
+	if indexPath, err := repositoryIndexPath(ctx, dir); err == nil {
+		if data, err := os.ReadFile(indexPath); err == nil {
+			if err := os.WriteFile(scratchPath, data, 0o644); err != nil {
+				return "", fmt.Errorf("seed scratch index: %w", err)
+			}
+			seeded = true
+		}
+	}
+	env := append(NonInteractiveEnv(dir), "GIT_INDEX_FILE="+scratchPath)
+	if !seeded {
+		if err := os.Remove(scratchPath); err != nil && !os.IsNotExist(err) {
+			return "", fmt.Errorf("reset scratch index: %w", err)
+		}
+		if _, err := runInDirWithEnv(ctx, dir, env, "read-tree", "HEAD"); err != nil {
+			return "", fmt.Errorf("seed scratch index from HEAD: %w", err)
+		}
+	}
+	if _, err := runInDirWithEnv(ctx, dir, env, "add", "-A"); err != nil {
+		return "", fmt.Errorf("stage working tree into scratch index: %w", err)
+	}
+	tree, err := runInDirWithEnv(ctx, dir, env, "write-tree")
+	if err != nil {
+		return "", fmt.Errorf("write working tree object: %w", err)
+	}
+	return tree, nil
+}
+
+func repositoryIndexPath(ctx context.Context, dir string) (string, error) {
+	path, err := runInDir(ctx, dir, "rev-parse", "--git-path", "index")
+	if err != nil {
+		return "", err
+	}
+	if path == "" {
+		return "", fmt.Errorf("git reported no index path")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(dir, path)
+	}
+	return path, nil
 }
 
 // CurrentBranch returns the current branch name.

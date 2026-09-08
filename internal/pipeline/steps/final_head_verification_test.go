@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -98,13 +99,7 @@ func TestFinalHeadVerification_PostTestDocumentFixFailureRecordsAndFailsBeforePu
 		Test: "grep -q '^feature code$' feature.txt",
 	})
 	sctx.Shared = &pipeline.RunShared{}
-	testResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sctx.DB.CompleteTestStep(testResult.ID, sctx.Run.ID, headSHA, 0, 1, "test.log"); err != nil {
-		t.Fatal(err)
-	}
+	testResult := completeTestStepWithVerifiedTree(t, sctx, "")
 
 	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("broken by docs\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -114,7 +109,7 @@ func TestFinalHeadVerification_PostTestDocumentFixFailureRecordsAndFailsBeforePu
 		t.Fatal(err)
 	}
 
-	err = verifyFinalHeadAfterPostTestFixes(sctx)
+	err := verifyFinalHeadAfterPostTestFixes(sctx)
 	if err == nil {
 		t.Fatal("expected final-head verification to fail")
 	}
@@ -178,7 +173,7 @@ func TestFinalHeadVerification_PostTestFixNoChangesDoesNotRerun(t *testing.T) {
 		Test: "printf rerun >> rerun.log",
 	})
 	sctx.Shared = &pipeline.RunShared{}
-	completeTestStepWithVerifiedHead(t, sctx, headSHA, "")
+	completeTestStepWithVerifiedTree(t, sctx, "")
 	sctx.Fixing = true
 	if err := commitAgentFixes(sctx, types.StepDocument, "no changes", "no changes"); err != nil {
 		t.Fatal(err)
@@ -191,11 +186,17 @@ func TestFinalHeadVerification_PostTestFixNoChangesDoesNotRerun(t *testing.T) {
 	}
 }
 
-// completeTestStepWithVerifiedHead records the shape the executor produces for
+// completeTestStepWithVerifiedTree records the shape the executor produces for
 // a Test step that completed with green evidence: stored findings plus the
-// durable test-verified head anchor, written in one transaction.
-func completeTestStepWithVerifiedHead(t *testing.T, sctx *pipeline.StepContext, verifiedHead, findingsJSON string) *db.StepResult {
+// durable test-verified tree anchor, written in one transaction. The anchor is
+// the working tree as it stood when the tests ran, uncommitted agent files
+// included.
+func completeTestStepWithVerifiedTree(t *testing.T, sctx *pipeline.StepContext, findingsJSON string) *db.StepResult {
 	t.Helper()
+	verifiedTree, err := git.WorktreeTreeSHA(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		t.Fatal(err)
+	}
 	testResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +206,7 @@ func completeTestStepWithVerifiedHead(t *testing.T, sctx *pipeline.StepContext, 
 			t.Fatal(err)
 		}
 	}
-	if err := sctx.DB.CompleteTestStep(testResult.ID, sctx.Run.ID, verifiedHead, 0, 1, "test.log"); err != nil {
+	if err := sctx.DB.CompleteTestStep(testResult.ID, sctx.Run.ID, verifiedTree, 0, 1, "test.log"); err != nil {
 		t.Fatal(err)
 	}
 	return testResult
@@ -254,7 +255,7 @@ func TestFinalHeadVerification_PreservesTestEvidenceAfterDocumentFix(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	testResult := completeTestStepWithVerifiedHead(t, sctx, headSHA, string(originalJSON))
+	testResult := completeTestStepWithVerifiedTree(t, sctx, string(originalJSON))
 
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("documented\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -302,7 +303,7 @@ func TestFinalHeadVerification_ResumedRunWithoutMarkerStillReverifies(t *testing
 		Test: "grep -q '^feature code$' feature.txt",
 	})
 	sctx.Shared = &pipeline.RunShared{}
-	testResult := completeTestStepWithVerifiedHead(t, sctx, headSHA, `{"findings":[],"summary":"tests passed"}`)
+	testResult := completeTestStepWithVerifiedTree(t, sctx, `{"findings":[],"summary":"tests passed"}`)
 
 	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("broken by docs\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -391,7 +392,7 @@ func TestPushStep_FormatOnlyChangeReverifiesFinalHead(t *testing.T) {
 	})
 	sctx.Shared = &pipeline.RunShared{}
 	recordReviewApproval(t, sctx, headSHA)
-	completeTestStepWithVerifiedHead(t, sctx, headSHA, `{"findings":[],"summary":"tests passed"}`)
+	completeTestStepWithVerifiedTree(t, sctx, `{"findings":[],"summary":"tests passed"}`)
 
 	outcome, err := (&PushStep{}).Execute(sctx)
 	if err == nil {
@@ -446,4 +447,128 @@ func containsSubstring(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// The test agent routinely writes focused tests that no step commits until the
+// push stage. That content was validated by the tests that just ran, so
+// landing it must not trigger a second full verification pass.
+func TestFinalHeadVerification_TestAgentFilesCommittedByPushDoNotReverify(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	rerunLog := filepath.Join(dir, "rerun.log")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Test: "printf rerun >> rerun.log",
+	})
+	sctx.Shared = &pipeline.RunShared{}
+
+	// The test agent writes a new focused test and leaves it uncommitted.
+	if err := os.WriteFile(filepath.Join(dir, "feature_extra_test.go"), []byte("package feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	completeTestStepWithVerifiedTree(t, sctx, `{"findings":[],"summary":"tests passed"}`)
+	recordReviewApproval(t, sctx, headSHA)
+
+	outcome, err := (&PushStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected the push step to reach the network push")
+	}
+	if outcome != nil {
+		t.Fatalf("outcome = %#v, want nil on step failure", outcome)
+	}
+	if strings.Contains(err.Error(), "final head verification") {
+		t.Fatalf("re-verified content the test step already validated: %v", err)
+	}
+	if _, err := os.Stat(rerunLog); !os.IsNotExist(err) {
+		t.Fatalf("verification re-ran tests for the test step's own files, stat err = %v", err)
+	}
+	if lastCommitMessage(t, dir) != "no-mistakes: apply agent fixes" {
+		t.Fatalf("push step did not commit the test agent's file: %s", lastCommitMessage(t, dir))
+	}
+}
+
+// In-repo evidence artifacts exist in the working tree while the tests run and
+// are only staged at the push boundary, so committing them changes nothing the
+// tests validated.
+func TestFinalHeadVerification_InRepoEvidenceStagingDoesNotReverify(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	rerunLog := filepath.Join(dir, "rerun.log")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Test: "printf rerun >> rerun.log",
+	})
+	sctx.Config.Test.Evidence.StoreInRepo = true
+	sctx.Config.Test.Evidence.Dir = "docs/evidence"
+	sctx.Shared = &pipeline.RunShared{}
+
+	location := resolveTestEvidenceLocation(dir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence)
+	if !location.StoreInRepo {
+		t.Fatalf("evidence location %s is not in the repository", location.Dir)
+	}
+	evidenceDir := location.Dir
+	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(evidenceDir, "screenshot.txt"), []byte("evidence\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	completeTestStepWithVerifiedTree(t, sctx, `{"findings":[],"summary":"tests passed"}`)
+	recordReviewApproval(t, sctx, headSHA)
+
+	outcome, err := (&PushStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected the push step to reach the network push")
+	}
+	if outcome != nil {
+		t.Fatalf("outcome = %#v, want nil on step failure", outcome)
+	}
+	if strings.Contains(err.Error(), "final head verification") {
+		t.Fatalf("re-verified pipeline-staged evidence artifacts: %v", err)
+	}
+	if _, err := os.Stat(rerunLog); !os.IsNotExist(err) {
+		t.Fatalf("verification re-ran tests for staged evidence, stat err = %v", err)
+	}
+	rel, err := filepath.Rel(dir, filepath.Join(evidenceDir, "screenshot.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tracked := gitCmd(t, dir, "ls-tree", "--name-only", "HEAD", filepath.ToSlash(rel)); tracked == "" {
+		t.Fatalf("evidence artifact %s was never committed, so the test proves nothing", rel)
+	}
+}
+
+// A document fix to source is a genuine change to validated content and must
+// still re-verify even though the tree anchor tolerates the pipeline's own
+// staging.
+func TestFinalHeadVerification_DocumentFixToSourceStillReverifies(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Test: "grep -q '^feature code$' feature.txt",
+	})
+	sctx.Shared = &pipeline.RunShared{}
+	if err := os.WriteFile(filepath.Join(dir, "feature_extra_test.go"), []byte("package feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	completeTestStepWithVerifiedTree(t, sctx, `{"findings":[],"summary":"tests passed"}`)
+
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("broken by docs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Fixing = true
+	if err := commitAgentFixes(sctx, types.StepDocument, "adjust copy", "adjust copy"); err != nil {
+		t.Fatal(err)
+	}
+	err := verifyFinalHeadAfterPostTestFixes(sctx)
+	if err == nil {
+		t.Fatal("a post-test source change was shipped without re-verification")
+	}
+	if !strings.Contains(err.Error(), "final head verification failed") {
+		t.Fatalf("error = %v, want final-head verification failure", err)
+	}
 }
