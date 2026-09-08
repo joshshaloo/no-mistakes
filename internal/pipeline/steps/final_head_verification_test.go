@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -101,7 +102,7 @@ func TestFinalHeadVerification_PostTestDocumentFixFailureRecordsAndFailsBeforePu
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sctx.DB.CompleteStep(testResult.ID, 0, 1, "test.log"); err != nil {
+	if err := sctx.DB.CompleteTestStep(testResult.ID, sctx.Run.ID, headSHA, 0, 1, "test.log"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -177,6 +178,7 @@ func TestFinalHeadVerification_PostTestFixNoChangesDoesNotRerun(t *testing.T) {
 		Test: "printf rerun >> rerun.log",
 	})
 	sctx.Shared = &pipeline.RunShared{}
+	completeTestStepWithVerifiedHead(t, sctx, headSHA, "")
 	sctx.Fixing = true
 	if err := commitAgentFixes(sctx, types.StepDocument, "no changes", "no changes"); err != nil {
 		t.Fatal(err)
@@ -187,4 +189,261 @@ func TestFinalHeadVerification_PostTestFixNoChangesDoesNotRerun(t *testing.T) {
 	if _, err := os.Stat(rerunLog); !os.IsNotExist(err) {
 		t.Fatalf("expected no verification rerun log, stat err = %v", err)
 	}
+}
+
+// completeTestStepWithVerifiedHead records the shape the executor produces for
+// a Test step that completed with green evidence: stored findings plus the
+// durable test-verified head anchor, written in one transaction.
+func completeTestStepWithVerifiedHead(t *testing.T, sctx *pipeline.StepContext, verifiedHead, findingsJSON string) *db.StepResult {
+	t.Helper()
+	testResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findingsJSON != "" {
+		if err := sctx.DB.SetStepFindings(testResult.ID, findingsJSON); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sctx.DB.CompleteTestStep(testResult.ID, sctx.Run.ID, verifiedHead, 0, 1, "test.log"); err != nil {
+		t.Fatal(err)
+	}
+	return testResult
+}
+
+func captureStepLog(sctx *pipeline.StepContext) *[]string {
+	var lines []string
+	sctx.Log = func(line string) { lines = append(lines, line) }
+	return &lines
+}
+
+func loadTestStepFindings(t *testing.T, sctx *pipeline.StepContext, stepResultID string) types.Findings {
+	t.Helper()
+	updated, err := sctx.DB.GetStepResult(stepResultID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.FindingsJSON == nil {
+		t.Fatal("test step has no recorded findings")
+	}
+	findings, err := types.ParseFindingsJSON(*updated.FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse merged findings: %v", err)
+	}
+	return findings
+}
+
+// A post-test document fix must never cost the Test step's own evidence: the
+// PR body renders artifacts, tested entries, and the testing summary from the
+// step's stored findings, so the verification is merged into them.
+func TestFinalHeadVerification_PreservesTestEvidenceAfterDocumentFix(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"})
+	sctx.Shared = &pipeline.RunShared{}
+	original := types.Findings{
+		Items:          []types.Finding{{Severity: "info", Action: types.ActionNoOp, Description: "new test file written by agent: feature_test.go"}},
+		Summary:        "tests passed with new coverage",
+		Tested:         []string{"`go test ./internal/feature`"},
+		TestingSummary: "Exercised the feature end to end and captured a screenshot.",
+		Artifacts:      []types.TestArtifact{{Kind: "image", Label: "feature screenshot", Path: "evidence/feature.png"}},
+	}
+	originalJSON, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testResult := completeTestStepWithVerifiedHead(t, sctx, headSHA, string(originalJSON))
+
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("documented\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Fixing = true
+	if err := commitAgentFixes(sctx, types.StepDocument, "document feature", "document feature"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFinalHeadAfterPostTestFixes(sctx); err != nil {
+		t.Fatalf("verification failed: %v", err)
+	}
+
+	merged := loadTestStepFindings(t, sctx, testResult.ID)
+	if len(merged.Artifacts) != 1 || merged.Artifacts[0].Path != "evidence/feature.png" {
+		t.Fatalf("artifacts = %#v, want the original evidence artifact preserved", merged.Artifacts)
+	}
+	if len(merged.Tested) == 0 || merged.Tested[0] != "`go test ./internal/feature`" {
+		t.Fatalf("tested = %#v, want the original tested entry preserved", merged.Tested)
+	}
+	if !containsString(merged.Tested, "true") {
+		t.Fatalf("tested = %#v, want the verification command appended", merged.Tested)
+	}
+	if !strings.Contains(merged.TestingSummary, "captured a screenshot") {
+		t.Fatalf("testing summary %q lost the original evidence", merged.TestingSummary)
+	}
+	if !strings.Contains(merged.TestingSummary, shortObjectID(sctx.Run.HeadSHA)) {
+		t.Fatalf("testing summary %q does not add the final-head verification", merged.TestingSummary)
+	}
+	// The informational finding must survive, or the PR renders the Test step
+	// as "fixed" when nothing was ever fixed.
+	if len(merged.Items) != 1 || merged.Items[0].Action != types.ActionNoOp {
+		t.Fatalf("items = %#v, want the original informational finding retained", merged.Items)
+	}
+}
+
+// The invariant must survive a daemon restart: a run resumed after a parked
+// document commit has an empty in-memory marker, so only the durable anchor
+// can still trigger re-verification.
+func TestFinalHeadVerification_ResumedRunWithoutMarkerStillReverifies(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Test: "grep -q '^feature code$' feature.txt",
+	})
+	sctx.Shared = &pipeline.RunShared{}
+	testResult := completeTestStepWithVerifiedHead(t, sctx, headSHA, `{"findings":[],"summary":"tests passed"}`)
+
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("broken by docs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Fixing = true
+	if err := commitAgentFixes(sctx, types.StepDocument, "adjust copy", "adjust copy"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resume rebuilds run scopes, so the marker the document step set is gone.
+	sctx.Shared = &pipeline.RunShared{}
+	if _, marked := sctx.Shared.PendingPostTestFixChange(); marked {
+		t.Fatal("resumed run unexpectedly retained the in-memory marker")
+	}
+
+	err := verifyFinalHeadAfterPostTestFixes(sctx)
+	if err == nil {
+		t.Fatal("resumed run pushed a head the test step never validated")
+	}
+	if !strings.Contains(err.Error(), "final head verification failed") {
+		t.Fatalf("error = %v, want final-head verification failure", err)
+	}
+	merged := loadTestStepFindings(t, sctx, testResult.ID)
+	if len(merged.Items) != 1 || merged.Items[0].Severity != "error" {
+		t.Fatalf("items = %#v, want the verification failure recorded", merged.Items)
+	}
+}
+
+// A Test step that never produced green evidence has nothing to invalidate:
+// the boundary records why and no-ops instead of running tests the user
+// opted out of and blocking the push on them.
+func TestFinalHeadVerification_SkippedTestStepNoOpsWithReason(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	rerunLog := filepath.Join(dir, "rerun.log")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Test: "printf rerun >> rerun.log; exit 1",
+	})
+	sctx.Shared = &pipeline.RunShared{}
+	testResult, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.CompleteStepWithStatus(testResult.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
+		t.Fatal(err)
+	}
+	logged := captureStepLog(sctx)
+
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("changed by docs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Fixing = true
+	if err := commitAgentFixes(sctx, types.StepDocument, "adjust copy", "adjust copy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFinalHeadAfterPostTestFixes(sctx); err != nil {
+		t.Fatalf("skipped test step blocked the push: %v", err)
+	}
+	if _, err := os.Stat(rerunLog); !os.IsNotExist(err) {
+		t.Fatalf("verification ran tests against a skipped test step, stat err = %v", err)
+	}
+	updated, err := sctx.DB.GetStepResult(testResult.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.FindingsJSON != nil {
+		t.Fatalf("skipped test step gained manufactured evidence: %s", *updated.FindingsJSON)
+	}
+	if !containsSubstring(*logged, "skipping final head verification: the test step is skipped") {
+		t.Fatalf("log = %#v, want the concrete skip reason recorded", *logged)
+	}
+}
+
+// The push step's own format-and-commit path is the third post-Test commit
+// point; a formatter rewrite alone must still re-verify the final head.
+func TestPushStep_FormatOnlyChangeReverifiesFinalHead(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Format: "printf 'reformatted\n' > feature.txt",
+		Test:   "grep -q '^feature code$' feature.txt",
+	})
+	sctx.Shared = &pipeline.RunShared{}
+	recordReviewApproval(t, sctx, headSHA)
+	completeTestStepWithVerifiedHead(t, sctx, headSHA, `{"findings":[],"summary":"tests passed"}`)
+
+	outcome, err := (&PushStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("push shipped a formatter rewrite the test step never validated")
+	}
+	if outcome != nil {
+		t.Fatalf("outcome = %#v, want nil on step failure", outcome)
+	}
+	if !strings.Contains(err.Error(), "final head verification failed") {
+		t.Fatalf("error = %v, want final-head verification failure", err)
+	}
+}
+
+// commands.format is a configured tool like commands.test and commands.lint:
+// an absent binary fails the owning step with a concrete message instead of
+// being logged as a warning and treated as success.
+func TestPushStep_MissingConfiguredFormatterFailsStep(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Format: "no-mistakes-missing-formatter",
+	})
+	sctx.Shared = &pipeline.RunShared{}
+
+	outcome, err := (&PushStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected missing configured formatter to fail the push step")
+	}
+	if outcome != nil {
+		t.Fatalf("outcome = %#v, want nil on step failure", outcome)
+	}
+	if !strings.Contains(err.Error(), "configured format command could not run") || !strings.Contains(err.Error(), "exit code 127") {
+		t.Fatalf("error = %v, want concrete command-not-found failure", err)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsSubstring(values []string, want string) bool {
+	for _, value := range values {
+		if strings.Contains(value, want) {
+			return true
+		}
+	}
+	return false
 }

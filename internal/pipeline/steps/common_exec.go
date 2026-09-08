@@ -14,7 +14,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
-	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
@@ -253,13 +252,25 @@ func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int
 	return runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, cmdStr)
 }
 
-func runConfiguredStepShellCommand(sctx *pipeline.StepContext, step types.StepName, cmdStr string) (string, int, error) {
+// Configured-command keys from .no-mistakes.yaml `commands.*`. They name the
+// command the user configured, which is not always the step that owns it: the
+// push step runs commands.format.
+const (
+	configuredCommandTest   = "test"
+	configuredCommandLint   = "lint"
+	configuredCommandFormat = "format"
+)
+
+// runConfiguredStepShellCommand runs a command the repository configured and
+// turns "the tool is not installed in this worktree" into a concrete step
+// failure. A missing tool is never a passing check and never an approval gate.
+func runConfiguredStepShellCommand(sctx *pipeline.StepContext, commandKey string, cmdStr string) (string, int, error) {
 	output, exitCode, err := runStepShellCommand(sctx, cmdStr)
 	if err != nil {
 		return output, exitCode, err
 	}
 	if exitCode == 127 {
-		return output, exitCode, fmt.Errorf("configured %s command could not run (exit code 127, command not found): %s", step, cmdStr)
+		return output, exitCode, fmt.Errorf("configured %s command could not run (exit code 127, command not found): %s", commandKey, cmdStr)
 	}
 	return output, exitCode, nil
 }

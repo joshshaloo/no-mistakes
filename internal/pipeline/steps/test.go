@@ -104,7 +104,7 @@ Previous test findings to address:
 	tested := []string{}
 	if testCmd != "" {
 		sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
-		output, exitCode, err := runConfiguredStepShellCommand(sctx, types.StepTest, testCmd)
+		output, exitCode, err := runConfiguredStepShellCommand(sctx, configuredCommandTest, testCmd)
 		if err != nil {
 			return nil, fmt.Errorf("run test command: %w", err)
 		}
@@ -246,12 +246,12 @@ Rules:
 		}
 
 		findingsJSON, _ := json.Marshal(findings)
-		return &pipeline.StepOutcome{
+		return withTestVerifiedHead(sctx, &pipeline.StepOutcome{
 			NeedsApproval: needsApproval,
 			AutoFixable:   autoFixable,
 			Findings:      string(findingsJSON),
 			FixSummary:    fixSummary,
-		}, nil
+		})
 	}
 
 	// In fix mode the agent may add new test files while making tests pass.
@@ -271,14 +271,30 @@ Rules:
 			})
 		}
 		findingsJSON, _ := json.Marshal(findings)
-		return &pipeline.StepOutcome{
+		return withTestVerifiedHead(sctx, &pipeline.StepOutcome{
 			NeedsApproval: false,
 			Findings:      string(findingsJSON),
 			FixSummary:    fixSummary,
-		}, nil
+		})
 	}
 
 	sctx.Log("all tests passed")
 	findingsJSON, _ := json.Marshal(Findings{Tested: tested})
-	return &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary}, nil
+	return withTestVerifiedHead(sctx, &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary})
+}
+
+// withTestVerifiedHead stamps the exact commit this round validated onto the
+// outcome so the executor can persist it as the run's durable anchor. A round
+// that parks for approval produced no green evidence, so it deliberately
+// leaves the anchor empty rather than claiming a head was tested.
+func withTestVerifiedHead(sctx *pipeline.StepContext, outcome *pipeline.StepOutcome) (*pipeline.StepOutcome, error) {
+	if outcome.NeedsApproval {
+		return outcome, nil
+	}
+	head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve tested head: %w", err)
+	}
+	outcome.TestVerifiedHeadSHA = head
+	return outcome, nil
 }

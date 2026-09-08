@@ -752,3 +752,58 @@ func TestSetRunCustodyReturnedStampsOnceAndSurvivesStatusUpdates(t *testing.T) {
 		t.Fatalf("custody stamp changed: %#v, want %d", got.CustodyReturnedAt, first)
 	}
 }
+
+// The test-verified head is the durable proof of which commit the recorded
+// test evidence describes. It must never appear on a run whose test step did
+// not complete, and completion plus the anchor are one transaction.
+func TestCompleteTestStepRecordsVerifiedHeadAtomically(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "mutable", "base")
+	if run.TestVerifiedHeadSHA != nil {
+		t.Fatalf("new run inferred a test-verified head: %#v", run.TestVerifiedHeadSHA)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteTestStep(step.ID, run.ID, "verified-1", 0, 5, "test.log"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TestVerifiedHeadSHA == nil || *got.TestVerifiedHeadSHA != "verified-1" {
+		t.Fatalf("test-verified head = %#v, want verified-1", got.TestVerifiedHeadSHA)
+	}
+	gotStep, err := d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotStep.Status != types.StepStatusCompleted {
+		t.Fatalf("step status = %s, want completed", gotStep.Status)
+	}
+
+	if err := d.CompleteTestStep("missing-step", run.ID, "verified-2", 0, 5, "test.log"); err == nil {
+		t.Fatal("expected completion of an unknown step to fail")
+	}
+	got, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TestVerifiedHeadSHA == nil || *got.TestVerifiedHeadSHA != "verified-1" {
+		t.Fatalf("failed transaction replaced the anchor: %#v", got.TestVerifiedHeadSHA)
+	}
+
+	if err := d.UpdateRunTestVerifiedHeadSHA(run.ID, "verified-3"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TestVerifiedHeadSHA == nil || *got.TestVerifiedHeadSHA != "verified-3" {
+		t.Fatalf("test-verified head = %#v, want verified-3", got.TestVerifiedHeadSHA)
+	}
+}

@@ -19,8 +19,14 @@ type HousekeepingLintResult struct {
 }
 
 // PostTestFixChange records pipeline-owned commits made after the Test step
-// and before Push. Such commits invalidate the earlier green test evidence;
-// the push boundary consumes this marker by re-verifying the final head.
+// and before the network push. Such commits invalidate the earlier green test
+// evidence.
+//
+// This marker is an in-memory optimization and log label only: the authority
+// the push boundary re-verifies against is the run's durable
+// test_verified_head_sha anchor, which survives a daemon restart. Losing this
+// marker across a process boundary therefore costs a step-name label, never
+// the invariant itself.
 type PostTestFixChange struct {
 	FromHead string
 	ToHead   string
