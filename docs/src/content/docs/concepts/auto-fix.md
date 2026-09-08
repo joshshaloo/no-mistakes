@@ -108,5 +108,6 @@ Round trigger types:
 - `initial` - first execution
 - `auto_fix` - triggered by the automatic fix loop
 - `auto_fix` - also used when you press `f` in the TUI or use `no-mistakes axi respond --action fix` to run a follow-up fix
+- `post_test_fix_verification` - the Test step's [final head re-verification](/no-mistakes/reference/pipeline-steps/#final-head-re-verification), recorded when a later step changed content after the tests ran
 
 Legacy `user_fix` rounds are still rendered as `auto-fix` in PR summaries for backward compatibility.

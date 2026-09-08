@@ -15,6 +15,7 @@ Every pipeline agent invocation is prompt-steered to keep intentional writes ins
 This is a soft boundary, not OS-level sandbox enforcement.
 The steering still allows requested test evidence under the managed temporary `no-mistakes-evidence` directory or the configured in-repo evidence directory, plus incidental temp or cache writes from normal development tools.
 Configured shell commands and one-shot agent subprocesses are scoped to their step: when the invocation exits, fails, or is cancelled, no-mistakes terminates remaining child processes it spawned so background workers do not outlive the run.
+A configured command whose tool is absent from the worktree fails the step that owns it instead of passing or pausing; see [Missing command tools](/no-mistakes/reference/repo-config/#missing-command-tools).
 When configured Test or Lint command output exceeds 64 KiB, the complete output remains in the authoritative step log while findings, IPC responses, and repair prompts receive a valid-UTF-8 head-and-tail projection capped at 64 KiB. The truncation marker reports the exact original and omitted byte counts and points to `no-mistakes axi logs --step <step> --full` for the complete output.
 Commits created by the shared Review, Test, Document, and Lint fix path use the configurable [`commit.fix_message`](/no-mistakes/reference/global-config/#commitfix_message) template.
 
@@ -153,9 +154,10 @@ When `commands.lint` is empty, unresolved findings from the combined pass pause 
 Pushes the validated branch to the configured push target.
 
 **Behavior:**
-- If `commands.format` is set, runs it first
+- If `commands.format` is set, runs it first; a non-zero exit is logged as a warning and does not stop the push, while a formatter that cannot run at all fails the step
 - Stages in-repo test evidence artifacts when `test.evidence.store_in_repo` is enabled and the evidence directory is not ignored by Git
 - Commits any uncommitted agent changes with message `no-mistakes: apply agent fixes`
+- Re-verifies the final head before any remote mutation when local content changed after the Test step, so the run's recorded test evidence describes the exact commit being pushed (see [Final head re-verification](#final-head-re-verification))
 - Without fork routing, the push target is the credentialled upstream URL resolved from the worktree's `origin` remote at run time (the DB stores a redacted copy)
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable
@@ -174,6 +176,16 @@ Any other out-of-band commit stops the push instead of being overwritten.
 Pre-skipping or later skipping Review leaves no approval binding, so Push fails closed unless Push is also skipped.
 
 This step never requires approval - it runs automatically after review, test, document, and lint pass.
+
+### Final head re-verification
+
+Document, lint, and push-stage fix rounds can commit after the Test step ran. Immediately before the remote push, no-mistakes compares the content about to be shipped with the exact working-tree content the Test step validated - a durable per-run anchor that survives a daemon restart, so a run resumed after a parked fix round still re-verifies.
+
+- Equal content is not re-verified. Landing files that already existed when the tests ran - the test agent's own new test files, staged in-repo evidence artifacts - changes the commit but not the validated content, so it costs nothing.
+- Changed content is re-verified: `commands.test` is re-run when configured, otherwise the agent runs the workspace typecheck when the repository configures one, plus the smallest suites covering the files that changed after Test. The re-verification never edits files.
+- A failed re-verification fails the run before the push, so a passed run can never describe stale test results.
+- The outcome is recorded as an extra `post_test_fix_verification` round on the Test step and appended to that step's evidence; the Test step's own `tested` entries, artifacts, and `testing_summary` are preserved, not replaced.
+- When the Test step produced no green evidence (skipped, failed, or approved with failing tests) there is nothing to invalidate, and the step log records that reason instead.
 
 ## PR
 

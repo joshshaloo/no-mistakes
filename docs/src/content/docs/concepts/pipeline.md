@@ -27,6 +27,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 
 - the branch was checked against fresh remote upstream and the pushed-branch target first
 - review, tests, user-facing test evidence when available, docs, and lint happened before any branch push to the configured target
+- the recorded test evidence describes the exact commit that was pushed: when a doc, lint, or push-stage fix changed content after the tests ran, the final head was re-verified before the push
 - the human stayed in control when a step needed judgment
 - the final branch update was guarded against discarding unincorporated commits already on the push target
 - push, PR creation, and CI monitoring only happened after the local gate was satisfied
