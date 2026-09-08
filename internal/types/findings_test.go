@@ -516,3 +516,29 @@ func TestFinding_Action_Values(t *testing.T) {
 		}
 	}
 }
+
+// Finding IDs are the selection keys a user passes to `axi respond --findings`,
+// so normalizing a set that already carries IDs - which is what merging a
+// final-head verification into the Test step's recorded findings does - must
+// never mint an ID that already answers to a different finding.
+func TestNormalizeFindings_GeneratedIDNeverCollidesWithExistingID(t *testing.T) {
+	normalized := NormalizeFindings(Findings{Items: []Finding{
+		{Severity: "error", Description: "tests failed on final head after post-test fixes"},
+		{ID: "test-1", Severity: "info", Description: "new test file written by agent"},
+		{Severity: "warning", Description: "flaky selector retried"},
+	}}, "test")
+
+	seen := map[string]string{}
+	for _, item := range normalized.Items {
+		if item.ID == "" {
+			t.Fatalf("finding %q has no ID", item.Description)
+		}
+		if prior, dup := seen[item.ID]; dup {
+			t.Fatalf("finding ID %q is shared by %q and %q", item.ID, prior, item.Description)
+		}
+		seen[item.ID] = item.Description
+	}
+	if normalized.Items[1].ID != "test-1" {
+		t.Fatalf("pre-existing ID = %q, want it preserved as test-1", normalized.Items[1].ID)
+	}
+}

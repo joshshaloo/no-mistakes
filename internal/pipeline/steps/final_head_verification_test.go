@@ -572,3 +572,147 @@ func TestFinalHeadVerification_DocumentFixToSourceStillReverifies(t *testing.T) 
 		t.Fatalf("error = %v, want final-head verification failure", err)
 	}
 }
+
+// A verification that fails must never be recorded with success wording. A
+// quiet failing command (a silent grep, a test runner that writes nothing on
+// failure) produces no stdout, so the summary can only come from an explicit
+// failure phrasing rather than from a default that assumes success.
+func TestFinalHeadVerification_SilentFailingCommandRecordsFailureWording(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Test: "exit 3",
+	})
+	sctx.Shared = &pipeline.RunShared{}
+	testResult := completeTestStepWithVerifiedTree(t, sctx, "")
+
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("documented\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Fixing = true
+	if err := commitAgentFixes(sctx, types.StepDocument, "document feature", "document feature"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := verifyFinalHeadAfterPostTestFixes(sctx); err == nil {
+		t.Fatal("expected final-head verification to fail on a non-zero exit")
+	}
+
+	merged := loadTestStepFindings(t, sctx, testResult.ID)
+	headLabel := shortObjectID(sctx.Run.HeadSHA)
+	for name, text := range map[string]string{"summary": merged.Summary, "testing_summary": merged.TestingSummary} {
+		if strings.Contains(text, "verified") {
+			t.Fatalf("%s = %q, want failure wording for a failed verification", name, text)
+		}
+		if !strings.Contains(text, headLabel) {
+			t.Fatalf("%s = %q, want the final head named", name, text)
+		}
+		if !strings.Contains(text, "exit 3") {
+			t.Fatalf("%s = %q, want the exit code named", name, text)
+		}
+	}
+}
+
+// Summary sentences accumulate, so a later passing round must add its own
+// sentence without erasing the recorded failure.
+func TestFinalHeadVerification_LaterSuccessKeepsRecordedFailureSentence(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Test: "grep -q '^feature code$' feature.txt",
+	})
+	sctx.Shared = &pipeline.RunShared{}
+	testResult := completeTestStepWithVerifiedTree(t, sctx, "")
+
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("broken by docs\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Fixing = true
+	if err := commitAgentFixes(sctx, types.StepDocument, "adjust copy", "adjust copy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFinalHeadAfterPostTestFixes(sctx); err == nil {
+		t.Fatal("expected the first verification to fail")
+	}
+	failedHead := shortObjectID(sctx.Run.HeadSHA)
+
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature code\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Also touch an unrelated file so the restored tree differs from the
+	// test-verified anchor and the boundary actually re-verifies.
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("documented\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitAgentFixes(sctx, types.StepDocument, "restore copy", "restore copy"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFinalHeadAfterPostTestFixes(sctx); err != nil {
+		t.Fatalf("second verification failed: %v", err)
+	}
+
+	merged := loadTestStepFindings(t, sctx, testResult.ID)
+	if !strings.Contains(merged.TestingSummary, failedHead) {
+		t.Fatalf("testing summary %q dropped the recorded failure for head %s", merged.TestingSummary, failedHead)
+	}
+	if !strings.Contains(merged.TestingSummary, "verified") {
+		t.Fatalf("testing summary %q lost the passing round", merged.TestingSummary)
+	}
+}
+
+// The merged testing summary is rendered into the PR body, where a newline
+// routes the whole sentence through the escaped <code> span path.
+func TestFinalHeadVerification_MergedTestingSummaryRendersAsProse(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Test: "true"})
+	sctx.Shared = &pipeline.RunShared{}
+	original := types.Findings{
+		Summary:        "tests passed with new coverage",
+		Tested:         []string{"`go test ./internal/feature`"},
+		TestingSummary: "Exercised the feature end to end and captured the CLI transcript.",
+	}
+	originalJSON, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeTestStepWithVerifiedTree(t, sctx, string(originalJSON))
+
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("documented\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Fixing = true
+	if err := commitAgentFixes(sctx, types.StepDocument, "document feature", "document feature"); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFinalHeadAfterPostTestFixes(sctx); err != nil {
+		t.Fatalf("verification failed: %v", err)
+	}
+
+	stepResults, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounds := map[string][]*db.StepRound{}
+	for _, step := range stepResults {
+		stepRounds, err := sctx.DB.GetRoundsByStep(step.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rounds[step.ID] = stepRounds
+	}
+	md := BuildTestingSummary(stepResults, rounds)
+
+	if strings.Contains(md, "<code>") || strings.Contains(md, "&#10;") {
+		t.Fatalf("testing block renders the merged summary as an escaped code span:\n%s", md)
+	}
+	if !strings.Contains(md, "- Summary: Exercised the feature end to end and captured the CLI transcript.") {
+		t.Fatalf("testing block lost the prose summary:\n%s", md)
+	}
+}

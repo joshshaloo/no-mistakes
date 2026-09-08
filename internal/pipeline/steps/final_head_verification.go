@@ -88,7 +88,7 @@ func verifyFinalHeadAfterPostTestFixes(sctx *pipeline.StepContext) error {
 		tested := []string{testCmd}
 		projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepPush)
 		if err != nil {
-			findings := finalHeadVerificationFindings(currentHead, changedFiles, tested, err.Error(), []Finding{{
+			findings := finalHeadVerificationFindings(currentHead, changedFiles, tested, err.Error(), "", []Finding{{
 				Severity:    "error",
 				Action:      types.ActionAutoFix,
 				Description: err.Error(),
@@ -100,7 +100,10 @@ func verifyFinalHeadAfterPostTestFixes(sctx *pipeline.StepContext) error {
 		}
 		if exitCode != 0 {
 			description := fmt.Sprintf("tests failed on final head after post-test fixes (exit code %d)", exitCode)
-			findings := finalHeadVerificationFindings(currentHead, changedFiles, tested, projectedOutput, []Finding{{
+			if projectedOutput != "" {
+				description = fmt.Sprintf("%s: %s", description, projectedOutput)
+			}
+			findings := finalHeadVerificationFindings(currentHead, changedFiles, tested, fmt.Sprintf("exit %d", exitCode), "", []Finding{{
 				Severity:    "error",
 				Action:      types.ActionAutoFix,
 				Description: description,
@@ -110,7 +113,7 @@ func verifyFinalHeadAfterPostTestFixes(sctx *pipeline.StepContext) error {
 			}
 			return fmt.Errorf("final head verification failed after post-test fixes: %s", description)
 		}
-		findings := finalHeadVerificationFindings(currentHead, changedFiles, tested, "", nil)
+		findings := finalHeadVerificationFindings(currentHead, changedFiles, tested, "", "", nil)
 		if err := recordFinalHeadVerificationRound(sctx, anchor.stepResultID, findings, time.Since(started).Milliseconds()); err != nil {
 			return err
 		}
@@ -154,19 +157,29 @@ Task:
 			findings = Findings{Summary: result.Text}
 		}
 	}
-	verification := finalHeadVerificationFindings(currentHead, changedFiles, findings.Tested, findings.Summary, findings.Items)
-	verification.Artifacts = findings.Artifacts
-	if len(verification.Tested) == 0 {
-		verification.Items = append(verification.Items, Finding{
+	items := findings.Items
+	if len(findings.Tested) == 0 {
+		items = append(items, Finding{
 			Severity:    "error",
 			Action:      types.ActionAutoFix,
 			Description: "final head verification did not report any test, typecheck, or manual verification command",
 		})
 	}
+	// The verdict is decided before the evidence is worded, so a blocking
+	// verification can never be recorded with the success phrasing.
+	failure := ""
+	if hasBlockingFindings(items) {
+		failure = strings.TrimSpace(findings.Summary)
+		if failure == "" {
+			failure = "the verification reported blocking findings"
+		}
+	}
+	verification := finalHeadVerificationFindings(currentHead, changedFiles, findings.Tested, failure, findings.Summary, items)
+	verification.Artifacts = findings.Artifacts
 	if err := recordFinalHeadVerificationRound(sctx, anchor.stepResultID, verification, time.Since(started).Milliseconds()); err != nil {
 		return err
 	}
-	if hasBlockingFindings(verification.Items) {
+	if failure != "" {
 		return fmt.Errorf("final head verification failed after post-test fixes: %s", verification.Summary)
 	}
 	return completeFinalHeadVerification(sctx, shippedTree)
@@ -262,16 +275,31 @@ func postTestChangedFiles(sctx *pipeline.StepContext, fromTree, toTree string) [
 	return files
 }
 
-func finalHeadVerificationFindings(head string, changedFiles, tested []string, summary string, items []Finding) Findings {
+// finalHeadVerificationFindings words the recorded evidence for one
+// verification round. The caller states the verdict through failure - a
+// non-empty clause means the verification did NOT pass - because the recorded
+// wording must follow the exit status, never the presence of command output: a
+// silent failing command produces no summary text, and defaulting that to the
+// success phrasing records the opposite of what happened. summary is the
+// verification's own wording and is honoured only when it passed.
+func finalHeadVerificationFindings(head string, changedFiles, tested []string, failure, summary string, items []Finding) Findings {
 	headLabel := shortObjectID(head)
+	files := strings.Join(changedFiles, ", ")
+	verdict := fmt.Sprintf("final head %s verified after post-test changes", headLabel)
+	testingSummary := fmt.Sprintf("%s to %s", verdict, files)
+	if failure = strings.TrimSpace(failure); failure != "" {
+		verdict = fmt.Sprintf("final head %s FAILED re-verification after post-test changes: %s", headLabel, failure)
+		testingSummary = fmt.Sprintf("final head %s FAILED re-verification after post-test changes to %s: %s", headLabel, files, failure)
+		summary = ""
+	}
 	if strings.TrimSpace(summary) == "" {
-		summary = fmt.Sprintf("final head %s verified after post-test changes", headLabel)
+		summary = verdict
 	}
 	return Findings{
 		Items:          items,
 		Summary:        summary,
 		Tested:         append([]string(nil), tested...),
-		TestingSummary: fmt.Sprintf("final head %s verified after post-test changes to %s", headLabel, strings.Join(changedFiles, ", ")),
+		TestingSummary: testingSummary,
 	}
 }
 
@@ -383,6 +411,10 @@ func appendUniqueArtifacts(existing, added []types.TestArtifact) []types.TestArt
 	return result
 }
 
+// appendSummarySentence grows a summary one sentence at a time. The join is a
+// single space, never a newline: the PR body renders a summary containing a
+// newline as an escaped <code> span, so a paragraph break here turns the whole
+// merged summary into monospace with literal "&#10;" escapes instead of prose.
 func appendSummarySentence(existing, added string) string {
 	existing = strings.TrimSpace(existing)
 	added = strings.TrimSpace(added)
@@ -394,7 +426,10 @@ func appendSummarySentence(existing, added string) string {
 	case strings.Contains(existing, added):
 		return existing
 	default:
-		return existing + "\n\n" + added
+		if !strings.HasSuffix(existing, ".") && !strings.HasSuffix(existing, "!") && !strings.HasSuffix(existing, "?") {
+			existing += "."
+		}
+		return existing + " " + added
 	}
 }
 
