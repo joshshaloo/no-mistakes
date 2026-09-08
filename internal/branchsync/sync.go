@@ -445,7 +445,8 @@ func (s *Service) Apply(ctx context.Context) State {
 //	behind     dirty     refuse (commit/stash first)    custody at local head;
 //	                                                    gate reset to it (CAS)
 //	diverged   any       refuse (anchor named, manual   custody at local head;
-//	                     reconcile / rerun offered)     gate reset to it (CAS)
+//	                     reconcile / rerun offered)     gate reset/adoption only
+//	                                                    after patch containment
 //	P missing  any       refuse                         refuse
 //
 // Fail-safe rules, in the same spirit as Refresh/Apply:
@@ -455,13 +456,13 @@ func (s *Service) Apply(ctx context.Context) State {
 //     private anchor ref refs/no-mistakes/recover/<runID> locally without gate
 //     access; otherwise it verifies and fetches the exact run-owned gate ref.
 //     That ref must be byte-equal to runs.head_sha, and the mutable gate branch
-//     must additionally be one of exactly three explainable values: the
-//     preserved head, the run's own immutable submitted head (the historical
-//     shape, where an already-pinned ref is accepted so a repeated recovery is
-//     idempotent), or the operator's kept head from an interrupted keep-local
-//     recovery. Any other live gate head is a third head this run cannot
-//     explain, and it is refused rather than displaced - a pinned run ref never
-//     licenses moving it.
+//     must additionally be explainable: the preserved head; the run's own
+//     immutable submitted head in the historical mismatch shape; or, for
+//     explicit --keep-local only, a third gate head that is archived first and
+//     whose preserved run-owned commits are all present in the current head by
+//     patch content despite changed commit IDs. A third gate head without that
+//     complete containment proof is refused and names the missing preserved
+//     commits rather than being displaced.
 //   - Preservation evidence that names more than one head, or that cannot be
 //     read at all, is never resolved automatically. It blocks with
 //     blocked_recover_ambiguous_head or blocked_recover_preservation_unreadable
@@ -471,6 +472,10 @@ func (s *Service) Apply(ctx context.Context) State {
 //     diverged local head instead of taking P, --keep-local never touches the
 //     worktree and moves the gate branch to the kept head with an atomic
 //     compare-and-swap, so a concurrent gate push wins and recovery refuses.
+//     If that kept head is a rebased/current copy of the preserved content, the
+//     old gate head and original preserved head are archived under
+//     refs/no-mistakes/recover/ before durable run authority moves to the
+//     current head and custody is stamped.
 //   - Anything unverifiable (missing object/ref, unexplained third gate head,
 //     ambiguous crash candidate, failed anchor write/fetch, active owner, or
 //     changed assumptions) refuses. Newly created exact preservation refs are
@@ -547,12 +552,8 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if existing, anchorErr := git.ResolveRef(ctx, wd, anchorRef); anchorErr == nil && existing == preserved {
 		anchored = true
 	}
-	// A keep-local recovery that already compare-and-swapped the gate branch but
-	// crashed before stamping custody resumes here. The gate then holds the
-	// operator's own kept head, which is the only third value this recovery may
-	// infer anything from.
-	resumedKeepLocal := keepLocal && anchored && runRefExists && gateHead == local
 	legacyMismatch := false
+	adoptContainedCurrentHead := false
 	switch {
 	case gateHead == preserved:
 		// The exact run-owned ref is byte-verified against durable authority
@@ -563,8 +564,6 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			}
 			runRefExists = true
 		}
-	case resumedKeepLocal:
-		// Both exact anchors already exist and the gate holds the kept head.
 	case s.legacySubmittedMismatchEligible(ctx, run, state, gateHead):
 		// Historical rebase failures recorded R while both the clean operator
 		// and mutable gate branch remained at immutable submitted A. Accepting
@@ -582,6 +581,12 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			runRefExists = true
 		}
 		legacyMismatch = true
+	case keepLocal && runRefExists:
+		// The operator may have already pushed a rebased copy of the preserved
+		// changes before returning custody. That gate head is explainable only
+		// after the exact run-owned ref is fetched and every preserved commit is
+		// proven present in the current head by patch content, not ancestry.
+		adoptContainedCurrentHead = true
 	default:
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_diverged", fmt.Sprintf("the gate branch is at %s, which is neither the preserved pipeline head %s recorded for this run nor its immutable submitted head; that live third head is never displaced automatically, so no files or refs were changed", gateHead, preserved))
 	}
@@ -609,6 +614,18 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		}
 	} else if !s.recoveryAssumptionsStillExact(ctx, run, state, gateHead) {
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the local branch, worktree, gate branch, run authority, or active owner changed while the exact head was being anchored; preservation refs were retained and custody was not returned")
+	}
+	if adoptContainedCurrentHead {
+		missing, err := missingPreservedCommitsByPatch(ctx, wd, ptr(run.SubmittedHeadSHA), preserved, local)
+		if err != nil {
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", fmt.Sprintf("the preserved commits could not be compared with the current head by patch content (%v); no files, refs, or custody state were changed", err))
+		}
+		if len(missing) > 0 {
+			blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_missing_preserved_commits", missingPreservedCommitsMessage(ctx, wd, missing, anchorRef))
+			blocked.NextAction = &NextAction{Code: "apply_missing_preserved_commits", Command: "git cherry-pick " + strings.Join(missing, " ")}
+			return blocked
+		}
+		return s.recoverAdoptedCurrentHead(ctx, run, state, gateHead, preserved)
 	}
 
 	switch {
@@ -833,37 +850,71 @@ func (s *Service) legacySubmittedMismatchStillExact(ctx context.Context, run *db
 // fetch - never a push, which would fire the gate's receive hooks and start a
 // pipeline run. The preserved head stays reachable through the anchor ref.
 func (s *Service) recoverKeepLocal(ctx context.Context, run *db.Run, state State, gateHead string) State {
+	if blocked, ok := s.ensureGateAtLocalHead(ctx, run, state, gateHead); !ok {
+		return blocked
+	}
+	return s.finishRecover(ctx, run, false)
+}
+
+func (s *Service) recoverAdoptedCurrentHead(ctx context.Context, run *db.Run, state State, gateHead, preserved string) State {
+	if err := git.PinExactCommit(ctx, s.GateDir, recoverGateArchiveRef(run.ID, gateHead), gateHead); err != nil {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_archive_failed", fmt.Sprintf("the diverged gate head %s could not be archived before custody return; no files, refs, or custody state were changed", gateHead))
+	}
+	if err := git.PinExactCommit(ctx, s.GateDir, recoverPreservedArchiveRef(run.ID, preserved), preserved); err != nil {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_archive_failed", fmt.Sprintf("the original preserved head %s could not be archived before current-head adoption; no files, refs, or custody state were changed", preserved))
+	}
+	if !s.recoveryAssumptionsStillExact(ctx, run, state, gateHead) {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the local branch, worktree, gate branch, run authority, or active owner changed while the contained current head was being adopted; the preservation refs were retained and custody was not returned")
+	}
+	if blocked, ok := s.ensureGateAtLocalHead(ctx, run, state, gateHead); !ok {
+		return blocked
+	}
+	if err := git.CompareAndSwapPrivateRef(ctx, s.GateDir, git.RunHeadRef(run.ID), state.Local.Head, preserved); err != nil {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_run_head_race", "the run-owned preservation ref changed while the contained current head was being adopted; the recovery archives were retained and custody was not returned")
+	}
+	adopted, err := s.DB.AdoptRunHeadForCustodyReturn(run.ID, preserved, state.Local.Head)
+	if err != nil || !adopted {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_stamp_failed", "the contained current head could not be recorded as recovered run authority; re-run the recovery")
+	}
+	adoptedState, _, _ := s.inspect(ctx)
+	adoptedState.Recovered = true
+	adoptedState.Changed = false
+	return adoptedState
+}
+
+func (s *Service) ensureGateAtLocalHead(ctx context.Context, run *db.Run, state State, gateHead string) (State, bool) {
 	if s.beforeGateReset != nil {
 		s.beforeGateReset()
 	}
-	if gateHead != state.Local.Head {
-		head, err := git.HeadSHA(ctx, s.workDir())
-		if err != nil || head != state.Local.Head {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the local branch head changed while custody was being returned; no files or refs were changed")
-		}
-		// The fetch source must be absolute: the command runs inside the gate
-		// directory, where a relative invoking-worktree path would resolve to
-		// the gate itself.
-		source, err := filepath.Abs(s.workDir())
-		if err != nil {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the invoking worktree path could not be resolved; no files or refs were changed")
-		}
-		stagingRef := "refs/no-mistakes/custody-return/" + run.ID
-		if _, err := git.Run(ctx, s.GateDir, "fetch", "--no-tags", "--no-write-fetch-head", source, "+refs/heads/"+state.Local.Branch+":"+stagingRef); err != nil {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the kept local head could not be staged into the gate; no files or refs were changed")
-		}
-		staged, err := git.Run(ctx, s.GateDir, "rev-parse", stagingRef+"^{commit}")
-		if err != nil || staged != state.Local.Head {
-			_, _ = git.Run(ctx, s.GateDir, "update-ref", "-d", stagingRef)
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the local branch head changed while custody was being returned; no files or refs were changed")
-		}
-		_, casErr := git.Run(ctx, s.GateDir, "update-ref", "refs/heads/"+state.Local.Branch, state.Local.Head, gateHead)
-		_, _ = git.Run(ctx, s.GateDir, "update-ref", "-d", stagingRef)
-		if casErr != nil {
-			return blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_race", "the gate branch changed while custody was being returned; re-run the recovery; no local files or refs were changed")
-		}
+	head, err := git.HeadSHA(ctx, s.workDir())
+	if err != nil || head != state.Local.Head {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the local branch head changed while custody was being returned; no files or refs were changed"), false
 	}
-	return s.finishRecover(ctx, run, false)
+	if gateHead == state.Local.Head {
+		return State{}, true
+	}
+	// The fetch source must be absolute: the command runs inside the gate
+	// directory, where a relative invoking-worktree path would resolve to
+	// the gate itself.
+	source, err := filepath.Abs(s.workDir())
+	if err != nil {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the invoking worktree path could not be resolved; no files or refs were changed"), false
+	}
+	stagingRef := "refs/no-mistakes/custody-return/" + run.ID
+	if _, err := git.Run(ctx, s.GateDir, "fetch", "--no-tags", "--no-write-fetch-head", source, "+refs/heads/"+state.Local.Branch+":"+stagingRef); err != nil {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the kept local head could not be staged into the gate; no files or refs were changed"), false
+	}
+	staged, err := git.Run(ctx, s.GateDir, "rev-parse", stagingRef+"^{commit}")
+	if err != nil || staged != state.Local.Head {
+		_, _ = git.Run(ctx, s.GateDir, "update-ref", "-d", stagingRef)
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_assumptions_changed", "the local branch head changed while custody was being returned; no files or refs were changed"), false
+	}
+	_, casErr := git.Run(ctx, s.GateDir, "update-ref", "refs/heads/"+state.Local.Branch, state.Local.Head, gateHead)
+	_, _ = git.Run(ctx, s.GateDir, "update-ref", "-d", stagingRef)
+	if casErr != nil {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_race", "the gate branch changed while custody was being returned; re-run the recovery; no local files or refs were changed"), false
+	}
+	return State{}, true
 }
 
 // recoverFastForward advances the clean checked-out branch to the preserved
@@ -929,6 +980,58 @@ func (s *Service) finishRecover(ctx context.Context, run *db.Run, changed bool) 
 
 func recoverAnchorRef(runID string) string {
 	return "refs/no-mistakes/recover/" + runID
+}
+
+func recoverGateArchiveRef(runID, sha string) string {
+	return "refs/no-mistakes/recover/" + runID + "-gate-" + sha
+}
+
+func recoverPreservedArchiveRef(runID, sha string) string {
+	return "refs/no-mistakes/recover/" + runID + "-preserved-" + sha
+}
+
+func missingPreservedCommitsByPatch(ctx context.Context, dir, submitted, preserved, current string) ([]string, error) {
+	submitted = strings.TrimSpace(submitted)
+	preserved = strings.TrimSpace(preserved)
+	current = strings.TrimSpace(current)
+	if submitted == "" || preserved == "" || current == "" {
+		return nil, fmt.Errorf("submitted, preserved, and current heads are required")
+	}
+	for _, sha := range []string{submitted, preserved, current} {
+		if _, err := git.ResolveExactCommit(ctx, dir, sha); err != nil {
+			return nil, err
+		}
+	}
+	out, err := git.Run(ctx, dir, "cherry", current, preserved, submitted)
+	if err != nil {
+		return nil, err
+	}
+	var missing []string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) < 2 || (fields[0] != "+" && fields[0] != "-") {
+			return nil, fmt.Errorf("unexpected git cherry output %q", line)
+		}
+		if fields[0] == "+" {
+			missing = append(missing, fields[1])
+		}
+	}
+	return missing, nil
+}
+
+func missingPreservedCommitsMessage(ctx context.Context, dir string, missing []string, anchorRef string) string {
+	var described []string
+	for _, sha := range missing {
+		if line, err := git.Run(ctx, dir, "show", "-s", "--format=%H %s", sha); err == nil && strings.TrimSpace(line) != "" {
+			described = append(described, strings.TrimSpace(line))
+		} else {
+			described = append(described, sha)
+		}
+	}
+	return fmt.Sprintf("the current head does not contain every preserved pipeline commit by patch content; missing preserved commits: %s; the preserved head is anchored at %s. Apply or cherry-pick the missing commits, then re-run `no-mistakes axi sync --recover --keep-local`, or manually move the branch back to the preserved head and run `no-mistakes axi sync --recover`; no files, refs, or custody state were changed", strings.Join(described, ", "), anchorRef)
 }
 
 func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
