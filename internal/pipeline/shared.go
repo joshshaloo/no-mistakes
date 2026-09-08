@@ -1,6 +1,10 @@
 package pipeline
 
-import "sync"
+import (
+	"sync"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
 
 // HousekeepingLintResult is the lint assessment produced by the combined
 // document+lint housekeeping pass: the document step performs both duties in
@@ -14,13 +18,23 @@ type HousekeepingLintResult struct {
 	Summary string
 }
 
+// PostTestFixChange records pipeline-owned commits made after the Test step
+// and before Push. Such commits invalidate the earlier green test evidence;
+// the push boundary consumes this marker by re-verifying the final head.
+type PostTestFixChange struct {
+	FromHead string
+	ToHead   string
+	Steps    []types.StepName
+}
+
 // RunShared carries in-memory run-scoped results one step hands to a later
 // step in the same run. It lives on the executor for the run's lifetime and
 // is never persisted: on any process boundary the consuming step simply
 // falls back to doing its own work.
 type RunShared struct {
-	mu               sync.Mutex
-	housekeepingLint *HousekeepingLintResult
+	mu                sync.Mutex
+	housekeepingLint  *HousekeepingLintResult
+	postTestFixChange *PostTestFixChange
 }
 
 // SetHousekeepingLint records the combined pass's lint assessment for the
@@ -62,4 +76,52 @@ func (s *RunShared) TakeHousekeepingLint() (HousekeepingLintResult, bool) {
 	result := *s.housekeepingLint
 	s.housekeepingLint = nil
 	return result, true
+}
+
+// MarkPostTestFixCommit records that a post-Test pipeline step advanced HEAD.
+// The first changed head is kept as the diff base so one final verification
+// covers all files touched by later commits; ToHead tracks the latest head.
+func (s *RunShared) MarkPostTestFixCommit(step types.StepName, fromHead, toHead string) {
+	if s == nil || fromHead == "" || toHead == "" || fromHead == toHead {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.postTestFixChange == nil {
+		s.postTestFixChange = &PostTestFixChange{FromHead: fromHead, ToHead: toHead, Steps: []types.StepName{step}}
+		return
+	}
+	s.postTestFixChange.ToHead = toHead
+	for _, existing := range s.postTestFixChange.Steps {
+		if existing == step {
+			return
+		}
+	}
+	s.postTestFixChange.Steps = append(s.postTestFixChange.Steps, step)
+}
+
+// PendingPostTestFixChange returns the unverified post-Test commit range.
+func (s *RunShared) PendingPostTestFixChange() (PostTestFixChange, bool) {
+	if s == nil {
+		return PostTestFixChange{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.postTestFixChange == nil {
+		return PostTestFixChange{}, false
+	}
+	change := *s.postTestFixChange
+	change.Steps = append([]types.StepName(nil), change.Steps...)
+	return change, true
+}
+
+// CompletePostTestFixVerification clears the pending marker once the current
+// final head has been re-verified and recorded.
+func (s *RunShared) CompletePostTestFixVerification() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.postTestFixChange = nil
 }

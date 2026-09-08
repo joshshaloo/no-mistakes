@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
@@ -250,6 +251,17 @@ func runShellCommand(ctx context.Context, dir, cmdStr string) (string, int, erro
 
 func runStepShellCommand(sctx *pipeline.StepContext, cmdStr string) (string, int, error) {
 	return runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, sctx.Env, cmdStr)
+}
+
+func runConfiguredStepShellCommand(sctx *pipeline.StepContext, step types.StepName, cmdStr string) (string, int, error) {
+	output, exitCode, err := runStepShellCommand(sctx, cmdStr)
+	if err != nil {
+		return output, exitCode, err
+	}
+	if exitCode == 127 {
+		return output, exitCode, fmt.Errorf("configured %s command could not run (exit code 127, command not found): %s", step, cmdStr)
+	}
+	return output, exitCode, nil
 }
 
 func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdStr string) (string, int, error) {

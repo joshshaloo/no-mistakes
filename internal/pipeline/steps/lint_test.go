@@ -98,6 +98,25 @@ func TestLintStep_FixMode_UsesFallbackSummaryWhenStructuredSummaryMalformed(t *t
 	}
 }
 
+func TestLintStep_ConfiguredLintCommandNotFoundFailsStep(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{Lint: "no-mistakes-missing-linter"})
+
+	outcome, err := (&LintStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected missing configured linter to fail the step")
+	}
+	if outcome != nil {
+		t.Fatalf("outcome = %#v, want nil on step failure", outcome)
+	}
+	if !strings.Contains(err.Error(), "configured lint command could not run") || !strings.Contains(err.Error(), "exit code 127") {
+		t.Fatalf("error = %v, want concrete command-not-found failure", err)
+	}
+}
+
 func TestLintStep_NoConfiguredLint_CommitsAgentFixesWithoutApproval(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

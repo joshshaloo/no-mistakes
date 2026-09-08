@@ -104,7 +104,7 @@ Previous test findings to address:
 	tested := []string{}
 	if testCmd != "" {
 		sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
-		output, exitCode, err := runStepShellCommand(sctx, testCmd)
+		output, exitCode, err := runConfiguredStepShellCommand(sctx, types.StepTest, testCmd)
 		if err != nil {
 			return nil, fmt.Errorf("run test command: %w", err)
 		}

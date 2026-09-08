@@ -148,8 +148,12 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return err
 	}
+	previousHead := sctx.Run.HeadSHA
 	if err := publishPipelineHead(sctx, headSHA); err != nil {
 		return fmt.Errorf("publish %s fix head: %w", stepName, err)
+	}
+	if stepName.Order() > types.StepTest.Order() && stepName.Order() < types.StepPush.Order() {
+		sctx.Shared.MarkPostTestFixCommit(stepName, previousHead, headSHA)
 	}
 	sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
 	return nil

@@ -70,6 +70,10 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		}
 	}
 
+	if err := verifyFinalHeadAfterPostTestFixes(sctx); err != nil {
+		return nil, err
+	}
+
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	branch := strings.TrimPrefix(ref, "refs/heads/")
 
