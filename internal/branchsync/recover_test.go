@@ -533,6 +533,124 @@ func TestRecoverKeepLocalRefusesRebasedGateHeadMissingPreservedCommits(t *testin
 	}
 }
 
+// TestRecoverKeepLocalAdoptsContainedThirdGateHead is the positive companion
+// to TestRecoverPinnedRunRefStillRefusesThirdGateHead: a live third gate head
+// may be adopted only because the current head already carries its content,
+// so the compare-and-swap that moves the gate branch drops nothing.
+func TestRecoverKeepLocalAdoptsContainedThirdGateHead(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	writer := filepath.Join(t.TempDir(), "writer")
+	mustRun(t, filepath.Dir(writer), "-c", "core.autocrlf=false", "clone", f.gate, writer)
+	configureIdentity(t, writer)
+	mustRun(t, writer, "checkout", "feature/recover")
+	mustWrite(t, filepath.Join(writer, "third.txt"), "colleague work\n")
+	mustRun(t, writer, "add", "third.txt")
+	mustRun(t, writer, "commit", "-m", "colleague pushed tip")
+	third := mustRun(t, writer, "rev-parse", "HEAD")
+	mustRun(t, writer, "push", "origin", "HEAD:refs/heads/feature/recover")
+
+	// The operator took the whole gate branch - preserved fixes and the
+	// colleague tip - and rebased it onto an advanced default branch.
+	mustRun(t, f.local, "fetch", f.gate, "refs/heads/feature/recover")
+	mustRun(t, f.local, "reset", "--hard", "FETCH_HEAD")
+	mustRun(t, f.local, "checkout", "main")
+	mustWrite(t, filepath.Join(f.local, "main.txt"), "main advanced\n")
+	mustRun(t, f.local, "add", "main.txt")
+	mustRun(t, f.local, "commit", "-m", "advance main")
+	mustRun(t, f.local, "checkout", "feature/recover")
+	mustRun(t, f.local, "rebase", "main")
+	rebased := mustRun(t, f.local, "rev-parse", "HEAD")
+
+	if state := f.service.Recover(f.ctx, false); state.Recovered || state.Safety != "blocked_recover_gate_diverged" {
+		t.Fatalf("default recovery should still require explicit keep-local adoption: %#v", state)
+	}
+	state := f.service.Recover(f.ctx, true)
+	if !state.Recovered || state.Changed || state.Safety != "custody_returned" {
+		t.Fatalf("contained third-head keep-local recovery = %#v", state)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != rebased {
+		t.Fatalf("gate branch = %s, want adopted head %s", got, rebased)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", recoverGateArchiveRef(f.run.ID, third)); got != third {
+		t.Fatalf("displaced third head was not archived: %s", got)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != rebased {
+		t.Fatalf("run-owned ref = %s, want adopted head %s", got, rebased)
+	}
+	reloaded, err := f.db.GetRun(f.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.HeadSHA != rebased || reloaded.CustodyReturnedAt == nil {
+		t.Fatalf("run authority/custody = %s/%v, want %s/stamped", reloaded.HeadSHA, reloaded.CustodyReturnedAt, rebased)
+	}
+}
+
+// TestRecoverKeepLocalResumesInterruptedGateSwap covers the crash window
+// between the keep-local gate compare-and-swap and the custody stamp: the
+// retry must complete from this recovery's own kept-head record instead of
+// demanding preserved commits the operator deliberately declined. Without that
+// record the same shape stays an unexplained gate head.
+func TestRecoverKeepLocalResumesInterruptedGateSwap(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(f.local, "rescope.txt"), "rescope\n")
+	mustRun(t, f.local, "add", "rescope.txt")
+	mustRun(t, f.local, "commit", "-m", "diverging rescope")
+	kept := mustRun(t, f.local, "rev-parse", "HEAD")
+
+	// Interrupt exactly between the gate move and the custody stamp.
+	f.service.beforeGateReset = func() { f.db.Close() }
+	if state := f.service.Recover(f.ctx, true); state.Recovered || state.Safety != "blocked_recover_stamp_failed" {
+		t.Fatalf("interrupted keep-local recovery = %#v", state)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != kept {
+		t.Fatalf("interrupted recovery left the gate at %s, want the kept head %s", got, kept)
+	}
+
+	reopened, err := db.Open(filepath.Join(filepath.Dir(f.local), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	resumed := &Service{DB: reopened, Repo: f.repo, WorkDir: f.local, GateDir: f.gate}
+
+	// The kept-head record is what licenses the resume: without it the same
+	// gate head is only the operator's own push and must prove containment.
+	keptRef := recoverKeptHeadRef(f.run.ID)
+	mustRun(t, f.local, "update-ref", "-d", keptRef, kept)
+	if state := resumed.Recover(f.ctx, true); state.Recovered || state.Safety != "blocked_recover_missing_preserved_commits" {
+		t.Fatalf("resume without the kept-head record = %#v", state)
+	}
+	mustRun(t, f.local, "update-ref", keptRef, kept)
+
+	state := resumed.Recover(f.ctx, true)
+	if !state.Recovered || state.Changed || state.Safety != "custody_returned" {
+		t.Fatalf("resumed keep-local recovery = %#v", state)
+	}
+	reloaded, err := reopened.GetRun(f.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.CustodyReturnedAt == nil {
+		t.Fatal("resumed recovery did not stamp custody")
+	}
+	if reloaded.HeadSHA != f.preserved {
+		t.Fatalf("resumed keep-local moved run authority to %s; the preserved head stays authority", reloaded.HeadSHA)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {
+		t.Fatalf("resumed recovery disturbed the preserved run ref: %s", got)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != kept {
+		t.Fatalf("resumed recovery moved the worktree to %s", got)
+	}
+}
+
 // TestRecoverGateDivergenceAndUnavailabilityFailClosed: recovery must refuse
 // whenever the preserved head cannot be verified and anchored - a moved gate
 // branch, a deleted gate branch, or a missing gate.
@@ -930,8 +1048,9 @@ func TestUnreadablePreservationEvidenceFailsClosed(t *testing.T) {
 
 // TestRecoverPinnedRunRefStillRefusesThirdGateHead is the regression for the
 // widening this arm introduced: a byte-verified run ref must not license
-// recovery across a live third gate head unless --keep-local first proves the
-// current head contains every preserved commit by patch content.
+// recovery across a live third gate head whose own content is not already
+// contained in the current head, because --keep-local would then
+// compare-and-swap that head off the gate branch and drop its work.
 func TestRecoverPinnedRunRefStillRefusesThirdGateHead(t *testing.T) {
 	f := newRecoverFixture(t, types.RunFailed)
 	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
@@ -947,31 +1066,19 @@ func TestRecoverPinnedRunRefStillRefusesThirdGateHead(t *testing.T) {
 	third := mustRun(t, writer, "rev-parse", "HEAD")
 	mustRun(t, writer, "push", "origin", "HEAD:refs/heads/feature/recover")
 
-	for _, tc := range []struct {
-		keepLocal  bool
-		wantSafety string
-	}{
-		{keepLocal: false, wantSafety: "blocked_recover_gate_diverged"},
-		{keepLocal: true, wantSafety: "blocked_recover_missing_preserved_commits"},
-	} {
-		state := f.service.Recover(f.ctx, tc.keepLocal)
-		if state.Recovered || state.Safety != tc.wantSafety {
-			t.Fatalf("keep_local=%v third-head recovery = %#v", tc.keepLocal, state)
+	for _, keepLocal := range []bool{false, true} {
+		state := f.service.Recover(f.ctx, keepLocal)
+		if state.Recovered || state.Safety != "blocked_recover_gate_diverged" {
+			t.Fatalf("keep_local=%v third-head recovery = %#v", keepLocal, state)
 		}
-		if tc.keepLocal {
-			for _, want := range []string{f.preserved, f.anchorRef(), "cherry-pick"} {
-				if !strings.Contains(state.Error, want) {
-					t.Fatalf("keep-local refusal missing %q: %q", want, state.Error)
-				}
-			}
-		} else if !strings.Contains(state.Error, third) {
+		if !strings.Contains(state.Error, third) {
 			t.Fatalf("refusal does not name the displaced gate head %s: %q", third, state.Error)
 		}
 		if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != third {
-			t.Fatalf("keep_local=%v displaced the colleague tip to %s", tc.keepLocal, got)
+			t.Fatalf("keep_local=%v displaced the colleague tip to %s", keepLocal, got)
 		}
 		if f.custodyReturned() {
-			t.Fatalf("keep_local=%v stamped custody across a third gate head", tc.keepLocal)
+			t.Fatalf("keep_local=%v stamped custody across a third gate head", keepLocal)
 		}
 	}
 	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {

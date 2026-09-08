@@ -457,12 +457,14 @@ func (s *Service) Apply(ctx context.Context) State {
 //     access; otherwise it verifies and fetches the exact run-owned gate ref.
 //     That ref must be byte-equal to runs.head_sha, and the mutable gate branch
 //     must additionally be explainable: the preserved head; the run's own
-//     immutable submitted head in the historical mismatch shape; or, for
-//     explicit --keep-local only, a third gate head that is archived first and
-//     whose preserved run-owned commits are all present in the current head by
-//     patch content despite changed commit IDs. A third gate head without that
-//     complete containment proof is refused and names the missing preserved
-//     commits rather than being displaced.
+//     immutable submitted head in the historical mismatch shape; the kept head
+//     of an interrupted --keep-local, proven by this recovery's own kept-head
+//     intent ref; or, for explicit --keep-local only, a third gate head whose
+//     own unique commits AND every preserved run-owned commit are all present
+//     in the current head by patch content despite changed commit IDs, in
+//     which case it is archived before being adopted. A third gate head
+//     without both complete containment proofs is refused - naming the head
+//     itself, or the missing preserved commits - rather than displaced.
 //   - Preservation evidence that names more than one head, or that cannot be
 //     read at all, is never resolved automatically. It blocks with
 //     blocked_recover_ambiguous_head or blocked_recover_preservation_unreadable
@@ -472,10 +474,10 @@ func (s *Service) Apply(ctx context.Context) State {
 //     diverged local head instead of taking P, --keep-local never touches the
 //     worktree and moves the gate branch to the kept head with an atomic
 //     compare-and-swap, so a concurrent gate push wins and recovery refuses.
-//     If that kept head is a rebased/current copy of the preserved content, the
-//     old gate head and original preserved head are archived under
-//     refs/no-mistakes/recover/ before durable run authority moves to the
-//     current head and custody is stamped.
+//     If that kept head is a rebased/current copy of both the preserved content
+//     and the live gate head's own content, the old gate head and original
+//     preserved head are archived under refs/no-mistakes/recover/ before
+//     durable run authority moves to the current head and custody is stamped.
 //   - Anything unverifiable (missing object/ref, unexplained third gate head,
 //     ambiguous crash candidate, failed anchor write/fetch, active owner, or
 //     changed assumptions) refuses. Newly created exact preservation refs are
@@ -552,6 +554,12 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if existing, anchorErr := git.ResolveRef(ctx, wd, anchorRef); anchorErr == nil && existing == preserved {
 		anchored = true
 	}
+	// A keep-local recovery that already compare-and-swapped the gate branch but
+	// crashed before stamping custody resumes here. The kept-head intent ref is
+	// this recovery's own durable record that it moved the gate to that exact
+	// head, so the resume is licensed by proof rather than inferred from a gate
+	// head the operator could equally have pushed themselves.
+	resumedKeepLocal := keepLocal && anchored && runRefExists && gateHead == local && s.keptHeadIntentRecorded(ctx, run, local)
 	legacyMismatch := false
 	adoptContainedCurrentHead := false
 	switch {
@@ -564,6 +572,8 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			}
 			runRefExists = true
 		}
+	case resumedKeepLocal:
+		// Both exact anchors already exist and the gate holds the kept head.
 	case s.legacySubmittedMismatchEligible(ctx, run, state, gateHead):
 		// Historical rebase failures recorded R while both the clean operator
 		// and mutable gate branch remained at immutable submitted A. Accepting
@@ -581,14 +591,16 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			runRefExists = true
 		}
 		legacyMismatch = true
-	case keepLocal && runRefExists:
+	case keepLocal && runRefExists && s.gateHeadContentContainedLocally(ctx, run, state, gateHead):
 		// The operator may have already pushed a rebased copy of the preserved
 		// changes before returning custody. That gate head is explainable only
-		// after the exact run-owned ref is fetched and every preserved commit is
-		// proven present in the current head by patch content, not ancestry.
+		// once its own unique commits are proven present in the current head by
+		// patch content, and only becomes adoptable after the exact run-owned
+		// ref is fetched and every preserved commit is proven present the same
+		// way - content, never ancestry.
 		adoptContainedCurrentHead = true
 	default:
-		return blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_diverged", fmt.Sprintf("the gate branch is at %s, which is neither the preserved pipeline head %s recorded for this run nor its immutable submitted head; that live third head is never displaced automatically, so no files or refs were changed", gateHead, preserved))
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_gate_diverged", fmt.Sprintf("the gate branch is at %s, which is neither the preserved pipeline head %s recorded for this run nor its immutable submitted head; that live third head is never displaced automatically - `--keep-local` adopts it only when every commit unique to it is already present in the current head by patch content - so no files or refs were changed", gateHead, preserved))
 	}
 
 	if !anchored {
@@ -621,8 +633,12 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", fmt.Sprintf("the preserved commits could not be compared with the current head by patch content (%v); no files, refs, or custody state were changed", err))
 		}
 		if len(missing) > 0 {
+			// NextAction.Command is always inspection: an agent follows this
+			// field structurally, and a multi-commit cherry-pick can conflict
+			// and strand the worktree mid-sequence. The exact commits to apply
+			// and the supported ways forward stay in the message text.
 			blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_missing_preserved_commits", missingPreservedCommitsMessage(ctx, wd, missing, anchorRef))
-			blocked.NextAction = &NextAction{Code: "apply_missing_preserved_commits", Command: "git cherry-pick " + strings.Join(missing, " ")}
+			blocked.NextAction = &NextAction{Code: "apply_missing_preserved_commits", Command: "git log --oneline " + anchorRef}
 			return blocked
 		}
 		return s.recoverAdoptedCurrentHead(ctx, run, state, gateHead, preserved)
@@ -849,11 +865,53 @@ func (s *Service) legacySubmittedMismatchStillExact(ctx context.Context, run *db
 // being clobbered. The kept head's objects reach the gate through a gate-side
 // fetch - never a push, which would fire the gate's receive hooks and start a
 // pipeline run. The preserved head stays reachable through the anchor ref.
+//
+// The kept head is recorded under the local kept-head intent ref before the
+// gate moves, so a crash between the compare-and-swap and the custody stamp
+// resumes on the next invocation. Without that record the resume would have to
+// be inferred from "the gate happens to equal the local head", which is also
+// the shape of a gate head the operator pushed themselves and which must still
+// prove content containment.
 func (s *Service) recoverKeepLocal(ctx context.Context, run *db.Run, state State, gateHead string) State {
+	if err := git.PinExactCommit(ctx, s.workDir(), recoverKeptHeadRef(run.ID), state.Local.Head); err != nil {
+		return blockedPlan(state, StatePipelineOwned, "blocked_recover_preserve_failed", "the kept local head could not be recorded before the gate branch was moved; no files, refs, or custody state were changed")
+	}
 	if blocked, ok := s.ensureGateAtLocalHead(ctx, run, state, gateHead); !ok {
 		return blocked
 	}
 	return s.finishRecover(ctx, run, false)
+}
+
+// keptHeadIntentRecorded reports whether this recovery already recorded head as
+// the operator's kept head for the run, which is the only evidence that a gate
+// branch equal to the local head was moved there by an interrupted keep-local
+// recovery rather than by the operator's own push.
+func (s *Service) keptHeadIntentRecorded(ctx context.Context, run *db.Run, head string) bool {
+	kept, err := git.ResolveRef(ctx, s.workDir(), recoverKeptHeadRef(run.ID))
+	return err == nil && kept == head
+}
+
+// gateHeadContentContainedLocally proves that every commit unique to the live
+// gate head is already present in the invoking worktree's head by patch
+// content. Adoption compare-and-swaps that head off the gate branch, so
+// without this proof a third party's tip would be displaced and its content
+// dropped from the branch. Anything unprovable (an unfetchable gate branch, a
+// head that moved mid-check, an unreadable comparison) reports false, which
+// keeps the caller's unexplained-gate-head refusal.
+func (s *Service) gateHeadContentContainedLocally(ctx context.Context, run *db.Run, state State, gateHead string) bool {
+	if gateHead == state.Local.Head {
+		return true
+	}
+	wd := s.workDir()
+	evidenceRef := recoverGateEvidenceRef(run.ID)
+	if _, err := git.Run(ctx, wd, "fetch", "--no-tags", "--no-write-fetch-head", s.GateDir, "+refs/heads/"+state.Local.Branch+":"+evidenceRef); err != nil {
+		return false
+	}
+	if fetched, err := git.ResolveRef(ctx, wd, evidenceRef); err != nil || fetched != gateHead {
+		return false
+	}
+	missing, err := missingCommitsByPatch(ctx, wd, state.Local.Head, gateHead, "")
+	return err == nil && len(missing) == 0
 }
 
 func (s *Service) recoverAdoptedCurrentHead(ctx context.Context, run *db.Run, state State, gateHead, preserved string) State {
@@ -990,19 +1048,44 @@ func recoverPreservedArchiveRef(runID, sha string) string {
 	return "refs/no-mistakes/recover/" + runID + "-preserved-" + sha
 }
 
+func recoverGateEvidenceRef(runID string) string {
+	return "refs/no-mistakes/recover/" + runID + "-gate-head"
+}
+
+func recoverKeptHeadRef(runID string) string {
+	return "refs/no-mistakes/recover/" + runID + "-kept"
+}
+
 func missingPreservedCommitsByPatch(ctx context.Context, dir, submitted, preserved, current string) ([]string, error) {
-	submitted = strings.TrimSpace(submitted)
-	preserved = strings.TrimSpace(preserved)
-	current = strings.TrimSpace(current)
-	if submitted == "" || preserved == "" || current == "" {
+	if strings.TrimSpace(submitted) == "" {
 		return nil, fmt.Errorf("submitted, preserved, and current heads are required")
 	}
-	for _, sha := range []string{submitted, preserved, current} {
+	return missingCommitsByPatch(ctx, dir, current, preserved, submitted)
+}
+
+// missingCommitsByPatch reports the commits reachable from head but not from
+// current whose patch content is absent from current, so a rewritten commit ID
+// counts as present while dropped content does not. An optional limit bounds
+// the walk to the commits this run is responsible for. Any unexpected output
+// is an error rather than an empty - silently reporting "nothing missing" is
+// the one failure mode that would license discarding work.
+func missingCommitsByPatch(ctx context.Context, dir, current, head, limit string) ([]string, error) {
+	current = strings.TrimSpace(current)
+	head = strings.TrimSpace(head)
+	limit = strings.TrimSpace(limit)
+	if current == "" || head == "" {
+		return nil, fmt.Errorf("current and compared heads are required")
+	}
+	args := []string{"cherry", current, head}
+	if limit != "" {
+		args = append(args, limit)
+	}
+	for _, sha := range args[1:] {
 		if _, err := git.ResolveExactCommit(ctx, dir, sha); err != nil {
 			return nil, err
 		}
 	}
-	out, err := git.Run(ctx, dir, "cherry", current, preserved, submitted)
+	out, err := git.Run(ctx, dir, args...)
 	if err != nil {
 		return nil, err
 	}

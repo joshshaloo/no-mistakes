@@ -51,6 +51,12 @@ var canonicalBranchSyncPhrases = []string{
 	"resolve_ambiguous_custody",
 	"--resolve-head",
 	"archived",
+	// A --keep-local recovery that cannot prove content containment names the
+	// missing preserved commits; the code and the fact that its command only
+	// inspects must stay on every guidance surface so no agent improvises a
+	// mutating recovery from it.
+	"apply_missing_preserved_commits",
+	"--recover --keep-local",
 }
 
 const canonicalPipelineAgentPrerequisite = "a supported native agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through `acpx`"
