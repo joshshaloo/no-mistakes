@@ -1076,8 +1076,11 @@ func missingPreservedCommitsByPatch(ctx context.Context, dir, submitted, preserv
 // git cherry walks only single-parent commits, so content a merge commit
 // introduces by itself - a conflict resolution, an evil merge - is invisible
 // to the patch comparison and would be certified as present while a rebase of
-// the same history silently drops it. A merge anywhere in the compared range
-// is therefore an unprovable comparison, never an empty one.
+// the same history silently drops it. A merge among the compared candidates is
+// therefore an unprovable comparison, never an empty one. The guard walks
+// exactly those candidates: a merge already reachable from current holds no
+// content current lacks, so refusing on it would only make the proof
+// unreachable whenever the default branch advanced by a merge.
 func missingCommitsByPatch(ctx context.Context, dir, current, head, limit string) ([]string, error) {
 	current = strings.TrimSpace(current)
 	head = strings.TrimSpace(head)
@@ -1094,11 +1097,11 @@ func missingCommitsByPatch(ctx context.Context, dir, current, head, limit string
 			return nil, err
 		}
 	}
-	excluded := current
+	mergeArgs := []string{"rev-list", "--merges", head, "^" + current}
 	if limit != "" {
-		excluded = limit
+		mergeArgs = append(mergeArgs, "^"+limit)
 	}
-	merges, err := git.Run(ctx, dir, "rev-list", "--merges", head, "^"+excluded)
+	merges, err := git.Run(ctx, dir, mergeArgs...)
 	if err != nil {
 		return nil, err
 	}

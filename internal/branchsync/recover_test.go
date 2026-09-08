@@ -589,6 +589,83 @@ func TestRecoverKeepLocalAdoptsContainedThirdGateHead(t *testing.T) {
 	}
 }
 
+// TestRecoverKeepLocalAdoptsAcrossUpstreamMergeInPreservedRange pins the other
+// side of the merge guard: the default branch advancing by a merge commit
+// while a run is in flight is the ordinary case in a repository that merges
+// pull requests, and the pipeline rebase carries that merge into the preserved
+// range. Such a merge is already reachable from the current head, so it is no
+// blind spot and must not block adoption.
+func TestRecoverKeepLocalAdoptsAcrossUpstreamMergeInPreservedRange(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+
+	// Another pull request lands on main as a merge commit.
+	mustRun(t, f.local, "checkout", "-b", "upstream-work", f.base)
+	mustWrite(t, filepath.Join(f.local, "upstream.txt"), "upstream work\n")
+	mustRun(t, f.local, "add", "upstream.txt")
+	mustRun(t, f.local, "commit", "-m", "upstream work")
+	mustRun(t, f.local, "checkout", "main")
+	mustRun(t, f.local, "merge", "--no-ff", "-m", "Merge pull request #2", "upstream-work")
+	mergedMain := mustRun(t, f.local, "rev-parse", "HEAD")
+	mustRun(t, f.local, "push", f.gate, "refs/heads/main:refs/heads/main")
+
+	// The in-flight pipeline rebases onto the new default branch, so the merge
+	// becomes reachable from the preserved head but not from the submitted one.
+	mustRun(t, f.pipeline, "fetch", "origin")
+	mustRun(t, f.pipeline, "checkout", "feature/recover")
+	mustRun(t, f.pipeline, "rebase", "origin/main")
+	rebasedPreserved := mustRun(t, f.pipeline, "rev-parse", "HEAD")
+	mustRun(t, f.pipeline, "push", "--force", "origin", "HEAD:refs/heads/feature/recover")
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, rebasedPreserved); err != nil {
+		t.Fatal(err)
+	}
+	f.run.HeadSHA = rebasedPreserved
+	f.preserved = rebasedPreserved
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, rebasedPreserved); err != nil {
+		t.Fatal(err)
+	}
+	if merges := mustRun(t, f.pipeline, "rev-list", "--merges", rebasedPreserved, "^"+f.submitted); merges == "" {
+		t.Fatal("test setup did not carry an upstream merge into the preserved range")
+	}
+
+	// The worker recovers the same content locally with rewritten commit IDs
+	// and pushes it, which is the shape custody adoption exists for.
+	mustRun(t, f.local, "fetch", f.gate, "refs/heads/feature/recover")
+	mustRun(t, f.local, "checkout", "feature/recover")
+	mustRun(t, f.local, "reset", "--hard", "FETCH_HEAD")
+	mustRun(t, f.local, "checkout", "main")
+	mustWrite(t, filepath.Join(f.local, "main.txt"), "main advanced\n")
+	mustRun(t, f.local, "add", "main.txt")
+	mustRun(t, f.local, "commit", "-m", "advance main")
+	mustRun(t, f.local, "checkout", "feature/recover")
+	mustRun(t, f.local, "rebase", "main")
+	rebasedLocal := mustRun(t, f.local, "rev-parse", "HEAD")
+	if rebasedLocal == rebasedPreserved {
+		t.Fatal("test setup did not rewrite the preserved commit IDs")
+	}
+	if !isAncestor(f.ctx, f.local, mergedMain, rebasedLocal) {
+		t.Fatalf("test setup lost the upstream merge %s from the current head", mergedMain)
+	}
+	mustRun(t, f.local, "push", "--force", f.gate, "HEAD:refs/heads/feature/recover")
+
+	state := f.service.Recover(f.ctx, true)
+	if !state.Recovered || state.Changed || state.Safety != "custody_returned" {
+		t.Fatalf("upstream-merge keep-local recovery = %#v", state)
+	}
+	reloaded, err := f.db.GetRun(f.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.HeadSHA != rebasedLocal || reloaded.CustodyReturnedAt == nil {
+		t.Fatalf("run authority/custody = %s/%v, want %s/stamped", reloaded.HeadSHA, reloaded.CustodyReturnedAt, rebasedLocal)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != rebasedLocal {
+		t.Fatalf("run-owned ref = %s, want adopted head %s", got, rebasedLocal)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", recoverPreservedArchiveRef(f.run.ID, rebasedPreserved)); got != rebasedPreserved {
+		t.Fatalf("preserved archive = %s, want %s", got, rebasedPreserved)
+	}
+}
+
 // TestRecoverKeepLocalRefusesGateHeadWhoseContentLivesInAMergeCommit pins the
 // blind spot of patch containment: git cherry walks only single-parent
 // commits, so a conflict resolution or evil merge that exists solely in a
