@@ -464,7 +464,9 @@ func (s *Service) Apply(ctx context.Context) State {
 //     in the current head by patch content despite changed commit IDs, in
 //     which case it is archived before being adopted. A third gate head
 //     without both complete containment proofs is refused - naming the head
-//     itself, or the missing preserved commits - rather than displaced.
+//     itself, or the missing preserved commits - rather than displaced. A
+//     merge commit in either compared range makes patch containment
+//     unprovable, so it refuses too.
 //   - Preservation evidence that names more than one head, or that cannot be
 //     read at all, is never resolved automatically. It blocks with
 //     blocked_recover_ambiguous_head or blocked_recover_preservation_unreadable
@@ -896,8 +898,9 @@ func (s *Service) keptHeadIntentRecorded(ctx context.Context, run *db.Run, head 
 // content. Adoption compare-and-swaps that head off the gate branch, so
 // without this proof a third party's tip would be displaced and its content
 // dropped from the branch. Anything unprovable (an unfetchable gate branch, a
-// head that moved mid-check, an unreadable comparison) reports false, which
-// keeps the caller's unexplained-gate-head refusal.
+// head that moved mid-check, a merge commit whose own content the comparison
+// cannot evaluate, an unreadable comparison) reports false, which keeps the
+// caller's unexplained-gate-head refusal.
 func (s *Service) gateHeadContentContainedLocally(ctx context.Context, run *db.Run, state State, gateHead string) bool {
 	if gateHead == state.Local.Head {
 		return true
@@ -1069,6 +1072,12 @@ func missingPreservedCommitsByPatch(ctx context.Context, dir, submitted, preserv
 // the walk to the commits this run is responsible for. Any unexpected output
 // is an error rather than an empty - silently reporting "nothing missing" is
 // the one failure mode that would license discarding work.
+//
+// git cherry walks only single-parent commits, so content a merge commit
+// introduces by itself - a conflict resolution, an evil merge - is invisible
+// to the patch comparison and would be certified as present while a rebase of
+// the same history silently drops it. A merge anywhere in the compared range
+// is therefore an unprovable comparison, never an empty one.
 func missingCommitsByPatch(ctx context.Context, dir, current, head, limit string) ([]string, error) {
 	current = strings.TrimSpace(current)
 	head = strings.TrimSpace(head)
@@ -1084,6 +1093,17 @@ func missingCommitsByPatch(ctx context.Context, dir, current, head, limit string
 		if _, err := git.ResolveExactCommit(ctx, dir, sha); err != nil {
 			return nil, err
 		}
+	}
+	excluded := current
+	if limit != "" {
+		excluded = limit
+	}
+	merges, err := git.Run(ctx, dir, "rev-list", "--merges", head, "^"+excluded)
+	if err != nil {
+		return nil, err
+	}
+	if merged := strings.Fields(merges); len(merged) > 0 {
+		return nil, fmt.Errorf("the compared range contains merge commits whose own content patch comparison cannot evaluate (%s)", strings.Join(merged, ", "))
 	}
 	out, err := git.Run(ctx, dir, args...)
 	if err != nil {
