@@ -38,6 +38,7 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnv(opts.CWD)
 	shellenv.ConfigureShellCommand(cmd)
+	shellenv.SuperviseShellCommand(ctx, cmd)
 
 	started, err := startNativeAgentCommand(cmd)
 	if err != nil {

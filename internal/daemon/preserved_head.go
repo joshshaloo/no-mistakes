@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -86,9 +87,16 @@ func preserveWorktreeHead(ctx context.Context, gateDir, workDir string, run *db.
 // terminal status and root error that already explain why the run ended. No
 // fallback os.RemoveAll is attempted.
 func cleanupRunWorktree(ctx context.Context, d *db.DB, gateDir, workDir, runID string) error {
+	return cleanupRunWorktreeWithSupervisor(ctx, d, gateDir, workDir, runID, nil)
+}
+
+func cleanupRunWorktreeWithSupervisor(ctx context.Context, d *db.DB, gateDir, workDir, runID string, supervisor *shellenv.RunSupervisor) error {
 	run, err := d.GetRun(runID)
 	if err != nil {
 		return fmt.Errorf("load run before worktree cleanup: %w", err)
+	}
+	if err := supervisor.Terminate(ctx); err != nil {
+		return err
 	}
 	if run != nil {
 		if preserveErr := preserveWorktreeHead(ctx, gateDir, workDir, run); preserveErr != nil {

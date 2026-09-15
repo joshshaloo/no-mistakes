@@ -563,6 +563,7 @@ func (c *BKTClient) run(ctx context.Context, timeout time.Duration, label string
 		return fmt.Errorf("bkt %s failed: executable is unavailable", label)
 	}
 	shellenv.ConfigureShellCommand(cmd)
+	shellenv.SuperviseShellCommand(commandCtx, cmd)
 	stderr := &prefixCapture{limit: maxBKTStderrBytes}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr

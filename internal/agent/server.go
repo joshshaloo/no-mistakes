@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // managedServerOutput holds the writer used for managed-server stdout and
@@ -71,13 +73,14 @@ func getAvailablePort() (int, error) {
 
 // startServerWithPort spawns the server process on a given port and waits for health.
 // The process is not tied to ctx - it outlives individual Run calls and is stopped via shutdown().
-// ctx is only used for the health check timeout.
+// ctx supplies the health-check timeout and the run ownership markers stamped
+// into the server's environment, which every process it spawns inherits.
 // agentName tags the PID tracking file so crash-recovery can identify orphans.
 func startServerWithPort(ctx context.Context, agentName, bin string, args []string, cwd string, healthPath string, port int) (*managedServer, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
 	cmd.Stdin = nil
-	cmd.Env = gitSafeEnv(cwd)
+	cmd.Env = shellenv.ApplyRunMarkers(ctx, gitSafeEnv(cwd))
 	out := currentManagedServerOutput()
 	cmd.Stdout = out // server stdout goes to the configured sink for debugging
 	cmd.Stderr = out

@@ -64,8 +64,15 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}
 	}
 	cmd.SysProcAttr.CreationFlags |= createNewProcessGroup
-	if job, err := newShellCommandJobFunc(); err == nil {
+	// ConfigureShellCommand can legitimately run twice on one command: a step
+	// factory prepares it and a client (bkt) prepares it again for the non-run
+	// case. Creating a second job would orphan the first KILL_ON_JOB_CLOSE
+	// handle for the daemon's lifetime, so reuse whatever is already stored.
+	if _, prepared := shellCommandJobs.Load(cmd); prepared {
+		cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
+	} else if job, err := newShellCommandJobFunc(); err == nil {
 		shellCommandJobs.Store(cmd, &shellCommandJobState{handle: job})
+		shellCommandJobSetupErrors.Delete(cmd)
 		cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
 	} else {
 		shellCommandJobSetupErrors.Store(cmd, err)
@@ -115,23 +122,30 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 // fails instead of running without clean-exit descendant cleanup.
 func StartShellCommand(cmd *exec.Cmd) error {
 	if err, ok := takeShellCommandJobSetupError(cmd); ok {
+		unregisterShellCommand(cmd)
 		return fmt.Errorf("windows job object setup: %w", err)
 	}
+	applySupervisedRunEnv(cmd)
 	if err := cmd.Start(); err != nil {
+		unregisterShellCommand(cmd)
 		closeShellCommandJob(cmd)
 		return err
 	}
 	job, ok := shellCommandJob(cmd)
 	if !ok {
+		registerStartedShellCommand(cmd)
 		return nil
 	}
 	if err := assignShellCommandJobFunc(job.handle, uint32(cmd.Process.Pid)); err != nil {
+		unregisterShellCommand(cmd)
 		return failStartedShellCommand(cmd, fmt.Errorf("assign process to job object: %w", err))
 	}
 	job.assigned.Store(true)
 	if err := resumeProcessThreadsFunc(uint32(cmd.Process.Pid)); err != nil {
+		unregisterShellCommand(cmd)
 		return failStartedShellCommand(cmd, err)
 	}
+	registerStartedShellCommand(cmd)
 	return nil
 }
 
@@ -140,7 +154,14 @@ func StartShellCommand(cmd *exec.Cmd) error {
 // errors get the same process-tree cleanup as context cancellation. A nil or
 // never-started command is a no-op.
 func TerminateShellCommandGroup(cmd *exec.Cmd) {
+	defer unregisterShellCommand(cmd)
 	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	// A command ConfigureShellCommand never prepared owns no job object and no
+	// process group of its own; taskkill /T on its PID would tear down whatever
+	// tree a recycled PID belongs to after Wait has returned.
+	if _, prepared := shellCommandJob(cmd); !prepared {
 		return
 	}
 	if terminateShellCommandJob(cmd, true) {

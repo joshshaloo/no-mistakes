@@ -59,7 +59,13 @@ func ConfigureShellCommand(cmd *exec.Cmd) {
 // process-group lifecycle. Unix needs no extra setup beyond cmd.Start, but the
 // wrapper keeps call sites aligned with Windows job-object setup.
 func StartShellCommand(cmd *exec.Cmd) error {
-	return cmd.Start()
+	applySupervisedRunEnv(cmd)
+	if err := cmd.Start(); err != nil {
+		unregisterShellCommand(cmd)
+		return err
+	}
+	registerStartedShellCommand(cmd)
+	return nil
 }
 
 // TerminateShellCommandGroup SIGKILLs the whole process group led by a command
@@ -82,7 +88,15 @@ func StartShellCommand(cmd *exec.Cmd) error {
 // a member is alive, so when the leader exited cleanly with no survivors the
 // kill is a harmless no-op (ESRCH). A nil or never-started command is a no-op.
 func TerminateShellCommandGroup(cmd *exec.Cmd) {
+	defer unregisterShellCommand(cmd)
 	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	// Only a command ConfigureShellCommand isolated leads a group of its own.
+	// Without Setpgid the child sits in the caller's group and its PID is not a
+	// group ID, so signalling -PID would target a group this process never
+	// created - and, after Wait, one a recycled PID could have made real.
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setpgid {
 		return
 	}
 	// Negative PID targets the whole group (Setpgid made the leader's PID the

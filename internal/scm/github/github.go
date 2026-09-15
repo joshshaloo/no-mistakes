@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // CmdFactory builds an exec.Cmd in the caller's workdir with the caller's env.
@@ -193,7 +194,7 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 	}
 	args = append(args, "--state", "open", "--json", jsonFields)
 	cmd := h.cmd(ctx, "gh", args...)
-	out, err := cmd.CombinedOutput()
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("gh pr list: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -249,7 +250,7 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 	args = append(args, "--title", content.Title, "--body-file", "-")
 	cmd := h.cmd(ctx, "gh", args...)
 	cmd.Stdin = strings.NewReader(content.Body)
-	out, err := cmd.CombinedOutput()
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("gh pr create: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -270,7 +271,7 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	args = append(args, "--title", content.Title, "--body-file", "-")
 	cmd := h.cmd(ctx, "gh", args...)
 	cmd.Stdin = strings.NewReader(content.Body)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := shellenv.CombinedOutputShellCommand(cmd); err != nil {
 		return nil, fmt.Errorf("gh pr edit: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return pr, nil
@@ -284,7 +285,7 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "state", "--jq", ".state")
 	cmd := h.cmd(ctx, "gh", args...)
-	out, err := cmd.Output()
+	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
 		return "", fmt.Errorf("gh pr view: %w", err)
 	}
@@ -299,7 +300,7 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	args := append([]string{"pr", "checks", selector}, h.repoArgs()...)
 	args = append(args, "--json", "name,state,bucket,completedAt")
 	cmd := h.cmd(ctx, "gh", args...)
-	out, err := cmd.CombinedOutput()
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		if strings.Contains(string(out), "no checks reported") {
 			return nil, nil
@@ -336,7 +337,7 @@ func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.Mergeable
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "mergeable", "--jq", ".mergeable")
 	cmd := h.cmd(ctx, "gh", args...)
-	out, err := cmd.Output()
+	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
 		return "", fmt.Errorf("gh pr view mergeable: %w", err)
 	}
@@ -368,7 +369,7 @@ func (h *Host) FetchFailedCheckLogs(ctx context.Context, _ *scm.PR, branch, head
 		"--json", "databaseId,headSha,name,displayTitle,workflowName",
 	)
 	listCmd := h.cmd(ctx, "gh", args...)
-	listOut, err := listCmd.Output()
+	listOut, err := shellenv.OutputShellCommand(listCmd)
 	if err != nil {
 		return "", nil
 	}
@@ -383,7 +384,7 @@ func (h *Host) FetchFailedCheckLogs(ctx context.Context, _ *scm.PR, branch, head
 		viewArgs := append([]string{"run", "view", fmt.Sprintf("%d", run.DatabaseID)}, h.repoArgs()...)
 		viewArgs = append(viewArgs, "--log-failed")
 		viewCmd := h.cmd(ctx, "gh", viewArgs...)
-		out, err := viewCmd.Output()
+		out, err := shellenv.OutputShellCommand(viewCmd)
 		if err != nil {
 			continue
 		}
@@ -425,7 +426,7 @@ func runMatchesTargets(ctx context.Context, h *Host, run githubRun, targets map[
 	viewArgs := append([]string{"run", "view", fmt.Sprintf("%d", run.DatabaseID)}, h.repoArgs()...)
 	viewArgs = append(viewArgs, "--json", "jobs")
 	viewCmd := h.cmd(ctx, "gh", viewArgs...)
-	out, err := viewCmd.Output()
+	out, err := shellenv.OutputShellCommand(viewCmd)
 	if err != nil {
 		return false
 	}

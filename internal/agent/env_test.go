@@ -90,10 +90,23 @@ func TestEverySupportedAdapterPropagatesGateMarkerThroughCanonicalEnv(t *testing
 		if err != nil {
 			t.Fatalf("read %s owner %s: %v", adapter, path, err)
 		}
-		if !strings.Contains(string(data), ".Env = gitSafeEnv(") {
+		if !assignsEnvFromGitSafeEnv(string(data)) {
 			t.Errorf("%s no longer propagates the gate marker through gitSafeEnv (%s)", adapter, path)
 		}
 	}
+}
+
+// assignsEnvFromGitSafeEnv reports whether the command environment is derived
+// from gitSafeEnv. A wrapper around it is fine - the run-ownership markers are
+// applied that way - as long as gitSafeEnv is still the base the assignment is
+// built from.
+func assignsEnvFromGitSafeEnv(source string) bool {
+	for _, line := range strings.Split(source, "\n") {
+		if strings.Contains(line, ".Env = ") && strings.Contains(line, "gitSafeEnv(") {
+			return true
+		}
+	}
+	return false
 }
 
 func TestGitSafeEnv_GateMarkerWinsOverAmbient(t *testing.T) {

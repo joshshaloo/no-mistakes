@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // outputJSON runs cmd and returns its stdout alone, leaving stderr out of the
@@ -21,8 +22,13 @@ import (
 // messages) cannot corrupt the bytes a caller json.Unmarshal's. On failure it
 // surfaces the separately-captured stderr in the error.
 func outputJSON(cmd *exec.Cmd) ([]byte, error) {
-	out, err := cmd.Output()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
+		if len(bytes.TrimSpace(stderr.Bytes())) > 0 {
+			return nil, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
+		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(bytes.TrimSpace(ee.Stderr)) > 0 {
 			return nil, fmt.Errorf("%s: %w", strings.TrimSpace(string(ee.Stderr)), err)
