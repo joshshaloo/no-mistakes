@@ -42,15 +42,16 @@ type RunSupervisor struct {
 	groups map[int]struct{}
 }
 
-// runOwnership is the proof a discovered process must satisfy before the
-// supervisor may signal its group. Carrying this run's marker is the only proof
-// there is: nothing else may authorize a kill.
+// runOwnership carries the run identity a platform discovery backend uses to
+// construct its ownership proof. Linux matches the inherited marker directly;
+// macOS requires a non-empty identity before applying its narrower daemon-
+// descendant and worktree-cwd proof.
 type runOwnership struct {
 	runID string
 }
 
 // ownsRun reports whether a process environment block carries this exact run's
-// marker, and is the single ownership predicate for run-end cleanup and startup
+// marker. It is the Linux ownership predicate for run-end cleanup and startup
 // orphan cleanup alike. Run IDs are globally unique, so the marker is
 // conclusive proof wherever the process has since moved and whichever daemon
 // instance stamped it: a marked process that outlives its run has no legitimate

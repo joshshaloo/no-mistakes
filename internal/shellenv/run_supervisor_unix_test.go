@@ -87,11 +87,12 @@ func TestStartShellCommand_LeavesUnsupervisedCommandUnmarked(t *testing.T) {
 	}
 }
 
-// TestRunOwnership_OwnsOnlyMarkedProcesses pins the single ownership predicate.
-// Carrying this run's marker is the only thing that authorizes a kill: no other
-// signal - another run's marker, a shared working directory - may ever stand in
-// for it, because several daemons with different NM_HOME roots can be live at
-// once and one of them may still be executing that other run.
+// TestRunOwnership_OwnsOnlyMarkedProcesses pins Linux's marker predicate.
+// There, carrying this run's marker is the only thing that authorizes a
+// discovery-based kill: no other signal - another run's marker, a shared
+// working directory - may stand in for it, because several daemons with
+// different NM_HOME roots can be live at once and one may still be executing
+// that other run. macOS uses its separately tested ancestry-plus-cwd proof.
 func TestRunOwnership_OwnsOnlyMarkedProcesses(t *testing.T) {
 	ownRun := environBlock(RunIDEnvVar+"=run-a", "PATH=/usr/bin")
 	siblingRun := environBlock(RunIDEnvVar+"=run-b", "PATH=/usr/bin")

@@ -227,7 +227,7 @@ Each invocation returns:
 - **Model** and **Provider** - adapter-reported serving metadata when available
 
 One-shot subprocess agents (Claude, Codex, Pi, Copilot CLI, and acpx) are invocation-scoped.
-After no-mistakes starts one, it terminates any remaining child processes when the invocation exits, fails, or is cancelled, and the run that owns the invocation reaps whatever is left before its worktree is removed - see [Daemon & Worktrees](/no-mistakes/concepts/daemon/#what-it-does) for that guarantee and its platform limits.
+After no-mistakes starts one, it terminates any remaining child processes when the invocation exits, fails, or is cancelled, and the owning run reaps remaining processes covered by its platform cleanup before removing the worktree - see [Daemon & Worktrees](/no-mistakes/concepts/daemon/#what-it-does) for the guarantee and its limits.
 Step logs record their process lifecycle, including start and exit lines with the PID, and AXI status exposes that PID while the subprocess is still active.
 Persistent server agents (Rovo Dev and OpenCode) use their managed server lifecycle instead.
 
