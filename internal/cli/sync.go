@@ -31,8 +31,10 @@ func newSyncCmd() *cobra.Command {
 			"--recover returns custody of a branch whose run went terminal with unpublished\n" +
 			"pipeline commits: it byte-verifies the exact run-owned gate ref, anchors that\n" +
 			"head, and fast-forwards only a clean behind worktree. --recover --keep-local\n" +
-			"preserves both heads, keeps the current local head, and never touches files.\n" +
-			"Missing, raced, or third-head evidence always refuses. When preservation evidence\n" +
+			"preserves both heads, keeps the current local head, and never touches files; it\n" +
+			"adopts that head as run authority only when the head already carries every\n" +
+			"preserved pipeline commit and the live gate head's own commits by patch content.\n" +
+			"Missing, raced, or uncontained third-head evidence always refuses. When preservation evidence\n" +
 			"names more than one head, --recover --resolve-head <commit> publishes the exact\n" +
 			"commit you name as run authority and archives every losing head instead of\n" +
 			"discarding it; the tool never chooses for you.",
@@ -85,7 +87,10 @@ func newAxiSyncCmd() *cobra.Command {
 			"--check performs the same fresh read-only plan. Blocked states change nothing.\n" +
 			"--recover performs the guarded custody return offered by\n" +
 			"next_action.code: recover_custody after byte-verifying the exact run-owned head;\n" +
-			"--keep-local preserves both heads and keeps the current local head.\n" +
+			"--keep-local preserves both heads and keeps the current local head, adopting it as\n" +
+			"run authority only when it already contains the preserved pipeline commits and the\n" +
+			"live gate head's own commits by patch content; otherwise it refuses with\n" +
+			"next_action.code: apply_missing_preserved_commits and names the missing commits.\n" +
 			"--recover --resolve-head <commit> answers next_action.code: resolve_ambiguous_custody\n" +
 			"by publishing the exact commit you name as run authority; losing heads are archived,\n" +
 			"never discarded, and the tool never chooses a head automatically.",

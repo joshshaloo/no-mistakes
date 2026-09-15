@@ -417,6 +417,433 @@ func TestRecoverKeepLocalDirtyBehindReturnsCustodyWithoutTouchingWorktree(t *tes
 	}
 }
 
+// TestRecoverKeepLocalAdoptsRebasedGateHeadWhenPreservedChangesContained
+// covers the stranded rebase-then-push shape: commit IDs changed, but every
+// preserved pipeline commit is present in the current head by patch content.
+func TestRecoverKeepLocalAdoptsRebasedGateHeadWhenPreservedChangesContained(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+
+	// Model the stranded dogfood shape: the operator recovered the pipeline
+	// content by rebasing the branch before returning custody, then updated the
+	// mutable gate branch. The preserved commits are no longer ancestors of the
+	// current head, but their patch content is present there.
+	mustRun(t, f.local, "fetch", f.gate, "refs/heads/feature/recover")
+	mustRun(t, f.local, "reset", "--hard", "FETCH_HEAD")
+	mustRun(t, f.local, "checkout", "main")
+	mustWrite(t, filepath.Join(f.local, "main.txt"), "main advanced\n")
+	mustRun(t, f.local, "add", "main.txt")
+	mustRun(t, f.local, "commit", "-m", "advance main")
+	mustRun(t, f.local, "checkout", "feature/recover")
+	mustRun(t, f.local, "rebase", "main")
+	rebased := mustRun(t, f.local, "rev-parse", "HEAD")
+	if rebased == f.preserved {
+		t.Fatal("test setup did not rewrite the preserved head")
+	}
+	mustRun(t, f.local, "push", "--force", f.gate, "HEAD:refs/heads/feature/recover")
+
+	defaultState := f.service.Recover(f.ctx, false)
+	if defaultState.Recovered || defaultState.Safety != "blocked_recover_gate_diverged" {
+		t.Fatalf("default recovery should still require explicit keep-local adoption: %#v", defaultState)
+	}
+
+	state := f.service.Recover(f.ctx, true)
+	if !state.Recovered || state.Changed || state.Safety != "custody_returned" {
+		t.Fatalf("keep-local rebased recovery = %#v", state)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != rebased {
+		t.Fatalf("local HEAD = %s, want rebased head %s", got, rebased)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != rebased {
+		t.Fatalf("gate branch = %s, want rebased head %s", got, rebased)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", recoverGateArchiveRef(f.run.ID, rebased)); got != rebased {
+		t.Fatalf("gate archive = %s, want rebased head %s", got, rebased)
+	}
+	if got := mustRun(t, f.local, "rev-parse", f.anchorRef()); got != f.preserved {
+		t.Fatalf("preserved anchor = %s, want %s", got, f.preserved)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", recoverPreservedArchiveRef(f.run.ID, f.preserved)); got != f.preserved {
+		t.Fatalf("preserved archive = %s, want original preserved head %s", got, f.preserved)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != rebased {
+		t.Fatalf("run-owned ref = %s, want adopted rebased head %s", got, rebased)
+	}
+	reloaded, err := f.db.GetRun(f.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.HeadSHA != rebased || reloaded.CustodyReturnedAt == nil {
+		t.Fatalf("run authority/custody = %s/%v, want %s/stamped", reloaded.HeadSHA, reloaded.CustodyReturnedAt, rebased)
+	}
+	if after := f.service.InspectCached(f.ctx); after.State != StateCustodyReturned || after.NextAction == nil || after.NextAction.Code != "run_pipeline" {
+		t.Fatalf("post-adoption inspection = %#v", after)
+	}
+}
+
+func TestRecoverKeepLocalRefusesRebasedGateHeadMissingPreservedCommits(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	firstFix := mustRun(t, f.gate, "rev-parse", f.preserved+"~1")
+	secondFix := f.preserved
+
+	mustRun(t, f.local, "fetch", f.gate, "refs/heads/feature/recover")
+	mustRun(t, f.local, "cherry-pick", firstFix)
+	partial := mustRun(t, f.local, "rev-parse", "HEAD")
+	mustRun(t, f.local, "push", "--force", f.gate, "HEAD:refs/heads/feature/recover")
+
+	state := f.service.Recover(f.ctx, true)
+	if state.Recovered || state.Changed || state.Safety != "blocked_recover_missing_preserved_commits" {
+		t.Fatalf("partial-content keep-local recovery = %#v", state)
+	}
+	for _, want := range []string{secondFix, f.anchorRef(), "cherry-pick", "--keep-local"} {
+		if !strings.Contains(state.Error, want) {
+			t.Fatalf("missing-content refusal missing %q:\n%s", want, state.Error)
+		}
+	}
+	if strings.Contains(state.Error, firstFix) {
+		t.Fatalf("refusal named already-contained commit %s:\n%s", firstFix, state.Error)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != partial {
+		t.Fatal("missing-content refusal moved local HEAD")
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != partial {
+		t.Fatal("missing-content refusal moved gate branch")
+	}
+	if f.custodyReturned() {
+		t.Fatal("missing-content refusal stamped custody")
+	}
+
+	mustRun(t, f.local, "cherry-pick", secondFix)
+	completed := mustRun(t, f.local, "rev-parse", "HEAD")
+	state = f.service.Recover(f.ctx, true)
+	if !state.Recovered || state.Changed || state.Safety != "custody_returned" {
+		t.Fatalf("recovery after applying missing preserved commit = %#v", state)
+	}
+	reloaded, err := f.db.GetRun(f.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.HeadSHA != completed || reloaded.CustodyReturnedAt == nil {
+		t.Fatalf("completed authority/custody = %s/%v, want %s/stamped", reloaded.HeadSHA, reloaded.CustodyReturnedAt, completed)
+	}
+}
+
+// TestRecoverKeepLocalAdoptsContainedThirdGateHead is the positive companion
+// to TestRecoverPinnedRunRefStillRefusesThirdGateHead: a live third gate head
+// may be adopted only because the current head already carries its content,
+// so the compare-and-swap that moves the gate branch drops nothing.
+func TestRecoverKeepLocalAdoptsContainedThirdGateHead(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	writer := filepath.Join(t.TempDir(), "writer")
+	mustRun(t, filepath.Dir(writer), "-c", "core.autocrlf=false", "clone", f.gate, writer)
+	configureIdentity(t, writer)
+	mustRun(t, writer, "checkout", "feature/recover")
+	mustWrite(t, filepath.Join(writer, "third.txt"), "colleague work\n")
+	mustRun(t, writer, "add", "third.txt")
+	mustRun(t, writer, "commit", "-m", "colleague pushed tip")
+	third := mustRun(t, writer, "rev-parse", "HEAD")
+	mustRun(t, writer, "push", "origin", "HEAD:refs/heads/feature/recover")
+
+	// The operator took the whole gate branch - preserved fixes and the
+	// colleague tip - and rebased it onto an advanced default branch.
+	mustRun(t, f.local, "fetch", f.gate, "refs/heads/feature/recover")
+	mustRun(t, f.local, "reset", "--hard", "FETCH_HEAD")
+	mustRun(t, f.local, "checkout", "main")
+	mustWrite(t, filepath.Join(f.local, "main.txt"), "main advanced\n")
+	mustRun(t, f.local, "add", "main.txt")
+	mustRun(t, f.local, "commit", "-m", "advance main")
+	mustRun(t, f.local, "checkout", "feature/recover")
+	mustRun(t, f.local, "rebase", "main")
+	rebased := mustRun(t, f.local, "rev-parse", "HEAD")
+
+	if state := f.service.Recover(f.ctx, false); state.Recovered || state.Safety != "blocked_recover_gate_diverged" {
+		t.Fatalf("default recovery should still require explicit keep-local adoption: %#v", state)
+	}
+	state := f.service.Recover(f.ctx, true)
+	if !state.Recovered || state.Changed || state.Safety != "custody_returned" {
+		t.Fatalf("contained third-head keep-local recovery = %#v", state)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != rebased {
+		t.Fatalf("gate branch = %s, want adopted head %s", got, rebased)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", recoverGateArchiveRef(f.run.ID, third)); got != third {
+		t.Fatalf("displaced third head was not archived: %s", got)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != rebased {
+		t.Fatalf("run-owned ref = %s, want adopted head %s", got, rebased)
+	}
+	reloaded, err := f.db.GetRun(f.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.HeadSHA != rebased || reloaded.CustodyReturnedAt == nil {
+		t.Fatalf("run authority/custody = %s/%v, want %s/stamped", reloaded.HeadSHA, reloaded.CustodyReturnedAt, rebased)
+	}
+}
+
+// TestRecoverKeepLocalAdoptsAcrossUpstreamMergeInPreservedRange pins the other
+// side of the merge guard: the default branch advancing by a merge commit
+// while a run is in flight is the ordinary case in a repository that merges
+// pull requests, and the pipeline rebase carries that merge into the preserved
+// range. Such a merge is already reachable from the current head, so it is no
+// blind spot and must not block adoption.
+func TestRecoverKeepLocalAdoptsAcrossUpstreamMergeInPreservedRange(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+
+	// Another pull request lands on main as a merge commit.
+	mustRun(t, f.local, "checkout", "-b", "upstream-work", f.base)
+	mustWrite(t, filepath.Join(f.local, "upstream.txt"), "upstream work\n")
+	mustRun(t, f.local, "add", "upstream.txt")
+	mustRun(t, f.local, "commit", "-m", "upstream work")
+	mustRun(t, f.local, "checkout", "main")
+	mustRun(t, f.local, "merge", "--no-ff", "-m", "Merge pull request #2", "upstream-work")
+	mergedMain := mustRun(t, f.local, "rev-parse", "HEAD")
+	mustRun(t, f.local, "push", f.gate, "refs/heads/main:refs/heads/main")
+
+	// The in-flight pipeline rebases onto the new default branch, so the merge
+	// becomes reachable from the preserved head but not from the submitted one.
+	mustRun(t, f.pipeline, "fetch", "origin")
+	mustRun(t, f.pipeline, "checkout", "feature/recover")
+	mustRun(t, f.pipeline, "rebase", "origin/main")
+	rebasedPreserved := mustRun(t, f.pipeline, "rev-parse", "HEAD")
+	mustRun(t, f.pipeline, "push", "--force", "origin", "HEAD:refs/heads/feature/recover")
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, rebasedPreserved); err != nil {
+		t.Fatal(err)
+	}
+	f.run.HeadSHA = rebasedPreserved
+	f.preserved = rebasedPreserved
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, rebasedPreserved); err != nil {
+		t.Fatal(err)
+	}
+	if merges := mustRun(t, f.pipeline, "rev-list", "--merges", rebasedPreserved, "^"+f.submitted); merges == "" {
+		t.Fatal("test setup did not carry an upstream merge into the preserved range")
+	}
+
+	// The worker recovers the same content locally with rewritten commit IDs
+	// and pushes it, which is the shape custody adoption exists for.
+	mustRun(t, f.local, "fetch", f.gate, "refs/heads/feature/recover")
+	mustRun(t, f.local, "checkout", "feature/recover")
+	mustRun(t, f.local, "reset", "--hard", "FETCH_HEAD")
+	mustRun(t, f.local, "checkout", "main")
+	mustWrite(t, filepath.Join(f.local, "main.txt"), "main advanced\n")
+	mustRun(t, f.local, "add", "main.txt")
+	mustRun(t, f.local, "commit", "-m", "advance main")
+	mustRun(t, f.local, "checkout", "feature/recover")
+	mustRun(t, f.local, "rebase", "main")
+	rebasedLocal := mustRun(t, f.local, "rev-parse", "HEAD")
+	if rebasedLocal == rebasedPreserved {
+		t.Fatal("test setup did not rewrite the preserved commit IDs")
+	}
+	if !isAncestor(f.ctx, f.local, mergedMain, rebasedLocal) {
+		t.Fatalf("test setup lost the upstream merge %s from the current head", mergedMain)
+	}
+	mustRun(t, f.local, "push", "--force", f.gate, "HEAD:refs/heads/feature/recover")
+
+	state := f.service.Recover(f.ctx, true)
+	if !state.Recovered || state.Changed || state.Safety != "custody_returned" {
+		t.Fatalf("upstream-merge keep-local recovery = %#v", state)
+	}
+	reloaded, err := f.db.GetRun(f.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.HeadSHA != rebasedLocal || reloaded.CustodyReturnedAt == nil {
+		t.Fatalf("run authority/custody = %s/%v, want %s/stamped", reloaded.HeadSHA, reloaded.CustodyReturnedAt, rebasedLocal)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != rebasedLocal {
+		t.Fatalf("run-owned ref = %s, want adopted head %s", got, rebasedLocal)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", recoverPreservedArchiveRef(f.run.ID, rebasedPreserved)); got != rebasedPreserved {
+		t.Fatalf("preserved archive = %s, want %s", got, rebasedPreserved)
+	}
+}
+
+// TestRecoverKeepLocalRefusesGateHeadWhoseContentLivesInAMergeCommit pins the
+// blind spot of patch containment: git cherry walks only single-parent
+// commits, so a conflict resolution or evil merge that exists solely in a
+// merge commit is invisible to it. Rebasing that history drops the content, so
+// certifying the head as contained would displace work the tool just declared
+// present.
+func TestRecoverKeepLocalRefusesGateHeadWhoseContentLivesInAMergeCommit(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	writer := filepath.Join(t.TempDir(), "writer")
+	mustRun(t, filepath.Dir(writer), "-c", "core.autocrlf=false", "clone", f.gate, writer)
+	configureIdentity(t, writer)
+	mustRun(t, writer, "checkout", "feature/recover")
+	mustRun(t, writer, "checkout", "-b", "side", f.base)
+	mustWrite(t, filepath.Join(writer, "side.txt"), "side work\n")
+	mustRun(t, writer, "add", "side.txt")
+	mustRun(t, writer, "commit", "-m", "side work")
+	mustRun(t, writer, "checkout", "feature/recover")
+	mustRun(t, writer, "merge", "--no-ff", "--no-commit", "side")
+	mustWrite(t, filepath.Join(writer, "resolved.txt"), "resolution content\n")
+	mustRun(t, writer, "add", "resolved.txt")
+	mustRun(t, writer, "commit", "-m", "merge side with resolution")
+	merged := mustRun(t, writer, "rev-parse", "HEAD")
+	mustRun(t, writer, "push", "origin", "HEAD:refs/heads/feature/recover")
+
+	// The documented recovery flow: take the gate branch and rebase it, which
+	// flattens the merge and silently drops its resolution.
+	mustRun(t, f.local, "fetch", f.gate, "refs/heads/feature/recover")
+	mustRun(t, f.local, "reset", "--hard", "FETCH_HEAD")
+	mustRun(t, f.local, "checkout", "main")
+	mustWrite(t, filepath.Join(f.local, "main.txt"), "main advanced\n")
+	mustRun(t, f.local, "add", "main.txt")
+	mustRun(t, f.local, "commit", "-m", "advance main")
+	mustRun(t, f.local, "checkout", "feature/recover")
+	mustRun(t, f.local, "rebase", "main")
+	rebased := mustRun(t, f.local, "rev-parse", "HEAD")
+	if _, err := os.Stat(filepath.Join(f.local, "resolved.txt")); !os.IsNotExist(err) {
+		t.Fatalf("test setup did not drop the merge-only content: %v", err)
+	}
+
+	for _, keepLocal := range []bool{false, true} {
+		state := f.service.Recover(f.ctx, keepLocal)
+		if state.Recovered || state.Safety != "blocked_recover_gate_diverged" {
+			t.Fatalf("keep_local=%v merge-content recovery = %#v", keepLocal, state)
+		}
+		if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != merged {
+			t.Fatalf("keep_local=%v displaced the merge head to %s", keepLocal, got)
+		}
+		if f.custodyReturned() {
+			t.Fatalf("keep_local=%v stamped custody across unevaluated merge content", keepLocal)
+		}
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != rebased {
+		t.Fatalf("merge-content refusal moved the worktree to %s", got)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {
+		t.Fatalf("merge-content refusal disturbed the preserved run ref: %s", got)
+	}
+}
+
+// TestRecoverKeepLocalRefusesPreservedRangeMergeCommit applies the same rule to
+// the preserved side of the proof: even with the gate branch already at the
+// current head, a merge among the preserved commits cannot be certified as
+// contained.
+func TestRecoverKeepLocalRefusesPreservedRangeMergeCommit(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+	mustRun(t, f.pipeline, "checkout", "-b", "side", f.submitted)
+	mustWrite(t, filepath.Join(f.pipeline, "side.txt"), "side work\n")
+	mustRun(t, f.pipeline, "add", "side.txt")
+	mustRun(t, f.pipeline, "commit", "-m", "side work")
+	mustRun(t, f.pipeline, "checkout", "feature/recover")
+	mustRun(t, f.pipeline, "merge", "--no-ff", "--no-commit", "side")
+	mustWrite(t, filepath.Join(f.pipeline, "resolved.txt"), "resolution content\n")
+	mustRun(t, f.pipeline, "add", "resolved.txt")
+	mustRun(t, f.pipeline, "commit", "-m", "no-mistakes(review): merge with resolution")
+	mergedPreserved := mustRun(t, f.pipeline, "rev-parse", "HEAD")
+	mustRun(t, f.pipeline, "push", "--force", "origin", "HEAD:refs/heads/feature/recover")
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, mergedPreserved); err != nil {
+		t.Fatal(err)
+	}
+	f.run.HeadSHA = mergedPreserved
+	f.preserved = mergedPreserved
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, mergedPreserved); err != nil {
+		t.Fatal(err)
+	}
+
+	mustRun(t, f.local, "fetch", f.gate, "refs/heads/feature/recover")
+	mustRun(t, f.local, "reset", "--hard", "FETCH_HEAD")
+	mustRun(t, f.local, "checkout", "main")
+	mustWrite(t, filepath.Join(f.local, "main.txt"), "main advanced\n")
+	mustRun(t, f.local, "add", "main.txt")
+	mustRun(t, f.local, "commit", "-m", "advance main")
+	mustRun(t, f.local, "checkout", "feature/recover")
+	mustRun(t, f.local, "rebase", "main")
+	rebased := mustRun(t, f.local, "rev-parse", "HEAD")
+	// The gate already holds the current head, so only the preserved-side
+	// proof stands between this shape and adoption.
+	mustRun(t, f.local, "push", "--force", f.gate, "HEAD:refs/heads/feature/recover")
+
+	state := f.service.Recover(f.ctx, true)
+	if state.Recovered || state.Safety != "blocked_recover_preserve_failed" {
+		t.Fatalf("preserved-range merge recovery = %#v", state)
+	}
+	if f.custodyReturned() {
+		t.Fatal("preserved-range merge recovery stamped custody")
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != mergedPreserved {
+		t.Fatalf("refusal disturbed the preserved run ref: %s", got)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != rebased {
+		t.Fatalf("refusal moved the gate branch to %s", got)
+	}
+}
+
+// TestRecoverKeepLocalResumesInterruptedGateSwap covers the crash window
+// between the keep-local gate compare-and-swap and the custody stamp: the
+// retry must complete from this recovery's own kept-head record instead of
+// demanding preserved commits the operator deliberately declined. Without that
+// record the same shape stays an unexplained gate head.
+func TestRecoverKeepLocalResumesInterruptedGateSwap(t *testing.T) {
+	f := newRecoverFixture(t, types.RunCancelled)
+	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(f.local, "rescope.txt"), "rescope\n")
+	mustRun(t, f.local, "add", "rescope.txt")
+	mustRun(t, f.local, "commit", "-m", "diverging rescope")
+	kept := mustRun(t, f.local, "rev-parse", "HEAD")
+
+	// Interrupt exactly between the gate move and the custody stamp.
+	f.service.beforeGateReset = func() { f.db.Close() }
+	if state := f.service.Recover(f.ctx, true); state.Recovered || state.Safety != "blocked_recover_stamp_failed" {
+		t.Fatalf("interrupted keep-local recovery = %#v", state)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != kept {
+		t.Fatalf("interrupted recovery left the gate at %s, want the kept head %s", got, kept)
+	}
+
+	reopened, err := db.Open(filepath.Join(filepath.Dir(f.local), "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	resumed := &Service{DB: reopened, Repo: f.repo, WorkDir: f.local, GateDir: f.gate}
+
+	// The kept-head record is what licenses the resume: without it the same
+	// gate head is only the operator's own push and must prove containment.
+	keptRef := recoverKeptHeadRef(f.run.ID)
+	mustRun(t, f.local, "update-ref", "-d", keptRef, kept)
+	if state := resumed.Recover(f.ctx, true); state.Recovered || state.Safety != "blocked_recover_missing_preserved_commits" {
+		t.Fatalf("resume without the kept-head record = %#v", state)
+	}
+	mustRun(t, f.local, "update-ref", keptRef, kept)
+
+	state := resumed.Recover(f.ctx, true)
+	if !state.Recovered || state.Changed || state.Safety != "custody_returned" {
+		t.Fatalf("resumed keep-local recovery = %#v", state)
+	}
+	reloaded, err := reopened.GetRun(f.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.CustodyReturnedAt == nil {
+		t.Fatal("resumed recovery did not stamp custody")
+	}
+	if reloaded.HeadSHA != f.preserved {
+		t.Fatalf("resumed keep-local moved run authority to %s; the preserved head stays authority", reloaded.HeadSHA)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.runHeadRef()); got != f.preserved {
+		t.Fatalf("resumed recovery disturbed the preserved run ref: %s", got)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != kept {
+		t.Fatalf("resumed recovery moved the worktree to %s", got)
+	}
+}
+
 // TestRecoverGateDivergenceAndUnavailabilityFailClosed: recovery must refuse
 // whenever the preserved head cannot be verified and anchored - a moved gate
 // branch, a deleted gate branch, or a missing gate.
@@ -814,8 +1241,9 @@ func TestUnreadablePreservationEvidenceFailsClosed(t *testing.T) {
 
 // TestRecoverPinnedRunRefStillRefusesThirdGateHead is the regression for the
 // widening this arm introduced: a byte-verified run ref must not license
-// recovery across a live third gate head, because --keep-local would then
-// compare-and-swap that head off the gate branch without ever naming it.
+// recovery across a live third gate head whose own content is not already
+// contained in the current head, because --keep-local would then
+// compare-and-swap that head off the gate branch and drop its work.
 func TestRecoverPinnedRunRefStillRefusesThirdGateHead(t *testing.T) {
 	f := newRecoverFixture(t, types.RunFailed)
 	if err := git.PinRunHead(f.ctx, f.gate, f.run.ID, f.preserved); err != nil {

@@ -268,6 +268,25 @@ func (d *DB) SetRunCustodyReturned(id string) error {
 	return nil
 }
 
+// AdoptRunHeadForCustodyReturn atomically advances durable run authority and
+// stamps custody returned for the explicit keep-local recovery shape where the
+// operator's current head contains the preserved pipeline changes by content
+// but no longer by ancestry. The compare-and-swap keeps a racing authority
+// change from being overwritten; an already returned run is handled by callers
+// as an idempotent no-op before invoking this method.
+func (d *DB) AdoptRunHeadForCustodyReturn(id, expected, headSHA string) (bool, error) {
+	ts := now()
+	result, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, custody_returned_at = ?, updated_at = ? WHERE id = ? AND head_sha = ? AND custody_returned_at IS NULL`, headSHA, ts, ts, id, expected)
+	if err != nil {
+		return false, fmt.Errorf("adopt run head for custody return: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("adopt run head for custody return: %w", err)
+	}
+	return affected == 1, nil
+}
+
 // SetRunPushActive marks whether a pipeline phase currently owns a possible
 // branch-head update. Sync refuses while this marker is set.
 func (d *DB) SetRunPushActive(id string, active bool) error {
