@@ -17,14 +17,14 @@ import (
 const defaultRunSupervisorGrace = 2 * time.Second
 
 // RunIDEnvVar names the run-ownership marker stamped at every run-owned launch
-// boundary and inherited by every descendant. It is the durable proof that a
-// process belongs to a run, and the only thing that authorizes cleanup to
-// signal it. Process ancestry cannot serve: an escaped background process is by
+// boundary and inherited by every descendant. Where the platform exposes a
+// process environment scan (Linux), it is the durable proof that a process
+// belongs to a run, and the only thing that authorizes cleanup to signal it.
+// Process ancestry cannot serve there: an escaped background process is by
 // definition one whose command leader has exited, so it has already been
 // reparented to init and its ppid chain no longer reaches the daemon. An
-// inherited environment survives that, and survives a daemon restart. A working
-// directory cannot serve either - that a process is standing in the worktree
-// says nothing about who started it - so cwd is diagnostic only.
+// inherited environment survives that, and survives a daemon restart. Platforms
+// without that scan use narrower ownership proofs in their discovery files.
 const RunIDEnvVar = "NO_MISTAKES_RUN_ID"
 
 type runSupervisorContextKey struct{}
@@ -67,8 +67,8 @@ func (o runOwnership) ownsRun(environ []byte) bool {
 	return ok && runID == o.runID
 }
 
-// discoveredProcess is a marked process found by scanning the process table.
-// cwd is diagnostic only - it never decides whether a run owns the process.
+// discoveredProcess is a process found by a platform-specific process-table
+// scan after that platform's ownership proof has passed.
 type discoveredProcess struct {
 	pid        int
 	group      int
@@ -106,17 +106,16 @@ func environValue(environ []byte, name string) (string, bool) {
 }
 
 // NewRunSupervisor creates a process-group supervisor for one run. Beyond the
-// command groups it registers, cleanup discovers any process still carrying
-// this run's inherited environment marker, so a child that escaped its command
-// leader - reparented to init, in a session of its own, possibly having
-// chdir'd out of the worktree - is still reaped, while unrelated daemon groups,
-// sibling-run groups, and unmarked foreign processes (a developer's shell or
-// editor inspecting a retained or custody worktree) are never signalled.
-// workDir is retained for diagnostics in the termination log.
+// command groups it registers, cleanup asks the platform discovery backend for
+// escaped processes that still satisfy its run-ownership proof, while unrelated
+// daemon groups, sibling-run groups, and foreign processes (a developer's shell
+// or editor inspecting a retained or custody worktree) are never signalled.
+// workDir is retained for discovery and diagnostics.
 //
-// Marker discovery is implemented on Linux only; on Windows the kill-on-close
-// job object covers escaped descendants, and on other platforms cleanup is
-// limited to the registered command groups.
+// Marker discovery is implemented on Linux. On macOS, lsof-backed cwd
+// discovery covers escaped descendants that remain under the daemon process
+// tree. On Windows the kill-on-close job object covers escaped descendants, and
+// on other platforms cleanup is limited to the registered command groups.
 func NewRunSupervisor(runID, workDir string) *RunSupervisor {
 	return &RunSupervisor{
 		runID:   runID,
@@ -188,7 +187,12 @@ func (s *RunSupervisor) Terminate(ctx context.Context) error {
 		return nil
 	}
 	groups := s.snapshotGroups()
-	for _, proc := range discoverRunProcesses(s.ownership(), s.workDir) {
+	var errs []error
+	discovered, err := discoverRunProcesses(s.ownership(), s.workDir)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("discover run %s processes: %w", s.runID, err))
+	}
+	for _, proc := range discovered {
 		if _, tracked := groups[proc.group]; !tracked {
 			slog.Info("reaping run process that escaped its command group",
 				"run_id", s.runID, "pid", proc.pid, "pgid", proc.group,
@@ -196,7 +200,6 @@ func (s *RunSupervisor) Terminate(ctx context.Context) error {
 		}
 		groups[proc.group] = struct{}{}
 	}
-	var errs []error
 	for group := range groups {
 		if err := terminateRunProcessGroup(ctx, group, s.grace); err != nil {
 			errs = append(errs, fmt.Errorf("terminate run %s process group %d: %w", s.runID, group, err))

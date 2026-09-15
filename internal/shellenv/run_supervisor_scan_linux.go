@@ -16,9 +16,9 @@ import (
 // standing: a daemonized dashboard that called setsid and chdir("/") is still
 // this run's to clean up, while a process merely sitting in the worktree is
 // not. The worktree path is recorded for the termination log only.
-func discoverRunProcesses(owner runOwnership, workDir string) []discoveredProcess {
+func discoverRunProcesses(owner runOwnership, workDir string) ([]discoveredProcess, error) {
 	if owner.runID == "" {
-		return nil
+		return nil, nil
 	}
 	workDir = strings.TrimSpace(workDir)
 	if workDir != "" {
@@ -29,7 +29,7 @@ func discoverRunProcesses(owner runOwnership, workDir string) []discoveredProces
 	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	self := os.Getpid()
 	selfGroup := syscall.Getpgrp()
@@ -57,7 +57,7 @@ func discoverRunProcesses(owner runOwnership, workDir string) []discoveredProces
 		seen[group] = struct{}{}
 		found = append(found, discoveredProcess{pid: pid, group: group, cwd: cwd, inWorktree: inWorktree})
 	}
-	return found
+	return found, nil
 }
 
 // readProcEnviron returns the process environment block, or nil when it cannot

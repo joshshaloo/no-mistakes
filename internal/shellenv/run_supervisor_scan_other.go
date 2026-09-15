@@ -1,5 +1,5 @@
-//go:build !linux
+//go:build !linux && !darwin
 
 package shellenv
 
-func discoverRunProcesses(runOwnership, string) []discoveredProcess { return nil }
+func discoverRunProcesses(runOwnership, string) ([]discoveredProcess, error) { return nil, nil }

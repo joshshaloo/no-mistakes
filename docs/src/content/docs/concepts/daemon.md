@@ -94,12 +94,11 @@ Configured commands, SCM CLI calls, Git subprocesses, and agent subprocesses are
 One-shot commands are still terminated as a process tree on completion, failure, or cancellation, and final run cleanup reaps any remaining run-owned groups before worktree removal so leaked test workers, build watchers, dashboards, or dev servers cannot survive with a deleted cwd or hold a port for the next run.
 That guarantee covers every process still reachable through a registered command's process group on all platforms.
 Every subprocess a run launches - configured commands, Git and SCM calls, one-shot agents, and the managed agent server behind Rovo Dev and OpenCode - inherits a run marker in its environment.
-A process that also escaped its command's process group, such as a dev server or dashboard that started a session of its own, is caught by that marker on Linux and by the kill-on-close job object on Windows.
-On macOS neither of those applies, so an escaped process can outlive the run.
-For a process found outside those registered groups, that marker is the whole proof of ownership, and the only thing that authorizes a kill.
-It still identifies an escapee that reparented to init, moved to a session of its own, or changed directory out of the worktree entirely, and it survives a daemon restart - which is what lets startup cleanup of an orphaned worktree reap that run's own leftovers even though a different daemon process started them.
-Nothing else is ever signalled: not an unmarked process such as a shell or editor you opened inside a retained worktree, and not a process marked for a different run, which may still belong to a live run of another daemon on the same machine.
-Runs are matched only by their own globally unique run ID.
+A process that also escaped its command's process group, such as a dev server or dashboard that started a session of its own, is caught by that marker on Linux, by a daemon-descendant cwd scan on macOS, and by the kill-on-close job object on Windows.
+For a process found outside those registered groups, the platform discovery proof is the only thing that authorizes a kill.
+On Linux the inherited run marker still identifies an escapee that reparented to init, moved to a session of its own, or changed directory out of the worktree entirely, and it survives a daemon restart - which is what lets startup cleanup of an orphaned worktree reap that run's own leftovers even though a different daemon process started them.
+On macOS discovery is limited to processes still descended from the daemon with cwd inside the worktree, so a shell or editor you opened independently inside a retained worktree is not signalled; if `lsof` is unavailable, cleanup reports an error and leaves the worktree for inspection rather than silently skipping that scan.
+Linux marker matching uses the run's globally unique run ID.
 
 ## Concurrent push handling
 
