@@ -79,6 +79,11 @@ type StepOutcome struct {
 	// round. The executor durably records it only when the review step actually
 	// completes, never while that outcome is parked or after a failed round.
 	ReviewApprovedHeadSHA string
+	// TestVerifiedTreeSHA is set only by a test round that produced green
+	// evidence for the exact working-tree content named here. A parked,
+	// failing, or approved-with-failures round leaves it empty, so the run
+	// never gains a verified-tree anchor there is no green evidence for.
+	TestVerifiedTreeSHA string
 
 	// DurationOverrideMS, when positive, replaces the wall-clock duration
 	// reported for this step. Used by demo mode to show realistic durations

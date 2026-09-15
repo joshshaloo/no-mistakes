@@ -712,6 +712,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	stepSkipped := false
 	currentRoundID := state.currentRoundID
 	var reviewApprovedHeadSHA string
+	var testVerifiedTreeSHA string
 
 	// Execute with possible fix loop
 	for {
@@ -738,6 +739,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 		if stepName == types.StepReview {
 			reviewApprovedHeadSHA = outcome.ReviewApprovedHeadSHA
+		}
+		if stepName == types.StepTest {
+			testVerifiedTreeSHA = outcome.TestVerifiedTreeSHA
 		}
 		outcome.Findings = normalizeFindingsJSON(outcome.Findings, string(stepName))
 		finalExitCode = outcome.ExitCode
@@ -966,14 +970,28 @@ done:
 	// actually completes. Parked outcomes stay in the loop above, failures
 	// return earlier, and skipped reviews deliberately leave the binding empty.
 	// Completion and authority replacement are one DB transaction.
-	if stepName == types.StepReview && status == types.StepStatusCompleted && reviewApprovedHeadSHA != "" {
+	//
+	// A test round's validated tree is the same shape of authority: it becomes
+	// the run's durable anchor only when the test step actually completes with
+	// green evidence, so the push boundary can tell "nothing to invalidate"
+	// apart from "this content was never tested".
+	switch {
+	case stepName == types.StepReview && status == types.StepStatusCompleted && reviewApprovedHeadSHA != "":
 		if err := e.db.CompleteReviewStep(sr.ID, run.ID, reviewApprovedHeadSHA, finalExitCode, durationMS, logPath); err != nil {
 			return false, fmt.Errorf("complete step %s: %w", stepName, err)
 		}
 		reviewedHead := reviewApprovedHeadSHA
 		run.ReviewApprovedHeadSHA = &reviewedHead
-	} else if err := e.db.CompleteStepWithStatus(sr.ID, status, finalExitCode, durationMS, logPath); err != nil {
-		return false, fmt.Errorf("complete step %s: %w", stepName, err)
+	case stepName == types.StepTest && status == types.StepStatusCompleted && testVerifiedTreeSHA != "":
+		if err := e.db.CompleteTestStep(sr.ID, run.ID, testVerifiedTreeSHA, finalExitCode, durationMS, logPath); err != nil {
+			return false, fmt.Errorf("complete step %s: %w", stepName, err)
+		}
+		verifiedTree := testVerifiedTreeSHA
+		run.TestVerifiedTreeSHA = &verifiedTree
+	default:
+		if err := e.db.CompleteStepWithStatus(sr.ID, status, finalExitCode, durationMS, logPath); err != nil {
+			return false, fmt.Errorf("complete step %s: %w", stepName, err)
+		}
 	}
 	e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", "", &durationMS)
 	return skipRemaining, nil

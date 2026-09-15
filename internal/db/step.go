@@ -153,9 +153,41 @@ func (d *DB) CompleteStepWithStatus(id string, status types.StepStatus, exitCode
 // fails, so a failed completion cannot create approval authority and a
 // completed review cannot lack it.
 func (d *DB) CompleteReviewStep(id, runID, approvedHeadSHA string, exitCode int, durationMS int64, logPath string) error {
+	return d.completeStepWithRunHeadAnchor(runHeadAnchor{
+		stepLabel:  "review step",
+		headLabel:  "review-approved head",
+		updateRun:  `UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ?`,
+		commitVerb: "completed review",
+	}, id, runID, approvedHeadSHA, exitCode, durationMS, logPath)
+}
+
+// CompleteTestStep atomically completes a successful test step and replaces
+// the run's exact test-verified tree. The push boundary treats that tree as
+// the only proof of which content the recorded test evidence describes, so it
+// must never exist without a completed test step, or vice versa.
+func (d *DB) CompleteTestStep(id, runID, verifiedTreeSHA string, exitCode int, durationMS int64, logPath string) error {
+	return d.completeStepWithRunHeadAnchor(runHeadAnchor{
+		stepLabel:  "test step",
+		headLabel:  "test-verified tree",
+		updateRun:  `UPDATE runs SET test_verified_tree_sha = ?, updated_at = ? WHERE id = ?`,
+		commitVerb: "completed test",
+	}, id, runID, verifiedTreeSHA, exitCode, durationMS, logPath)
+}
+
+// runHeadAnchor describes one durable run-level head binding that a step
+// completion owns. The SQL is a compile-time constant per binding; only the
+// head value is ever a bound parameter.
+type runHeadAnchor struct {
+	stepLabel  string
+	headLabel  string
+	updateRun  string
+	commitVerb string
+}
+
+func (d *DB) completeStepWithRunHeadAnchor(anchor runHeadAnchor, id, runID, headSHA string, exitCode int, durationMS int64, logPath string) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
-		return fmt.Errorf("begin complete review step: %w", err)
+		return fmt.Errorf("begin complete %s: %w", anchor.stepLabel, err)
 	}
 	defer tx.Rollback()
 
@@ -165,20 +197,20 @@ func (d *DB) CompleteReviewStep(id, runID, approvedHeadSHA string, exitCode int,
 		types.StepStatusCompleted, exitCode, durationMS, logPath, ts, ts, fmt.Sprintf("status: %s", types.StepStatusCompleted), id,
 	)
 	if err != nil {
-		return fmt.Errorf("complete review step: %w", err)
+		return fmt.Errorf("complete %s: %w", anchor.stepLabel, err)
 	}
 	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
-		return fmt.Errorf("complete review step: step row not found")
+		return fmt.Errorf("complete %s: step row not found", anchor.stepLabel)
 	}
-	result, err = tx.Exec(`UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ?`, approvedHeadSHA, ts, runID)
+	result, err = tx.Exec(anchor.updateRun, headSHA, ts, runID)
 	if err != nil {
-		return fmt.Errorf("record review-approved head: %w", err)
+		return fmt.Errorf("record %s: %w", anchor.headLabel, err)
 	}
 	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
-		return fmt.Errorf("record review-approved head: run row not found")
+		return fmt.Errorf("record %s: run row not found", anchor.headLabel)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit completed review: %w", err)
+		return fmt.Errorf("commit %s: %w", anchor.commitVerb, err)
 	}
 	return nil
 }

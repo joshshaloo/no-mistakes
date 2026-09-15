@@ -32,10 +32,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	// Run format command if configured (before committing, so changes are formatted)
 	if fmtCmd := sctx.Config.Commands.Format; fmtCmd != "" {
 		sctx.Log(fmt.Sprintf("running formatter: %s", fmtCmd))
-		output, exitCode, err := runStepShellCommand(sctx, fmtCmd)
+		output, exitCode, err := runConfiguredStepShellCommand(sctx, configuredCommandFormat, fmtCmd)
 		if err != nil {
-			sctx.Log(fmt.Sprintf("warning: format command failed: %v", err))
-		} else if exitCode != 0 {
+			return nil, fmt.Errorf("run format command: %w", err)
+		}
+		if exitCode != 0 {
 			sctx.Log(fmt.Sprintf("warning: format command exited with code %d: %s", exitCode, output))
 		}
 	}
@@ -47,6 +48,7 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	status, _ := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
 	if strings.TrimSpace(status) != "" {
 		sctx.Log("committing agent changes...")
+		previousHead := sctx.Run.HeadSHA
 		if _, err := git.Run(ctx, sctx.WorkDir, "add", "-A"); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)
 		}
@@ -68,6 +70,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		if err := publishPipelineHead(sctx, headSHA); err != nil {
 			return nil, fmt.Errorf("publish push-stage commit: %w", err)
 		}
+		recordPostTestHeadAdvance(sctx, s.Name(), previousHead, headSHA)
+	}
+
+	if err := verifyFinalHeadAfterPostTestFixes(sctx); err != nil {
+		return nil, err
 	}
 
 	ref := normalizedBranchRef(sctx.Run.Branch)

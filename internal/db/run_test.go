@@ -752,3 +752,58 @@ func TestSetRunCustodyReturnedStampsOnceAndSurvivesStatusUpdates(t *testing.T) {
 		t.Fatalf("custody stamp changed: %#v, want %d", got.CustodyReturnedAt, first)
 	}
 }
+
+// The test-verified tree is the durable proof of which content the recorded
+// test evidence describes. It must never appear on a run whose test step did
+// not complete, and completion plus the anchor are one transaction.
+func TestCompleteTestStepRecordsVerifiedTreeAtomically(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "mutable", "base")
+	if run.TestVerifiedTreeSHA != nil {
+		t.Fatalf("new run inferred a test-verified tree: %#v", run.TestVerifiedTreeSHA)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteTestStep(step.ID, run.ID, "verified-1", 0, 5, "test.log"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TestVerifiedTreeSHA == nil || *got.TestVerifiedTreeSHA != "verified-1" {
+		t.Fatalf("test-verified tree = %#v, want verified-1", got.TestVerifiedTreeSHA)
+	}
+	gotStep, err := d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotStep.Status != types.StepStatusCompleted {
+		t.Fatalf("step status = %s, want completed", gotStep.Status)
+	}
+
+	if err := d.CompleteTestStep("missing-step", run.ID, "verified-2", 0, 5, "test.log"); err == nil {
+		t.Fatal("expected completion of an unknown step to fail")
+	}
+	got, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TestVerifiedTreeSHA == nil || *got.TestVerifiedTreeSHA != "verified-1" {
+		t.Fatalf("failed transaction replaced the anchor: %#v", got.TestVerifiedTreeSHA)
+	}
+
+	if err := d.UpdateRunTestVerifiedTreeSHA(run.ID, "verified-3"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TestVerifiedTreeSHA == nil || *got.TestVerifiedTreeSHA != "verified-3" {
+		t.Fatalf("test-verified tree = %#v, want verified-3", got.TestVerifiedTreeSHA)
+	}
+}

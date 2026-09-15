@@ -115,13 +115,31 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 	return Findings{Items: items, Summary: wire.Summary, Tested: wire.Tested, TestingSummary: wire.TestingSummary, Artifacts: wire.Artifacts, RiskLevel: wire.RiskLevel, RiskRationale: wire.RiskRationale, RiskScope: wire.RiskScope}, nil
 }
 
-// NormalizeFindings assigns deterministic IDs to findings that do not have one yet.
+// NormalizeFindings assigns deterministic IDs to findings that do not have one
+// yet. IDs already present are preserved, and a generated ID never collides
+// with one of them, so an already-normalized set can be extended with new
+// findings without two of them answering to the same ID.
 func NormalizeFindings(findings Findings, prefix string) Findings {
+	used := make(map[string]bool, len(findings.Items))
+	for _, item := range findings.Items {
+		if item.ID != "" {
+			used[item.ID] = true
+		}
+	}
+	next := 1
 	for i := range findings.Items {
 		if findings.Items[i].ID != "" {
 			continue
 		}
-		findings.Items[i].ID = prefix + "-" + itoa(i+1)
+		for {
+			id := prefix + "-" + itoa(next)
+			next++
+			if !used[id] {
+				used[id] = true
+				findings.Items[i].ID = id
+				break
+			}
+		}
 	}
 	return findings
 }

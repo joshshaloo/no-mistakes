@@ -186,6 +186,13 @@ It augments or clarifies the built-in policy; it cannot disable documentation in
 
 Like `commands.*` and `agent`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`: a contributor's pushed branch cannot weaken the documentation rules that gate its own review.
 
+### Missing command tools
+
+A configured `commands.*` entry that cannot run because its tool is absent from the pipeline worktree - the shell exits `127`, "command not found" - fails the step that owns it with a message naming the command key and the exact command string.
+A missing tool is never treated as a passing check and never becomes an approval gate: `commands.test` fails the Test step, `commands.lint` fails the Lint step, and `commands.format` fails the Push step.
+Install the tool where the daemon runs, or remove the entry to fall back to the agent-driven path.
+Other non-zero exits keep their normal per-step meaning (see [Pipeline Steps](/no-mistakes/reference/pipeline-steps/)).
+
 ### Command process lifetime
 
 All configured `commands.*` entries are scoped to their step.

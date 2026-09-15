@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS runs (
     base_sha                TEXT NOT NULL,
     submitted_head_sha      TEXT,
     review_approved_head_sha TEXT,
+    test_verified_tree_sha  TEXT,
     status                  TEXT NOT NULL DEFAULT 'pending',
     pr_url                  TEXT,
     pr_state                TEXT,
@@ -157,6 +158,11 @@ var migrationStatements = []string{
 	// Review authority is nullable and never backfilled. A historical mutable
 	// head_sha cannot prove which exact commit a completed review approved.
 	`ALTER TABLE runs ADD COLUMN review_approved_head_sha TEXT`,
+	// The exact working-tree content a successfully completed Test step
+	// validated. Nullable and never backfilled: a skipped, failed, or
+	// approved-with-failures Test step leaves no green evidence, and a mutable
+	// head cannot prove which content one described.
+	`ALTER TABLE runs ADD COLUMN test_verified_tree_sha TEXT`,
 	`ALTER TABLE runs ADD COLUMN last_pushed_sha TEXT`,
 	`ALTER TABLE runs ADD COLUMN push_target_kind TEXT`,
 	`ALTER TABLE runs ADD COLUMN push_target_fingerprint TEXT`,

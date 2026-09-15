@@ -104,7 +104,7 @@ Previous test findings to address:
 	tested := []string{}
 	if testCmd != "" {
 		sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
-		output, exitCode, err := runStepShellCommand(sctx, testCmd)
+		output, exitCode, err := runConfiguredStepShellCommand(sctx, configuredCommandTest, testCmd)
 		if err != nil {
 			return nil, fmt.Errorf("run test command: %w", err)
 		}
@@ -246,12 +246,12 @@ Rules:
 		}
 
 		findingsJSON, _ := json.Marshal(findings)
-		return &pipeline.StepOutcome{
+		return withTestVerifiedTree(sctx, &pipeline.StepOutcome{
 			NeedsApproval: needsApproval,
 			AutoFixable:   autoFixable,
 			Findings:      string(findingsJSON),
 			FixSummary:    fixSummary,
-		}, nil
+		})
 	}
 
 	// In fix mode the agent may add new test files while making tests pass.
@@ -271,14 +271,33 @@ Rules:
 			})
 		}
 		findingsJSON, _ := json.Marshal(findings)
-		return &pipeline.StepOutcome{
+		return withTestVerifiedTree(sctx, &pipeline.StepOutcome{
 			NeedsApproval: false,
 			Findings:      string(findingsJSON),
 			FixSummary:    fixSummary,
-		}, nil
+		})
 	}
 
 	sctx.Log("all tests passed")
 	findingsJSON, _ := json.Marshal(Findings{Tested: tested})
-	return &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary}, nil
+	return withTestVerifiedTree(sctx, &pipeline.StepOutcome{Findings: string(findingsJSON), FixSummary: fixSummary})
+}
+
+// withTestVerifiedTree stamps the exact working-tree content this round
+// validated onto the outcome so the executor can persist it as the run's
+// durable anchor. It is the tree rather than HEAD because the test agent
+// routinely writes focused tests and evidence files that only a later step
+// commits: that content was validated here, so landing it is not a post-test
+// change. A round that parks for approval produced no green evidence, so it
+// deliberately leaves the anchor empty rather than claiming content was tested.
+func withTestVerifiedTree(sctx *pipeline.StepContext, outcome *pipeline.StepOutcome) (*pipeline.StepOutcome, error) {
+	if outcome.NeedsApproval {
+		return outcome, nil
+	}
+	tree, err := git.WorktreeTreeSHA(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve tested working tree: %w", err)
+	}
+	outcome.TestVerifiedTreeSHA = tree
+	return outcome, nil
 }
