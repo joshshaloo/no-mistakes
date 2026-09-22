@@ -229,19 +229,43 @@ func validateResponse(decoded response) (answer, *answer, string, error) {
 	if model == "" {
 		return answer{}, nil, "", fmt.Errorf("response carried no responding model version")
 	}
-	primary, ok := decoded.Answers[questionNonConvergence]
-	if !ok || primary.Type != "noul" || primary.Noul == nil || !unitInterval(*primary.Noul) || primary.Confidence == nil || !unitInterval(*primary.Confidence) {
-		return answer{}, nil, "", fmt.Errorf("response carried invalid %s answer", questionNonConvergence)
+	primaryRaw, ok := decoded.Answers[questionNonConvergence]
+	if !ok {
+		return answer{}, nil, "", fmt.Errorf("response carried no %s answer", questionNonConvergence)
+	}
+	var primaryWire noulAnswer
+	if err := json.Unmarshal(primaryRaw, &primaryWire); err != nil {
+		return answer{}, nil, "", fmt.Errorf("response carried malformed %s answer: %w", questionNonConvergence, err)
+	}
+	primary := answer{Type: primaryWire.Type, Noul: primaryWire.Noul}
+	if err := validateNoul(primary); err != nil {
+		return answer{}, nil, "", fmt.Errorf("response carried invalid %s answer: %w", questionNonConvergence, err)
 	}
 
 	var themes *answer
-	if secondary, ok := decoded.Answers[questionCausalThemes]; ok {
-		if secondary.Type != "score" || secondary.Score == nil || !unitInterval(*secondary.Score) || secondary.Confidence == nil || !unitInterval(*secondary.Confidence) {
-			return answer{}, nil, "", fmt.Errorf("response carried invalid %s answer", questionCausalThemes)
+	if secondaryRaw, ok := decoded.Answers[questionCausalThemes]; ok {
+		var secondary answer
+		if err := json.Unmarshal(secondaryRaw, &secondary); err == nil && validScore(secondary, len(causalThemeLevels)) {
+			themes = &secondary
 		}
-		themes = &secondary
 	}
 	return primary, themes, model, nil
+}
+
+func validateNoul(a answer) error {
+	if a.Type != "noul" {
+		return fmt.Errorf("type is %q, want noul", a.Type)
+	}
+	if a.Noul == nil || !unitInterval(*a.Noul) {
+		return fmt.Errorf("noul is missing or outside 0..1")
+	}
+	return nil
+}
+
+func validScore(a answer, levels int) bool {
+	return a.Type == "score" &&
+		a.Score != nil && *a.Score >= 0 && *a.Score <= float64(levels-1) &&
+		a.Confidence != nil && unitInterval(*a.Confidence)
 }
 
 func unitInterval(value float64) bool {
@@ -267,9 +291,27 @@ type noulCriteria struct {
 	False string `json:"false"`
 }
 
+// Response-field classification is part of the validation boundary:
+//
+//   - DECISION-BEARING: model; answers keys; each answer's type discriminator;
+//     Noul's noul value; Score's score value and confidence. Model must be
+//     present for traceability. Noul is bounded to 0..1. Score is bounded to
+//     0..(criteria levels-1), and only Score has confidence.
+//   - TELEMETRY: usage and every unrecognized response field. They are not
+//     decoded because telemetry must never decide whether a signal emits.
+//
+// A malformed primary Noul rejects the response. A malformed secondary Score
+// is omitted without suppressing the valid Noul, because Noul is the deliverable.
+// Keeping answers raw lets those two policies remain independent even when the
+// secondary answer has the wrong JSON field types.
 type response struct {
-	Model   string            `json:"model"`
-	Answers map[string]answer `json:"answers"`
+	Model   string                     `json:"model"`
+	Answers map[string]json.RawMessage `json:"answers"`
+}
+
+type noulAnswer struct {
+	Type string   `json:"type"`
+	Noul *float64 `json:"noul"`
 }
 
 type answer struct {

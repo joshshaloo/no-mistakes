@@ -61,7 +61,7 @@ func answerBody(t *testing.T, noul float64, model string) []byte {
 	t.Helper()
 	return []byte(`{"model":"` + model + `","answers":{"non_convergence":{"type":"noul","noul":` +
 		strings.TrimRight(strings.TrimRight(formatFloat(noul), "0"), ".") +
-		`,"confidence":0.9},"causal_themes":{"type":"score","score":0.42,"confidence":0.8}},"usage":{"input_tokens":100,"output_tokens":20}}`)
+		`},"causal_themes":{"type":"score","score":1.42,"confidence":0.8}},"usage":{"input_tokens":100,"output_tokens":20}}`)
 }
 
 func formatFloat(f float64) string {
@@ -159,8 +159,8 @@ func TestObserveRecordsProbabilityAndRespondingModelVersion(t *testing.T) {
 	if sig.ObservedAt == 0 {
 		t.Fatal("signal must carry an observation time")
 	}
-	if sig.CausalThemes == nil || *sig.CausalThemes != 0.42 {
-		t.Fatalf("causal themes = %v, want 0.42", sig.CausalThemes)
+	if sig.CausalThemes == nil || *sig.CausalThemes != 1.42 {
+		t.Fatalf("causal themes = %v, want 1.42", sig.CausalThemes)
 	}
 	if sig.CausalThemeConfidence == nil || *sig.CausalThemeConfidence != 0.8 {
 		t.Fatalf("causal theme confidence = %v, want 0.8", sig.CausalThemeConfidence)
@@ -303,30 +303,20 @@ func TestObserveEmitsNothingWhenTheExpectedAnswerIsMissing(t *testing.T) {
 	}
 }
 
-func TestObserveValidatesEveryDecisionBearingResponseFieldBeforeEmitting(t *testing.T) {
-	valid := `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","score":0.4,"confidence":0.8}}}`
+func TestObserveValidatesEveryPrimaryDecisionFieldBeforeEmitting(t *testing.T) {
+	valid := `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":"not-a-noul-field"},"causal_themes":{"type":"score","score":1.4,"confidence":0.8}}}`
 	tests := []struct {
 		name string
 		body string
 		want bool
 	}{
 		{name: "fully valid", body: valid, want: true},
-		{name: "model missing", body: `{"answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9}},"usage":{"input_tokens":100}}`},
-		{name: "model wrong type", body: `{"model":7,"answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9}},"usage":{"input_tokens":100}}`},
-		{name: "primary discriminator", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"score","noul":0.7,"confidence":0.9}},"usage":{"input_tokens":100}}`},
-		{name: "primary value missing", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","confidence":0.9}},"usage":{"input_tokens":100}}`},
-		{name: "primary value wrong type", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":"high","confidence":0.9}},"usage":{"input_tokens":100}}`},
-		{name: "primary value out of range", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":7,"confidence":0.9}},"usage":{"input_tokens":100}}`},
-		{name: "primary confidence missing", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7}},"usage":{"input_tokens":100}}`},
-		{name: "primary confidence wrong type", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":"high"}},"usage":{"input_tokens":100}}`},
-		{name: "primary confidence out of range", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":2}},"usage":{"input_tokens":100}}`},
-		{name: "secondary discriminator", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"noul","score":0.4,"confidence":0.8}},"usage":{"input_tokens":100}}`},
-		{name: "secondary value missing", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","confidence":0.8}},"usage":{"input_tokens":100}}`},
-		{name: "secondary value wrong type", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","score":"many","confidence":0.8}},"usage":{"input_tokens":100}}`},
-		{name: "secondary value out of range", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","score":999,"confidence":0.8}},"usage":{"input_tokens":100}}`},
-		{name: "secondary confidence missing", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","score":0.4}},"usage":{"input_tokens":100}}`},
-		{name: "secondary confidence wrong type", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","score":0.4,"confidence":"high"}},"usage":{"input_tokens":100}}`},
-		{name: "secondary confidence out of range", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","score":0.4,"confidence":2}},"usage":{"input_tokens":100}}`},
+		{name: "model missing", body: `{"answers":{"non_convergence":{"type":"noul","noul":0.7}}}`},
+		{name: "model wrong type", body: `{"model":7,"answers":{"non_convergence":{"type":"noul","noul":0.7}}}`},
+		{name: "primary discriminator", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"score","noul":0.7}}}`},
+		{name: "primary value missing", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul"}}}`},
+		{name: "primary value wrong type", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":"high"}}}`},
+		{name: "primary value out of range", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":7}}}`},
 	}
 
 	for _, tt := range tests {
@@ -348,6 +338,67 @@ func TestObserveValidatesEveryDecisionBearingResponseFieldBeforeEmitting(t *test
 	}
 }
 
+func TestObserveDropsMalformedSecondaryScoreWithoutSuppressingNoul(t *testing.T) {
+	tests := []struct {
+		name      string
+		secondary string
+	}{
+		{name: "wrong discriminator", secondary: `{"type":"noul","score":1.4,"confidence":0.8}`},
+		{name: "missing value", secondary: `{"type":"score","confidence":0.8}`},
+		{name: "wrong value type", secondary: `{"type":"score","score":"many","confidence":0.8}`},
+		{name: "value below range", secondary: `{"type":"score","score":-0.1,"confidence":0.8}`},
+		{name: "value above criteria", secondary: `{"type":"score","score":3,"confidence":0.8}`},
+		{name: "missing confidence", secondary: `{"type":"score","score":1.4}`},
+		{name: "wrong confidence type", secondary: `{"type":"score","score":1.4,"confidence":"high"}`},
+		{name: "confidence out of range", secondary: `{"type":"score","score":1.4,"confidence":2}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7},"causal_themes":` + tt.secondary + `}}`
+			d, _ := okDetector(t, func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(body)) })
+			sig, err := d.Observe(context.Background(), twoRoundObservation())
+			if err != nil || sig == nil || sig.Probability != 0.7 {
+				t.Fatalf("malformed Score suppressed valid Noul: sig=%+v err=%v", sig, err)
+			}
+			if sig.CausalThemes != nil || sig.CausalThemeConfidence != nil {
+				t.Fatalf("malformed Score must be absent, got %+v", sig)
+			}
+		})
+	}
+}
+
+func TestRecordedJevResponseFixturesMatchValidators(t *testing.T) {
+	for _, name := range []string{"noul", "score"} {
+		raw, err := os.ReadFile(filepath.Join("testdata", "jev-"+name+"-answer.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got answer
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("decode recorded %s answer: %v", name, err)
+		}
+		if name == "noul" {
+			if err := validateNoul(got); err != nil {
+				t.Fatalf("recorded Noul rejected unchanged: %v", err)
+			}
+		} else if !validScore(got, len(causalThemeLevels)) {
+			t.Fatal("recorded Score rejected unchanged")
+		}
+	}
+
+	raw, err := os.ReadFile(filepath.Join("testdata", "jev-combined-response.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got response
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if _, themes, _, err := validateResponse(got); err != nil || themes == nil {
+		t.Fatalf("recorded combined response rejected unchanged: themes=%+v err=%v", themes, err)
+	}
+}
+
 func TestObserveIgnoresUsageTelemetry(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -359,7 +410,7 @@ func TestObserveIgnoresUsageTelemetry(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d, _ := okDetector(t, func(w http.ResponseWriter, r *http.Request) {
-				_, _ = w.Write([]byte(`{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.6,"confidence":0.9}}` + tt.usage + `}`))
+				_, _ = w.Write([]byte(`{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.6}}` + tt.usage + `}`))
 			})
 			sig, err := d.Observe(context.Background(), twoRoundObservation())
 			if err != nil || sig == nil || sig.Probability != 0.6 {
@@ -371,7 +422,7 @@ func TestObserveIgnoresUsageTelemetry(t *testing.T) {
 
 func TestObserveKeepsTheNoulWhenTheScoreIsAbsent(t *testing.T) {
 	d, _ := okDetector(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.6,"confidence":0.9}},"usage":{"input_tokens":100,"output_tokens":20}}`))
+		_, _ = w.Write([]byte(`{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.6}},"usage":{"input_tokens":100,"output_tokens":20}}`))
 	})
 	sig, err := d.Observe(context.Background(), twoRoundObservation())
 	if err != nil {

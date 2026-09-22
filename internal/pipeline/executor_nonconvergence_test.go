@@ -1,9 +1,12 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -19,7 +22,7 @@ import (
 // recorded, or that the run came out byte-identical to a run with no detector
 // at all.
 
-const nonconvergenceAnswer = `{"model":"typesafe/jev-1.13-20260917","answers":{"non_convergence":{"type":"noul","noul":0.88,"confidence":0.91},"causal_themes":{"type":"score","score":0.31,"confidence":0.77}}}`
+const nonconvergenceAnswer = `{"model":"typesafe/jev-1.13-20260917","answers":{"non_convergence":{"type":"noul","noul":0.88},"causal_themes":{"type":"score","score":1.31,"confidence":0.77}}}`
 
 // detectorServing wires an executor-ready detector onto a local test server and
 // reports how many times the service was actually reached.
@@ -200,7 +203,7 @@ func TestExecutor_RecordsNonconvergenceWithProbabilityAndModelVersion(t *testing
 	if nc.Round < 2 {
 		t.Errorf("round = %d, want a round beyond the first", nc.Round)
 	}
-	if nc.Themes == nil || *nc.Themes != 0.31 {
+	if nc.Themes == nil || *nc.Themes != 1.31 {
 		t.Errorf("causal themes = %v, want the score recorded alongside the noul", nc.Themes)
 	}
 }
@@ -232,6 +235,23 @@ func TestExecutor_SingleRoundRunEmitsNoNonconvergenceSignal(t *testing.T) {
 }
 
 // --- every failure mode is silent and leaves the run identical ---
+
+func TestExecutor_RejectedNonconvergenceResponseLogsConcreteReason(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	detector, _ := detectorServing(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"model":"jev","answers":{"non_convergence":{"type":"score","noul":0.7}}}`))
+	})
+	runTwoRoundReview(t, detector)
+
+	got := logs.String()
+	if !strings.Contains(got, "non-convergence signal unavailable") || !strings.Contains(got, "type is") {
+		t.Fatalf("rejected response reason was not observable in one log line: %q", got)
+	}
+}
 
 func TestExecutor_NonconvergenceFailuresLeaveTheRunByteIdentical(t *testing.T) {
 	// Baseline: exactly today's behavior, with no detector at all.
@@ -353,7 +373,7 @@ func TestExecutor_HighNonconvergenceStillParksExactlyAsBefore(t *testing.T) {
 	// gate must behave exactly as it does without it: park, wait, and resolve
 	// only on the responder's action.
 	detector, _ := detectorServing(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"model":"jev","answers":{"non_convergence":{"type":"noul","noul":0.99,"confidence":0.98}}}`))
+		_, _ = w.Write([]byte(`{"model":"jev","answers":{"non_convergence":{"type":"noul","noul":0.99}}}`))
 	})
 
 	database, p, run, repo := setupTest(t)

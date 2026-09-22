@@ -411,14 +411,15 @@ It adds a field you read and act on yourself.
 | `nonconvergence.enabled`   | `bool`   | `false`                        | Enable the non-convergence signal                                       |
 | `nonconvergence.model`     | `string` | `jev-1.13`                     | Judgment model id; pin a version so a tuned threshold stays comparable   |
 | `nonconvergence.base_url`  | `string` | `https://openrouter.ai/api`    | Channel root; `/v1/systemone` is appended                               |
-| `nonconvergence.key_file`  | `string` | Empty                          | Path to an env file you already own that contains `OPENROUTER_API_KEY=`  |
+| `nonconvergence.key_file`  | `string` | Empty                          | Path to an operator-owned env file containing a supported API key        |
 | `nonconvergence.timeout`   | `string` | `10s`                          | Upper bound on one detector call                                        |
 
 This block is **global only**.
 A repository's `.no-mistakes.yaml` cannot enable the signal, name the key file, or change `base_url`: enabling it sends run state to a third-party service, so a pushed branch must not be able to turn it on or aim it somewhere else.
 
-The API key is read from `OPENROUTER_API_KEY` (or `TYPESAFE_API_KEY`) in the daemon's environment first, and otherwise from `key_file`, which points at a file you already keep - no-mistakes never creates one.
-A leading `~/` in `key_file` is expanded.
+The supported API-key environment variables and their precedence are documented in [Environment Variables](/no-mistakes/reference/environment/#openrouter_api_key).
+If neither is set, `key_file` points at an env file you already keep; no-mistakes never creates one.
+A leading `~/` in `key_file` is expanded, and the file may define either supported key.
 The key is never accepted as a command argument and is never logged.
 
 **It fails silent, on purpose.**

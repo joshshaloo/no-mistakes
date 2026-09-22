@@ -50,11 +50,11 @@ func (e *Executor) observeNonconvergence(ctx context.Context, runID, stepResultI
 
 	sig, err := e.convergence.Observe(ctx, obs)
 	if err != nil {
-		// Debug only: an unconfigured or unreachable judgment service is not a
-		// pipeline problem, and this line must never become an operator alarm.
+		// One informational line makes a permanently rejected response shape
+		// visible without turning this optional signal into a pipeline alarm.
 		// Redacted defensively so a credentialled endpoint wrapped into the
 		// error can never reach a log.
-		slog.Debug("non-convergence signal unavailable", "run", runID, "step", stepName, "error", safeurl.RedactText(err.Error()))
+		slog.Info("non-convergence signal unavailable", "run", runID, "step", stepName, "error", safeurl.RedactText(err.Error()))
 		return
 	}
 	if sig == nil {
