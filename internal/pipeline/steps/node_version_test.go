@@ -17,18 +17,43 @@ func TestDeclaredNodeVersion_NoPinIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestDeclaredNodeVersion_PrefersNvmrcOverOtherSources(t *testing.T) {
+// TestDeclaredNodeVersion_FullPrecedenceChain locks in the complete fallback
+// order (.nvmrc > .node-version > .tool-versions > package.json volta.node >
+// package.json engines.node) end to end, one source at a time, so a future
+// edit that reorders or skips a source is caught here rather than silently
+// picking the wrong declared pin (and, transitively, reintroducing the
+// original defect of running tests under an unintended Node).
+func TestDeclaredNodeVersion_FullPrecedenceChain(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, ".nvmrc"), "20.19.0\n")
-	writeFile(t, filepath.Join(dir, ".node-version"), "18.0.0\n")
-	writeFile(t, filepath.Join(dir, "package.json"), `{"engines":{"node":"16.0.0"}}`)
 
+	// Every lower-precedence source is present from the start; each step
+	// only adds the next higher-precedence source and re-checks the winner,
+	// proving each source actually shadows the ones below it rather than
+	// merely being the only one present.
+	writeFile(t, filepath.Join(dir, "package.json"), `{"engines":{"node":"14.0.0"}}`)
+	assertDeclaredNodeVersion(t, dir, "14.0.0", "package.json (engines.node)")
+
+	writeFile(t, filepath.Join(dir, "package.json"), `{"volta":{"node":"15.0.0"},"engines":{"node":"14.0.0"}}`)
+	assertDeclaredNodeVersion(t, dir, "15.0.0", "package.json (volta.node)")
+
+	writeFile(t, filepath.Join(dir, ".tool-versions"), "nodejs 16.0.0\n")
+	assertDeclaredNodeVersion(t, dir, "16.0.0", ".tool-versions")
+
+	writeFile(t, filepath.Join(dir, ".node-version"), "18.0.0\n")
+	assertDeclaredNodeVersion(t, dir, "18.0.0", ".node-version")
+
+	writeFile(t, filepath.Join(dir, ".nvmrc"), "20.19.0\n")
+	assertDeclaredNodeVersion(t, dir, "20.19.0", ".nvmrc")
+}
+
+func assertDeclaredNodeVersion(t *testing.T, dir, wantVersion, wantSource string) {
+	t.Helper()
 	version, source, err := declaredNodeVersion(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if version != "20.19.0" || source != ".nvmrc" {
-		t.Fatalf("got version=%q source=%q, want 20.19.0 from .nvmrc", version, source)
+	if version != wantVersion || source != wantSource {
+		t.Fatalf("got version=%q source=%q, want version=%q source=%q", version, source, wantVersion, wantSource)
 	}
 }
 

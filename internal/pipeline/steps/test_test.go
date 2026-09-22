@@ -278,19 +278,33 @@ func TestTestStep_RefusesConfiguredCommandWhenRepositoryNodePinCannotBeHonored(t
 	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
 	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
 
+	ranMarker := filepath.Join(dir, "test-ran.marker")
 	ag := &mockAgent{name: "test"}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "true"})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "touch " + ranMarker})
 
 	step := &TestStep{}
 	outcome, err := step.Execute(sctx)
+	// This must be a hard step failure (non-nil error, nil outcome), not the
+	// softer "park for approval" shape TestStep uses for an ordinary failing
+	// test run (nil error, outcome.NeedsApproval=true). A parked outcome is
+	// still a form of "warn and let someone decide later"; refusing to run at
+	// all is the actual fix for the EBADENGINE defect.
 	if err == nil {
 		t.Fatalf("expected the step to refuse when the repository's Node pin cannot be honored, got outcome %+v", outcome)
+	}
+	if outcome != nil {
+		t.Fatalf("expected a nil outcome on hard refusal (not a parked/needs-approval outcome), got %+v", outcome)
 	}
 	if !strings.Contains(err.Error(), "20.19.0") {
 		t.Fatalf("expected error to name the unresolved pin, got: %v", err)
 	}
 	if len(ag.calls) != 0 {
 		t.Fatal("expected the evidence agent not to run once the Node pin check refuses")
+	}
+	if _, statErr := os.Stat(ranMarker); statErr == nil {
+		t.Fatal("expected the configured test command to never execute once the Node pin check refuses")
+	} else if !os.IsNotExist(statErr) {
+		t.Fatalf("unexpected error checking for test command side effect: %v", statErr)
 	}
 }
 
