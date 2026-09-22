@@ -99,7 +99,7 @@ Fallback API key used by the optional round-over-round non-convergence signal.
 | Type    | `string` |
 | Default | (none)   |
 
-Used only when `OPENROUTER_API_KEY` is unset. If both variables are unset, the detector can read either key from the operator-owned env file named by [`nonconvergence.key_file`](/no-mistakes/reference/global-config/#nonconvergence).
+Used only when `OPENROUTER_API_KEY` is unset or blank. If both variables are unset or blank, the detector can read either key from the operator-owned env file named by [`nonconvergence.key_file`](/no-mistakes/reference/global-config/#nonconvergence).
 
 ## `NO_MISTAKES_NO_UPDATE_CHECK`
 

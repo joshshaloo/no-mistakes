@@ -89,7 +89,7 @@ Follow-up review passes use the history to avoid re-reporting user-ignored findi
 
 ### Non-convergence signal
 
-After each review round beyond the first, no-mistakes can record one advisory judgment on the run: whether the fixes already applied on this run have failed to settle the underlying cause behind the current finding, so that fixing again would prop up a design that keeps producing defects rather than close an independent defect.
+After each review round beyond the first that reports a finding, no-mistakes can record an advisory judgment on the run: whether the fixes already applied on this run have failed to settle the underlying cause behind the current finding, so that fixing again would prop up a design that keeps producing defects rather than close an independent defect. The run retains the latest successful measurement.
 It is off by default, it changes nothing about the review step - no finding, no action, no risk level, no gate, no exit code - and it stays silent rather than guessing whenever it cannot answer.
 You read it in `no-mistakes axi status` and decide what to do about it.
 Configuration and the fail-silent contract are owned by [`nonconvergence`](/no-mistakes/reference/global-config/#nonconvergence).

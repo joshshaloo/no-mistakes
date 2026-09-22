@@ -18,9 +18,10 @@
 //
 // When the detector is not configured, the key cannot be resolved, the HTTP call
 // errors or times out, the response body is malformed, the expected answer is
-// missing, or the run has only one round, the detector emits nothing at all and
-// the pipeline behaves byte-identically to a build without it. It never emits a
-// guessed or default value, never blocks, never extends a step beyond its short
+// missing, the current round has no finding, or the run has only one round, the
+// detector emits nothing at all and the pipeline behaves byte-identically to a
+// build without it. It never emits a guessed or default value, never blocks,
+// never extends a step beyond its short
 // bounded timeout, and never turns an absent answer into "converging" - absence
 // of the signal means "not measured", not "measured and fine".
 //
