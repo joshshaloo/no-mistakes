@@ -180,6 +180,50 @@ func TestFindPinnedNodeInstall_ResolvesViaMiseLayout(t *testing.T) {
 	}
 }
 
+func TestFindPinnedNodeInstall_WindowsManagerLayouts(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("MISE_DATA_DIR", filepath.Join(root, "mise"))
+	t.Setenv("NVM_HOME", filepath.Join(root, "nvm"))
+	t.Setenv("NVM_DIR", filepath.Join(root, "ignored-nvm-dir"))
+	t.Setenv("VOLTA_HOME", filepath.Join(root, "volta"))
+	t.Setenv("FNM_DIR", filepath.Join(root, "fnm"))
+	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
+
+	cases := []struct {
+		manager string
+		binDir  string
+	}{
+		{"mise", filepath.Join(root, "mise", "installs", "node", "20.19.0")},
+		{"nvm", filepath.Join(root, "nvm", "v20.19.0")},
+		{"volta", filepath.Join(root, "volta", "tools", "image", "node", "20.19.0")},
+		{"fnm", filepath.Join(root, "fnm", "node-versions", "v20.19.0", "installation")},
+		{"asdf", filepath.Join(root, "asdf", "installs", "nodejs", "20.19.0", "bin")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.manager, func(t *testing.T) {
+			for _, other := range cases {
+				if err := os.RemoveAll(other.binDir); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.MkdirAll(tc.binDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(tc.binDir, "node.exe"), []byte("node"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			binDir, matched, manager, _, err := findPinnedNodeInstallForOS([]int{20, 19, 0}, "windows")
+			if err != nil {
+				t.Fatalf("resolve Windows %s layout: %v", tc.manager, err)
+			}
+			if binDir != tc.binDir || matched != "20.19.0" || manager != tc.manager {
+				t.Fatalf("got bin=%q version=%q manager=%q, want %q, 20.19.0, %q", binDir, matched, manager, tc.binDir, tc.manager)
+			}
+		})
+	}
+}
+
 func TestFindPinnedNodeInstall_PicksHighestMatchingForPartialPin(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("MISE_DATA_DIR", root)

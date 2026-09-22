@@ -161,7 +161,7 @@ type nodeVersionManager struct {
 	name          string
 	installsDir   func() (string, bool) // returns install root, and false if the manager is not configured on this host
 	dirHasVPrefix bool
-	binSubpath    []string // path segments from the version directory to its bin directory
+	binSubpath    []string // path segments from the version directory to its executable directory
 }
 
 func homeDir() (string, bool) {
@@ -185,7 +185,19 @@ func envOrHomeSubpath(envVar string, homeSubpath ...string) func() (string, bool
 	}
 }
 
-func nodeVersionManagers() []nodeVersionManager {
+func nodeVersionManagersForOS(goos string) []nodeVersionManager {
+	windows := goos == "windows"
+	unixBin := []string{"bin"}
+	miseBin := unixBin
+	nvmBin := unixBin
+	voltaBin := unixBin
+	fnmBin := []string{"installation", "bin"}
+	if windows {
+		miseBin = nil
+		nvmBin = nil
+		voltaBin = nil
+		fnmBin = []string{"installation"}
+	}
 	return []nodeVersionManager{
 		{
 			name: "mise",
@@ -196,11 +208,17 @@ func nodeVersionManagers() []nodeVersionManager {
 				}
 				return filepath.Join(root, "installs", "node"), true
 			},
-			binSubpath: []string{"bin"},
+			binSubpath: miseBin,
 		},
 		{
 			name: "nvm",
 			installsDir: func() (string, bool) {
+				if windows {
+					if root := os.Getenv("NVM_HOME"); root != "" {
+						return root, true
+					}
+					return envOrHomeSubpath("NVM_DIR", ".nvm")()
+				}
 				root, ok := envOrHomeSubpath("NVM_DIR", ".nvm")()
 				if !ok {
 					return "", false
@@ -208,7 +226,7 @@ func nodeVersionManagers() []nodeVersionManager {
 				return filepath.Join(root, "versions", "node"), true
 			},
 			dirHasVPrefix: true,
-			binSubpath:    []string{"bin"},
+			binSubpath:    nvmBin,
 		},
 		{
 			name: "volta",
@@ -219,7 +237,7 @@ func nodeVersionManagers() []nodeVersionManager {
 				}
 				return filepath.Join(root, "tools", "image", "node"), true
 			},
-			binSubpath: []string{"bin"},
+			binSubpath: voltaBin,
 		},
 		{
 			name: "fnm",
@@ -231,7 +249,7 @@ func nodeVersionManagers() []nodeVersionManager {
 				return filepath.Join(root, "node-versions"), true
 			},
 			dirHasVPrefix: true,
-			binSubpath:    []string{"installation", "bin"},
+			binSubpath:    fnmBin,
 		},
 		{
 			name: "asdf",
@@ -242,24 +260,34 @@ func nodeVersionManagers() []nodeVersionManager {
 				}
 				return filepath.Join(root, "installs", "nodejs"), true
 			},
-			binSubpath: []string{"bin"},
+			binSubpath: unixBin,
 		},
 	}
 }
 
-func nodeBinaryName() string {
-	if isWindowsExec() {
+func nodeBinaryNameForOS(goos string) string {
+	if goos == "windows" {
 		return "node.exe"
 	}
 	return "node"
 }
 
+func nodeBinaryName() string {
+	return nodeBinaryNameForOS(runtime.GOOS)
+}
+
 // findPinnedNodeInstall searches every known Node version manager's install
-// directory for a Node build matching declaredParts, and returns the bin
-// directory of the highest matching version found. It never invokes a
+// directory for a Node build matching declaredParts, and returns the
+// platform-specific executable directory of the highest matching version
+// found. Manager layouts differ on Windows, where several archives place
+// node.exe at the version root. It never invokes a
 // version-manager CLI and never installs anything - it only looks at what is
 // already on disk, so it stays fast and side-effect free.
 func findPinnedNodeInstall(declaredParts []int) (binDir, matchedVersion, managerName string, checked []string, err error) {
+	return findPinnedNodeInstallForOS(declaredParts, runtime.GOOS)
+}
+
+func findPinnedNodeInstallForOS(declaredParts []int, goos string) (binDir, matchedVersion, managerName string, checked []string, err error) {
 	type candidate struct {
 		parts   []int
 		binDir  string
@@ -267,7 +295,7 @@ func findPinnedNodeInstall(declaredParts []int) (binDir, matchedVersion, manager
 	}
 	var best *candidate
 
-	for _, mgr := range nodeVersionManagers() {
+	for _, mgr := range nodeVersionManagersForOS(goos) {
 		root, ok := mgr.installsDir()
 		if !ok {
 			continue
@@ -291,8 +319,8 @@ func findPinnedNodeInstall(declaredParts []int) (binDir, matchedVersion, manager
 				continue
 			}
 			binDirPath := filepath.Join(append([]string{root, name}, mgr.binSubpath...)...)
-			nodeBin := filepath.Join(binDirPath, nodeBinaryName())
-			if fi, statErr := os.Stat(nodeBin); statErr != nil || !pathCandidateUsable(runtime.GOOS, nodeBin, fi) {
+			nodeBin := filepath.Join(binDirPath, nodeBinaryNameForOS(goos))
+			if fi, statErr := os.Stat(nodeBin); statErr != nil || !pathCandidateUsable(goos, nodeBin, fi) {
 				continue
 			}
 			cand := candidate{parts: parts, binDir: binDirPath, manager: mgr.name}
