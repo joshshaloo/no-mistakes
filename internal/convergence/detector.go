@@ -96,6 +96,9 @@ func New(s Settings) *Detector {
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
+	if timeout > MaximumTimeout {
+		return nil
+	}
 	return &Detector{
 		endpoint: strings.TrimRight(baseURL, "/") + "/v1/systemone",
 		key:      key,

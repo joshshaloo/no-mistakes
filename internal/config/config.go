@@ -1033,7 +1033,7 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
-	if err := validateNonconvergenceRaw(raw.Nonconvergence); err != nil {
+	if err := validateNonconvergenceRaw(&raw.Nonconvergence); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	cfg.Nonconvergence = raw.Nonconvergence
@@ -1042,16 +1042,26 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 }
 
 // validateNonconvergenceRaw rejects an unparseable timeout at load time rather
-// than silently falling back, so a typo in the config is visible. Note this is
-// the ONLY place the non-convergence config can fail: once loaded, every
-// runtime failure of the detector itself is silent by design.
-func validateNonconvergenceRaw(raw NonconvergenceRaw) error {
+// than silently falling back, so a typo in the config is visible. A valid but
+// unsafe timeout disables this advisory signal without failing global config.
+func validateNonconvergenceRaw(raw *NonconvergenceRaw) error {
 	if raw.Timeout == nil || strings.TrimSpace(*raw.Timeout) == "" {
 		return nil
 	}
-	if _, err := parsePositiveDuration("nonconvergence.timeout", *raw.Timeout); err != nil {
+	timeout, err := parsePositiveDuration("nonconvergence.timeout", *raw.Timeout)
+	if err != nil {
 		return err
 	}
+	if timeout <= convergence.MaximumTimeout {
+		return nil
+	}
+
+	slog.Info("invalid nonconvergence.timeout; signal disabled",
+		"configured_timeout", timeout,
+		"maximum_timeout", convergence.MaximumTimeout)
+	disabled := false
+	raw.Enabled = &disabled
+	raw.Timeout = nil
 	return nil
 }
 
@@ -1265,7 +1275,7 @@ func nonconvergenceDefaults() Nonconvergence {
 }
 
 // applyNonconvergenceOverrides applies non-nil raw values onto resolved
-// defaults. The timeout was already validated by validateNonconvergenceRaw.
+// defaults.
 func applyNonconvergenceOverrides(dst *Nonconvergence, src *NonconvergenceRaw) {
 	if src.Enabled != nil {
 		dst.Enabled = *src.Enabled
@@ -1281,6 +1291,10 @@ func applyNonconvergenceOverrides(dst *Nonconvergence, src *NonconvergenceRaw) {
 	}
 	if src.Timeout != nil && strings.TrimSpace(*src.Timeout) != "" {
 		if d, err := parsePositiveDuration("nonconvergence.timeout", *src.Timeout); err == nil {
+			if d > convergence.MaximumTimeout {
+				dst.Enabled = false
+				return
+			}
 			dst.Timeout = d
 		}
 	}

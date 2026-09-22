@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +91,59 @@ func TestNonconvergenceRejectsAnUnparseableTimeoutAtLoadTime(t *testing.T) {
 	}
 	if _, err := LoadGlobal(path); err == nil {
 		t.Fatal("an unparseable timeout must fail at load time rather than silently falling back")
+	}
+}
+
+func TestNonconvergenceTimeoutAboveMaximumDisablesSignalWithoutFailingLoad(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	configured := convergence.MaximumTimeout + time.Second
+	contents := "nonconvergence:\n  enabled: true\n  timeout: " + configured.String() + "\n"
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	global, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("an advisory detector timeout must not fail global config loading: %v", err)
+	}
+	cfg := Merge(global, &RepoConfig{})
+	settings := cfg.ConvergenceSettings()
+	if settings.Enabled {
+		t.Fatal("an above-maximum timeout must disable the detector")
+	}
+	t.Setenv("OPENROUTER_API_KEY", "configured-for-test")
+	if detector := convergence.New(settings); detector != nil {
+		t.Fatal("disabled settings must not produce a live detector")
+	}
+	for _, want := range []string{configured.String(), convergence.MaximumTimeout.String()} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("rejection log %q does not name %q", logs.String(), want)
+		}
+	}
+}
+
+func TestNonconvergenceTimeoutAtMaximumIsAccepted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := "nonconvergence:\n  enabled: true\n  timeout: " + convergence.MaximumTimeout.String() + "\n"
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	global, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("load global: %v", err)
+	}
+	cfg := Merge(global, &RepoConfig{})
+	if !cfg.Nonconvergence.Enabled {
+		t.Fatal("the maximum timeout must remain enabled")
+	}
+	if cfg.Nonconvergence.Timeout != convergence.MaximumTimeout {
+		t.Fatalf("timeout = %v, want %v", cfg.Nonconvergence.Timeout, convergence.MaximumTimeout)
 	}
 }
 

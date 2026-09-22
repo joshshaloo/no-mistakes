@@ -23,6 +23,7 @@ const (
 	DefaultModel   = "jev-1.13"
 	DefaultBaseURL = "https://openrouter.ai/api"
 	DefaultTimeout = 10 * time.Second
+	MaximumTimeout = 30 * time.Second
 )
 
 // Settings is the resolved, host-owned configuration for the detector. It is
