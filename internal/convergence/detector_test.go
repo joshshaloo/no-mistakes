@@ -303,8 +303,8 @@ func TestObserveEmitsNothingWhenTheExpectedAnswerIsMissing(t *testing.T) {
 	}
 }
 
-func TestObserveValidatesEveryResponseFieldBeforeEmitting(t *testing.T) {
-	valid := `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","score":0.4,"confidence":0.8}},"usage":{"input_tokens":100,"output_tokens":20}}`
+func TestObserveValidatesEveryDecisionBearingResponseFieldBeforeEmitting(t *testing.T) {
+	valid := `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","score":0.4,"confidence":0.8}}}`
 	tests := []struct {
 		name string
 		body string
@@ -327,11 +327,6 @@ func TestObserveValidatesEveryResponseFieldBeforeEmitting(t *testing.T) {
 		{name: "secondary confidence missing", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","score":0.4}},"usage":{"input_tokens":100}}`},
 		{name: "secondary confidence wrong type", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","score":0.4,"confidence":"high"}},"usage":{"input_tokens":100}}`},
 		{name: "secondary confidence out of range", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9},"causal_themes":{"type":"score","score":0.4,"confidence":2}},"usage":{"input_tokens":100}}`},
-		{name: "usage missing", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9}}}`},
-		{name: "usage wrong type", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9}},"usage":"unknown"}`},
-		{name: "usage figure missing", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9}},"usage":{"input_tokens":null}}`},
-		{name: "usage figure wrong type", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9}},"usage":{"input_tokens":"many"}}`},
-		{name: "usage figure out of range", body: `{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.7,"confidence":0.9}},"usage":{"input_tokens":-1}}`},
 	}
 
 	for _, tt := range tests {
@@ -348,6 +343,27 @@ func TestObserveValidatesEveryResponseFieldBeforeEmitting(t *testing.T) {
 			}
 			if sig != nil || err == nil {
 				t.Fatalf("malformed response must emit nothing, got sig=%v err=%v", sig, err)
+			}
+		})
+	}
+}
+
+func TestObserveIgnoresUsageTelemetry(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage string
+	}{
+		{name: "absent"},
+		{name: "garbage", usage: `,"usage":{"input_tokens":"many","bogus":-1}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d, _ := okDetector(t, func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(`{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.6,"confidence":0.9}}` + tt.usage + `}`))
+			})
+			sig, err := d.Observe(context.Background(), twoRoundObservation())
+			if err != nil || sig == nil || sig.Probability != 0.6 {
+				t.Fatalf("usage telemetry affected decision: sig=%+v err=%v", sig, err)
 			}
 		})
 	}

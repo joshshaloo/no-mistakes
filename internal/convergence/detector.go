@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -230,15 +229,6 @@ func validateResponse(decoded response) (answer, *answer, string, error) {
 	if model == "" {
 		return answer{}, nil, "", fmt.Errorf("response carried no responding model version")
 	}
-	if len(decoded.Usage) == 0 {
-		return answer{}, nil, "", fmt.Errorf("response carried no usage figures")
-	}
-	for name, value := range decoded.Usage {
-		if value == nil || *value < 0 || math.Trunc(*value) != *value {
-			return answer{}, nil, "", fmt.Errorf("response carried invalid usage figure %q", name)
-		}
-	}
-
 	primary, ok := decoded.Answers[questionNonConvergence]
 	if !ok || primary.Type != "noul" || primary.Noul == nil || !unitInterval(*primary.Noul) || primary.Confidence == nil || !unitInterval(*primary.Confidence) {
 		return answer{}, nil, "", fmt.Errorf("response carried invalid %s answer", questionNonConvergence)
@@ -278,9 +268,8 @@ type noulCriteria struct {
 }
 
 type response struct {
-	Model   string              `json:"model"`
-	Answers map[string]answer   `json:"answers"`
-	Usage   map[string]*float64 `json:"usage"`
+	Model   string            `json:"model"`
+	Answers map[string]answer `json:"answers"`
 }
 
 type answer struct {
