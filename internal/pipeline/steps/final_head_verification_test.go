@@ -90,6 +90,45 @@ func TestPipelinePostTestDocumentFixFailureFailsBeforePush(t *testing.T) {
 	}
 }
 
+func TestFinalHeadVerification_ConfiguredTestUsesPinnedNode(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	writeFile(t, filepath.Join(dir, ".nvmrc"), "20.19.0\n")
+
+	root := t.TempDir()
+	t.Setenv("MISE_DATA_DIR", root)
+	t.Setenv("NVM_DIR", filepath.Join(root, "nvm"))
+	t.Setenv("VOLTA_HOME", filepath.Join(root, "volta"))
+	t.Setenv("FNM_DIR", filepath.Join(root, "fnm"))
+	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
+	installBin := filepath.Join(root, "installs", "node", "20.19.0", "bin")
+	if err := os.MkdirAll(installBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeNode := filepath.Join(installBin, nodeBinaryName())
+	writeExecutable(t, fakeNode)
+	whichLog := filepath.Join(dir, "final-node.log")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
+		Test: "command -v node > " + whichLog,
+	})
+	sctx.Shared = &pipeline.RunShared{}
+	completeTestStepWithVerifiedTree(t, sctx, `{"findings":[],"summary":"tests passed"}`)
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("post-test change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFinalHeadAfterPostTestFixes(sctx); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := os.ReadFile(whichLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(resolved)) != fakeNode {
+		t.Fatalf("final verification used Node %q, want %q", strings.TrimSpace(string(resolved)), fakeNode)
+	}
+}
+
 func TestFinalHeadVerification_PostTestDocumentFixFailureRecordsAndFailsBeforePush(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

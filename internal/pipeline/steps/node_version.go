@@ -10,6 +10,9 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // declaredNodeVersion reads the repository's own pinned Node version, checking
@@ -93,12 +96,11 @@ func toolVersionsNodeLine(content string) (string, bool) {
 
 var exactVersionPattern = regexp.MustCompile(`^\d+(\.\d+){0,2}$`)
 
-// normalizeExactVersionParts accepts an exact (not ranged, not aliased)
-// version declaration such as "20.19.0", "v20.19.0", or "20" and returns its
-// numeric components. Anything with range operators (^, ~, >=, x, *) or a
-// named alias ("lts/*", "system", "latest") returns ok=false: no-mistakes
-// cannot deterministically resolve those to one installed Node without either
-// a network lookup or guessing, so it must refuse rather than guess.
+// normalizeExactVersionParts accepts a full or partial numeric version
+// declaration such as "20.19.0", "v20.19.0", or "20" and returns its numeric
+// components. Partial declarations resolve to the highest matching installed
+// version. Anything with range operators (^, ~, >=, x, *) or a named alias
+// ("lts/*", "system", "latest") returns ok=false.
 func normalizeExactVersionParts(raw string) (parts []int, ok bool) {
 	v := strings.TrimSpace(raw)
 	v = strings.TrimPrefix(v, "v")
@@ -290,7 +292,7 @@ func findPinnedNodeInstall(declaredParts []int) (binDir, matchedVersion, manager
 			}
 			binDirPath := filepath.Join(append([]string{root, name}, mgr.binSubpath...)...)
 			nodeBin := filepath.Join(binDirPath, nodeBinaryName())
-			if fi, statErr := os.Stat(nodeBin); statErr != nil || fi.IsDir() {
+			if fi, statErr := os.Stat(nodeBin); statErr != nil || !pathCandidateUsable(runtime.GOOS, nodeBin, fi) {
 				continue
 			}
 			cand := candidate{parts: parts, binDir: binDirPath, manager: mgr.name}
@@ -306,38 +308,51 @@ func findPinnedNodeInstall(declaredParts []int) (binDir, matchedVersion, manager
 	return best.binDir, versionPartsString(best.parts), best.manager, checked, nil
 }
 
-// pathNodeVersion returns the exact version reported by whatever "node" is
-// first on PATH, or ok=false if node is not on PATH or its version could not
-// be determined.
-func pathNodeVersion() (parts []int, ok bool) {
-	nodePath, err := exec.LookPath(nodeBinaryName())
-	if err != nil {
-		return nil, false
+func pathNodeVersion(sctx *pipeline.StepContext) (parts []int, nodePath string, ok bool) {
+	if len(sctx.Env) > 0 {
+		nodePath = findInCustomPath(sctx.WorkDir, sctx.Env, nodeBinaryName())
+		if nodePath == "" {
+			if _, hasCustomPath := envValue(sctx.Env, "PATH"); hasCustomPath {
+				return nil, "", false
+			}
+		}
 	}
-	out, err := exec.Command(nodePath, "--version").Output()
+	if nodePath == "" {
+		var err error
+		nodePath, err = exec.LookPath(nodeBinaryName())
+		if err != nil {
+			return nil, "", false
+		}
+	}
+	absolutePath, err := filepath.Abs(nodePath)
 	if err != nil {
-		return nil, false
+		return nil, "", false
+	}
+	fi, err := os.Stat(absolutePath)
+	if err != nil || !pathCandidateUsable(runtime.GOOS, absolutePath, fi) {
+		return nil, "", false
+	}
+	cmd := stepCmd(sctx, absolutePath, "--version")
+	out, err := shellenv.OutputShellCommand(cmd)
+	if err != nil {
+		return nil, "", false
 	}
 	parts, ok = normalizeExactVersionParts(strings.TrimSpace(string(out)))
-	return parts, ok
+	return parts, absolutePath, ok
 }
 
-// nodeVersionOverride resolves the environment override needed to run
-// workDir's tooling under the Node version the repository itself pins,
-// rather than whatever Node the host's global configuration happens to
-// provide.
+// nodeVersionOverride resolves the environment override needed to run the
+// worktree's tooling under its declared Node version. A full pin may use the
+// first PATH executable only after a supervised version probe proves an exact
+// match. Otherwise full and partial numeric pins resolve against executable
+// manager installs, with partial pins choosing the highest match.
 //
-// It returns (nil, "", nil) when the repository declares no Node pin (the
-// common case for a non-Node repository, or a Node repository with no
-// version file): there is nothing to enforce, so the step proceeds unchanged.
-//
-// It returns a non-nil error whenever a pin IS declared but honoring it is
-// not possible in this execution context - an unresolvable range/alias, or no
-// matching install found on the host. That is the loud-failure path: the
-// caller must refuse to run rather than silently falling back to the host's
-// default Node, which is exactly the defect this exists to close.
-func nodeVersionOverride(workDir string) (env []string, note string, err error) {
-	declared, source, err := declaredNodeVersion(workDir)
+// It returns (nil, "", nil) when the repository declares no Node pin. Every
+// successful resolution returns a note naming the declaration source and exact
+// selected version. Ranges, aliases, and unmatched pins return an error so the
+// caller cannot silently fall back to another Node.
+func nodeVersionOverride(sctx *pipeline.StepContext) (env []string, note string, err error) {
+	declared, source, err := declaredNodeVersion(sctx.WorkDir)
 	if err != nil {
 		return nil, "", fmt.Errorf("determine repository Node pin: %w", err)
 	}
@@ -352,8 +367,10 @@ func nodeVersionOverride(workDir string) (env []string, note string, err error) 
 			declared, source)
 	}
 
-	if hostParts, ok := pathNodeVersion(); ok && versionSatisfies(declaredParts, hostParts) {
-		return nil, fmt.Sprintf("host Node v%s already satisfies the repository's pin (%s: %s)", versionPartsString(hostParts), source, declared), nil
+	if len(declaredParts) == 3 {
+		if hostParts, hostPath, ok := pathNodeVersion(sctx); ok && compareVersionParts(declaredParts, hostParts) == 0 {
+			return nil, fmt.Sprintf("resolved repository Node pin %q from %s to exact v%s using executable %s", declared, source, versionPartsString(hostParts), hostPath), nil
+		}
 	}
 
 	binDir, matched, manager, checked, findErr := findPinnedNodeInstall(declaredParts)
@@ -364,11 +381,25 @@ func nodeVersionOverride(workDir string) (env []string, note string, err error) 
 	}
 
 	currentPath := os.Getenv("PATH")
+	if stepPath, ok := envValue(sctx.Env, "PATH"); ok {
+		currentPath = stepPath
+	}
 	newPath := binDir
 	if currentPath != "" {
 		newPath = binDir + string(os.PathListSeparator) + currentPath
 	}
-	return []string{"PATH=" + newPath}, fmt.Sprintf("using pinned Node v%s from %s (repository pins %s via %s)", matched, manager, declared, source), nil
+	return []string{"PATH=" + newPath}, fmt.Sprintf("resolved repository Node pin %q from %s to exact v%s from %s", declared, source, matched, manager), nil
+}
+
+func runConfiguredTestCommand(sctx *pipeline.StepContext, testCmd string) (string, int, error) {
+	nodeEnv, nodeNote, err := nodeVersionOverride(sctx)
+	if err != nil {
+		return "", -1, fmt.Errorf("resolve repository-pinned Node version: %w", err)
+	}
+	if nodeNote != "" {
+		sctx.Log(nodeNote)
+	}
+	return runConfiguredStepShellCommandWithExtraEnv(sctx, configuredCommandTest, testCmd, nodeEnv)
 }
 
 func isWindowsExec() bool {

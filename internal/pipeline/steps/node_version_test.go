@@ -1,9 +1,14 @@
 package steps
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
 func TestDeclaredNodeVersion_NoPinIsNotAnError(t *testing.T) {
@@ -223,7 +228,7 @@ func TestFindPinnedNodeInstall_NoneFoundFailsWithCheckedList(t *testing.T) {
 
 func TestNodeVersionOverride_NoPinIsNoop(t *testing.T) {
 	dir := t.TempDir()
-	env, note, err := nodeVersionOverride(dir)
+	env, note, err := nodeVersionOverride(nodeVersionTestContext(dir))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -236,7 +241,7 @@ func TestNodeVersionOverride_UnresolvableRangeFailsLoudly(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, ".nvmrc"), "lts/*\n")
 
-	_, _, err := nodeVersionOverride(dir)
+	_, _, err := nodeVersionOverride(nodeVersionTestContext(dir))
 	if err == nil {
 		t.Fatal("expected an error for an alias/range pin no-mistakes cannot resolve")
 	}
@@ -254,7 +259,7 @@ func TestNodeVersionOverride_NoMatchingInstallFailsLoudly(t *testing.T) {
 	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
 	t.Setenv("PATH", root) // no node on PATH either
 
-	_, _, err := nodeVersionOverride(dir)
+	_, _, err := nodeVersionOverride(nodeVersionTestContext(dir))
 	if err == nil {
 		t.Fatal("expected an error when the pinned version cannot be found anywhere on the host")
 	}
@@ -278,7 +283,7 @@ func TestNodeVersionOverride_ResolvesAndPrependsBinDir(t *testing.T) {
 	}
 	writeExecutable(t, filepath.Join(installBin, nodeBinaryName()))
 
-	env, note, err := nodeVersionOverride(dir)
+	env, note, err := nodeVersionOverride(nodeVersionTestContext(dir))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -292,6 +297,97 @@ func TestNodeVersionOverride_ResolvesAndPrependsBinDir(t *testing.T) {
 	if env[0][:len(wantPrefix)] != wantPrefix {
 		t.Fatalf("env[0] = %q, want prefix %q", env[0], wantPrefix)
 	}
+}
+
+func TestFindPinnedNodeInstall_RejectsNonExecutableCandidate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix executable mode test")
+	}
+	root := t.TempDir()
+	t.Setenv("MISE_DATA_DIR", root)
+	t.Setenv("NVM_DIR", filepath.Join(root, "nvm"))
+	t.Setenv("VOLTA_HOME", filepath.Join(root, "volta"))
+	t.Setenv("FNM_DIR", filepath.Join(root, "fnm"))
+	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
+	bin := filepath.Join(root, "installs", "node", "20.19.0", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, nodeBinaryName()), []byte("node"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, err := findPinnedNodeInstall([]int{20, 19, 0}); err == nil {
+		t.Fatal("expected a non-executable Node candidate to be rejected")
+	}
+}
+
+func TestNodeVersionOverride_ProvesExactHostNode(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".nvmrc"), "20.19.0\n")
+	hostBin := t.TempDir()
+	writeExecutable(t, filepath.Join(hostBin, nodeBinaryName()))
+	t.Setenv("PATH", hostBin)
+
+	env, note, err := nodeVersionOverride(nodeVersionTestContext(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env != nil {
+		t.Fatalf("exact proven host Node should need no override, got %v", env)
+	}
+	if !strings.Contains(note, `"20.19.0" from .nvmrc to exact v20.19.0`) || !strings.Contains(note, hostBin) {
+		t.Fatalf("resolution note does not state declaration, source, exact version, and executable: %q", note)
+	}
+}
+
+func TestNodeVersionOverride_PartialPinUsesHighestManagedInstallAndLogsResolution(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, ".nvmrc"), "20\n")
+	root := t.TempDir()
+	t.Setenv("MISE_DATA_DIR", root)
+	t.Setenv("NVM_DIR", filepath.Join(root, "nvm"))
+	t.Setenv("VOLTA_HOME", filepath.Join(root, "volta"))
+	t.Setenv("FNM_DIR", filepath.Join(root, "fnm"))
+	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
+	t.Setenv("PATH", t.TempDir())
+	for _, version := range []string{"20.10.0", "20.19.0"} {
+		bin := filepath.Join(root, "installs", "node", version, "bin")
+		if err := os.MkdirAll(bin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeExecutable(t, filepath.Join(bin, nodeBinaryName()))
+	}
+
+	env, note, err := nodeVersionOverride(nodeVersionTestContext(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(env) != 1 || !strings.HasPrefix(env[0], "PATH="+filepath.Join(root, "installs", "node", "20.19.0", "bin")) {
+		t.Fatalf("partial pin override = %v", env)
+	}
+	if !strings.Contains(note, `"20" from .nvmrc to exact v20.19.0`) {
+		t.Fatalf("partial resolution is not visible in note: %q", note)
+	}
+}
+
+func TestPathNodeVersion_UsesStepCancellation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-specific")
+	}
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "node"), []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	sctx := &pipeline.StepContext{Ctx: ctx, WorkDir: t.TempDir(), Env: []string{"PATH=" + bin}}
+	if _, _, ok := pathNodeVersion(sctx); ok {
+		t.Fatal("expected cancelled supervised probe to fail")
+	}
+}
+
+func nodeVersionTestContext(workDir string) *pipeline.StepContext {
+	return &pipeline.StepContext{Ctx: context.Background(), WorkDir: workDir}
 }
 
 func writeFile(t *testing.T, path, content string) {
