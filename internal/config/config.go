@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/convergence"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"gopkg.in/yaml.v3"
@@ -66,6 +67,12 @@ type GlobalConfig struct {
 	Commit       CommitRaw
 	Intent       IntentRaw
 	Test         TestRaw
+	// Nonconvergence configures the round-over-round non-convergence signal.
+	// It is global-only on purpose: it enables sending run state to a
+	// third-party service and names the file a secret is read from, so a
+	// pushed .no-mistakes.yaml must not be able to turn it on or aim it
+	// somewhere else. See internal/convergence's package doc.
+	Nonconvergence NonconvergenceRaw
 }
 
 // globalConfigRaw is the on-disk YAML representation with duration as string.
@@ -85,6 +92,7 @@ type globalConfigRaw struct {
 	Commit               CommitRaw           `yaml:"commit"`
 	Intent               IntentRaw           `yaml:"intent"`
 	Test                 TestRaw             `yaml:"test"`
+	Nonconvergence       NonconvergenceRaw   `yaml:"nonconvergence"`
 }
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -211,6 +219,9 @@ type Config struct {
 	Intent               Intent
 	Test                 Test
 	Document             Document
+	// Nonconvergence is the resolved, host-owned non-convergence signal
+	// config. It never comes from a repo config (see GlobalConfig).
+	Nonconvergence Nonconvergence
 	// DisableProjectSettings is the resolved, trusted-only opt-out (see the
 	// RepoConfig field). When true, gate agents are launched with their
 	// project-level settings/instructions suppressed; the daemon fails the run
@@ -249,6 +260,35 @@ type Test struct {
 type Evidence struct {
 	StoreInRepo bool
 	Dir         string
+}
+
+// NonconvergenceRaw is the YAML representation of the round-over-round
+// non-convergence signal. Pointer fields distinguish "not set" (nil) from
+// explicit zero/false values.
+type NonconvergenceRaw struct {
+	Enabled *bool   `yaml:"enabled"`
+	Model   *string `yaml:"model"`
+	BaseURL *string `yaml:"base_url"`
+	KeyFile *string `yaml:"key_file"`
+	Timeout *string `yaml:"timeout"`
+}
+
+// Nonconvergence is the resolved non-convergence signal config.
+//
+// Enabled defaults to false, and even when it is true the detector stays silent
+// unless a key resolves from the environment or KeyFile. A host that configures
+// nothing therefore behaves exactly as it does today, with no new required
+// setup and no new failure mode. The signal never gates anything; see
+// internal/convergence's package doc for the fail-silent contract.
+type Nonconvergence struct {
+	Enabled bool
+	Model   string
+	BaseURL string
+	// KeyFile points at an env file the operator already owns. no-mistakes
+	// never writes it, never accepts the key as a command argument, and never
+	// logs either the key or the file's contents.
+	KeyFile string
+	Timeout time.Duration
 }
 
 // IntentRaw is the YAML representation of user-intent extraction settings.
@@ -404,6 +444,28 @@ intent:
   threshold: 0.2
   slack_days: 3
   # disabled_readers: [codex]
+
+# Round-over-round non-convergence signal. Off by default and optional: when
+# enabled, after each review round beyond the first no-mistakes asks a small
+# judgment model whether the fixes already applied on this run have failed to
+# settle the underlying cause, and records the probability on the run.
+#
+# It is a SIGNAL, never a gate. It changes no finding, no risk level, no gate,
+# no CI behavior and no exit code; it only adds a field you can read in
+# "no-mistakes axi status". When it is off, misconfigured, or the service is
+# unreachable, it emits nothing and the pipeline behaves exactly as it does
+# without it.
+#
+# key_file points at an env file you already own (a line reading
+# OPENROUTER_API_KEY=...). The key is never a command argument and is never
+# logged. OPENROUTER_API_KEY in the daemon's environment is used first.
+# This setting is global-only; a repo's .no-mistakes.yaml cannot enable it.
+# nonconvergence:
+#   enabled: true
+#   key_file: ~/.config/openrouter.env
+#   model: jev-1.13
+#   base_url: https://openrouter.ai/api
+#   timeout: 10s
 
 # Test-step evidence artifacts (screenshots, recordings, logs the test step
 # gathers to demonstrate the change works). By default they are kept in a
@@ -971,8 +1033,26 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
+	if err := validateNonconvergenceRaw(raw.Nonconvergence); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	cfg.Nonconvergence = raw.Nonconvergence
 
 	return cfg, nil
+}
+
+// validateNonconvergenceRaw rejects an unparseable timeout at load time rather
+// than silently falling back, so a typo in the config is visible. Note this is
+// the ONLY place the non-convergence config can fail: once loaded, every
+// runtime failure of the detector itself is silent by design.
+func validateNonconvergenceRaw(raw NonconvergenceRaw) error {
+	if raw.Timeout == nil || strings.TrimSpace(*raw.Timeout) == "" {
+		return nil
+	}
+	if _, err := parsePositiveDuration("nonconvergence.timeout", *raw.Timeout); err != nil {
+		return err
+	}
+	return nil
 }
 
 // parseCITimeout interprets the ci_timeout config value. The keyword
@@ -1173,6 +1253,39 @@ func applyTestOverrides(dst *Test, src *TestRaw) {
 	}
 }
 
+// nonconvergenceDefaults returns the default non-convergence signal settings.
+// Off by default: a host that configured nothing gets exactly today's behavior.
+func nonconvergenceDefaults() Nonconvergence {
+	return Nonconvergence{
+		Enabled: false,
+		Model:   convergence.DefaultModel,
+		BaseURL: convergence.DefaultBaseURL,
+		Timeout: convergence.DefaultTimeout,
+	}
+}
+
+// applyNonconvergenceOverrides applies non-nil raw values onto resolved
+// defaults. The timeout was already validated by validateNonconvergenceRaw.
+func applyNonconvergenceOverrides(dst *Nonconvergence, src *NonconvergenceRaw) {
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+	if src.Model != nil && strings.TrimSpace(*src.Model) != "" {
+		dst.Model = strings.TrimSpace(*src.Model)
+	}
+	if src.BaseURL != nil && strings.TrimSpace(*src.BaseURL) != "" {
+		dst.BaseURL = strings.TrimSpace(*src.BaseURL)
+	}
+	if src.KeyFile != nil && strings.TrimSpace(*src.KeyFile) != "" {
+		dst.KeyFile = strings.TrimSpace(*src.KeyFile)
+	}
+	if src.Timeout != nil && strings.TrimSpace(*src.Timeout) != "" {
+		if d, err := parsePositiveDuration("nonconvergence.timeout", *src.Timeout); err == nil {
+			dst.Timeout = d
+		}
+	}
+}
+
 // autoFixDefaults returns the default auto-fix configuration.
 func autoFixDefaults() AutoFix {
 	return AutoFix{
@@ -1244,6 +1357,11 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	applyTestOverrides(&test, &global.Test)
 	applyTestOverrides(&test, &repo.Test)
 
+	// Global only: RepoConfig carries no nonconvergence field at all, so there
+	// is deliberately no repo override line here to remove by accident.
+	nonconvergence := nonconvergenceDefaults()
+	applyNonconvergenceOverrides(&nonconvergence, &global.Nonconvergence)
+
 	commit := Commit{FixMessage: DefaultFixMessageTemplate}
 	if global.Commit.FixMessage != nil {
 		commit.FixMessage = *global.Commit.FixMessage
@@ -1270,6 +1388,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Intent:               intent,
 		Test:                 test,
 		Document:             Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
+		Nonconvergence:       nonconvergence,
 		// repo is the EffectiveRepoConfig result, so this value is already
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
 		DisableProjectSettings: repo.DisableProjectSettings,
@@ -1284,4 +1403,20 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	}
 
 	return cfg
+}
+
+// ConvergenceSettings maps the resolved, host-owned config onto the detector's
+// settings. It is the single translation point between the config file and
+// internal/convergence, so the detector never reads config keys itself.
+func (c *Config) ConvergenceSettings() convergence.Settings {
+	if c == nil {
+		return convergence.Settings{}
+	}
+	return convergence.Settings{
+		Enabled: c.Nonconvergence.Enabled,
+		Model:   c.Nonconvergence.Model,
+		BaseURL: c.Nonconvergence.BaseURL,
+		KeyFile: c.Nonconvergence.KeyFile,
+		Timeout: c.Nonconvergence.Timeout,
+	}
 }

@@ -63,6 +63,13 @@ test:
   evidence:
     store_in_repo: false
     dir: .no-mistakes/evidence
+
+nonconvergence:
+  enabled: false
+  model: jev-1.13
+  base_url: https://openrouter.ai/api
+  key_file: ""
+  timeout: 10s
 ```
 
 ## Fields
@@ -384,6 +391,43 @@ Branch slashes become nested directories, unsafe branch characters are replaced,
 If `dir` is absolute, escapes the worktree, points into `.git`, crosses a symlink, or is ignored by Git, no-mistakes falls back to temporary evidence storage for that run.
 
 These are global defaults. Per-repo config can override either field.
+
+### nonconvergence
+
+Round-over-round non-convergence signal settings.
+When enabled, after each review round beyond the first no-mistakes asks a small judgment model one narrow question over the run's own history: have the fixes already applied on this run failed to settle the underlying cause behind the current finding, so that fixing again would prop up a design that keeps producing defects?
+The answer is recorded on the run as a probability and surfaced in `no-mistakes axi status`.
+
+**This is a signal, never a gate.**
+It does not change what parks a run, what the reviewer marks auto-fix or ask-user, what risk level a review assigns, what CI does, or any exit code.
+It adds a field you read and act on yourself.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                      | Type     | Default                        | Description                                                             |
+| -------------------------- | -------- | ------------------------------ | ----------------------------------------------------------------------- |
+| `nonconvergence.enabled`   | `bool`   | `false`                        | Enable the non-convergence signal                                       |
+| `nonconvergence.model`     | `string` | `jev-1.13`                     | Judgment model id; pin a version so a tuned threshold stays comparable   |
+| `nonconvergence.base_url`  | `string` | `https://openrouter.ai/api`    | Channel root; `/v1/systemone` is appended                               |
+| `nonconvergence.key_file`  | `string` | Empty                          | Path to an env file you already own that contains `OPENROUTER_API_KEY=`  |
+| `nonconvergence.timeout`   | `string` | `10s`                          | Upper bound on one detector call                                        |
+
+This block is **global only**.
+A repository's `.no-mistakes.yaml` cannot enable the signal, name the key file, or change `base_url`: enabling it sends run state to a third-party service, so a pushed branch must not be able to turn it on or aim it somewhere else.
+
+The API key is read from `OPENROUTER_API_KEY` (or `TYPESAFE_API_KEY`) in the daemon's environment first, and otherwise from `key_file`, which points at a file you already keep - no-mistakes never creates one.
+A leading `~/` in `key_file` is expanded.
+The key is never accepted as a command argument and is never logged.
+
+**It fails silent, on purpose.**
+A guard fails safe by refusing; this signal fails safe by staying quiet.
+When the feature is off, no key resolves, the call errors or times out, the response is malformed, the expected answer is missing, or the run never went past its first round, no-mistakes records nothing and the pipeline behaves exactly as it does without the feature.
+An absent signal means "not measured"; it never means "converging".
+A signal you did not get is not evidence that a run is healthy.
+
+The recorded probability and the exact responding model version are both stored, so a threshold can be tuned later without re-running anything and a decision can be traced back to the model version that produced it.
 
 ## Environment variables
 
