@@ -144,6 +144,12 @@ Broad regression belongs in remote CI and remains mandatory before a PR is ready
 no-mistakes does not guess whether an arbitrary shell string is "too broad" - the contract is documented and dogfooded, not enforced with language- or filename-specific heuristics.
 
 When set, the test step runs this exact command first as the baseline and checks the exit code.
+When the repository declares a Node version, no-mistakes runs this command under that version instead of silently using the daemon host's default Node. It checks declarations in this precedence order: `.nvmrc`, `.node-version`, the first `node` or `nodejs` entry in `.tool-versions`, `package.json` `volta.node`, then `package.json` `engines.node`. Full numeric pins resolve exactly; partial numeric pins such as `20` or `20.19` select the highest matching installed version. Ranges and aliases such as `^20`, `20.x`, and `lts/*` are ambiguous without a network lookup and fail the Test step.
+
+Resolution uses only executable Node installations already on the host: a matching `PATH` executable for a full pin, or installs found directly under mise, nvm, Volta, fnm, and asdf roots. Every candidate's reported version is verified before use. no-mistakes does not invoke a version-manager CLI or install Node; if no installed version matches, the Test step fails before running the command. A successful match prepends that installation's executable directory to `PATH` only for this command. The same rule applies when `commands.test` is repeated during final-head re-verification. Repositories without a Node declaration are unaffected.
+
+This pinning applies only to the configured shell command. Agent-selected evidence checks run in the agent's existing environment and may still inherit the host's Node version.
+
 When empty, the agent detects and runs the smallest relevant tests itself (and is instructed never to run the complete repository suite).
 When user intent is available, the agent may still run after a successful baseline command to gather evidence-oriented validation, still under the same targeted-validation contract.
 

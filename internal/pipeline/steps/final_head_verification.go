@@ -84,7 +84,7 @@ func verifyFinalHeadAfterPostTestFixes(sctx *pipeline.StepContext) error {
 	}
 	if testCmd != "" {
 		sctx.Log(fmt.Sprintf("re-running test verification on final head %s after post-test %s changes: %s", headLabel, steps, testCmd))
-		output, exitCode, err := runConfiguredStepShellCommand(sctx, configuredCommandTest, testCmd)
+		output, exitCode, err := runConfiguredTestCommand(sctx, testCmd)
 		tested := []string{testCmd}
 		projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepPush)
 		if err != nil {
