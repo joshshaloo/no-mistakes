@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -146,7 +147,7 @@ func (d *Detector) Observe(ctx context.Context, obs Observation) (*Signal, error
 	// which may not leave the tenant account.
 	// One request carries both questions: they are independent judgments over
 	// the same state, so the Score costs only its own tokens and cannot delay
-	// the Noul. A missing or malformed Score never suppresses the Noul.
+	// the Noul. An absent Score never suppresses the Noul.
 	payload, err := json.Marshal(request{
 		Model: d.model,
 		State: json.RawMessage(state),
@@ -203,44 +204,58 @@ func (d *Detector) Observe(ctx context.Context, obs Observation) (*Signal, error
 	if err := json.Unmarshal(body, &decoded); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	answer, ok := decoded.Answers[questionNonConvergence]
-	if !ok || answer.Noul == nil {
-		// The expected answer is missing. Emit nothing: an absent answer is
-		// never turned into "converging".
-		return nil, fmt.Errorf("response carried no %s answer", questionNonConvergence)
-	}
-	probability := *answer.Noul
-	if probability < 0 || probability > 1 {
-		return nil, fmt.Errorf("non-convergence probability out of range")
-	}
-	model := strings.TrimSpace(decoded.Model)
-	if model == "" {
-		return nil, fmt.Errorf("response carried no responding model version")
+	answer, themes, model, err := validateResponse(decoded)
+	if err != nil {
+		return nil, err
 	}
 
 	sig := &Signal{
-		Probability: probability,
+		Probability: *answer.Noul,
 		Model:       model,
 		Step:        obs.Step,
 		Round:       obs.Current.Number,
 		ObservedAt:  d.now().Unix(),
 	}
-	if themes, ok := decoded.Answers[questionCausalThemes]; ok && validScoreAnswer(themes) {
+	if themes != nil {
 		score := *themes.Score
+		confidence := *themes.Confidence
 		sig.CausalThemes = &score
-		if themes.Confidence != nil {
-			confidence := *themes.Confidence
-			sig.CausalThemeConfidence = &confidence
-		}
+		sig.CausalThemeConfidence = &confidence
 	}
 	return sig, nil
 }
 
-func validScoreAnswer(answer answer) bool {
-	if answer.Type != "score" || answer.Score == nil || *answer.Score < 0 || *answer.Score > 1 {
-		return false
+func validateResponse(decoded response) (answer, *answer, string, error) {
+	model := strings.TrimSpace(decoded.Model)
+	if model == "" {
+		return answer{}, nil, "", fmt.Errorf("response carried no responding model version")
 	}
-	return answer.Confidence == nil || (*answer.Confidence >= 0 && *answer.Confidence <= 1)
+	if len(decoded.Usage) == 0 {
+		return answer{}, nil, "", fmt.Errorf("response carried no usage figures")
+	}
+	for name, value := range decoded.Usage {
+		if value == nil || *value < 0 || math.Trunc(*value) != *value {
+			return answer{}, nil, "", fmt.Errorf("response carried invalid usage figure %q", name)
+		}
+	}
+
+	primary, ok := decoded.Answers[questionNonConvergence]
+	if !ok || primary.Type != "noul" || primary.Noul == nil || !unitInterval(*primary.Noul) || primary.Confidence == nil || !unitInterval(*primary.Confidence) {
+		return answer{}, nil, "", fmt.Errorf("response carried invalid %s answer", questionNonConvergence)
+	}
+
+	var themes *answer
+	if secondary, ok := decoded.Answers[questionCausalThemes]; ok {
+		if secondary.Type != "score" || secondary.Score == nil || !unitInterval(*secondary.Score) || secondary.Confidence == nil || !unitInterval(*secondary.Confidence) {
+			return answer{}, nil, "", fmt.Errorf("response carried invalid %s answer", questionCausalThemes)
+		}
+		themes = &secondary
+	}
+	return primary, themes, model, nil
+}
+
+func unitInterval(value float64) bool {
+	return value >= 0 && value <= 1
 }
 
 // --- wire types ---
@@ -263,8 +278,9 @@ type noulCriteria struct {
 }
 
 type response struct {
-	Model   string            `json:"model"`
-	Answers map[string]answer `json:"answers"`
+	Model   string              `json:"model"`
+	Answers map[string]answer   `json:"answers"`
+	Usage   map[string]*float64 `json:"usage"`
 }
 
 type answer struct {

@@ -45,9 +45,8 @@ type Signal struct {
 	Step  string
 	Round int
 	// CausalThemes is the secondary Score: roughly how many distinct causal
-	// themes the run has accumulated. It is nil whenever that answer was absent
-	// or malformed, which never affects Probability - the Noul is the
-	// deliverable and a missing Score does not suppress it.
+	// themes the run has accumulated. It is nil when that answer was absent;
+	// a missing Score does not suppress the Noul.
 	CausalThemes          *float64
 	CausalThemeConfidence *float64
 	// ObservedAt is unix seconds.
