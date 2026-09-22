@@ -406,7 +406,7 @@ func nodeVersionOverride(sctx *pipeline.StepContext) (env []string, note string,
 
 	if len(declaredParts) == 3 {
 		if hostParts, hostPath, ok := pathNodeVersion(sctx); ok && compareVersionParts(declaredParts, hostParts) == 0 {
-			return nil, fmt.Sprintf("resolved repository Node pin %q from %s to exact v%s using executable %s", declared, source, versionPartsString(hostParts), hostPath), nil
+			return prependNodeBinToPath(sctx, filepath.Dir(hostPath)), fmt.Sprintf("resolved repository Node pin %q from %s to exact v%s using executable %s", declared, source, versionPartsString(hostParts), hostPath), nil
 		}
 	}
 
@@ -417,15 +417,19 @@ func nodeVersionOverride(sctx *pipeline.StepContext) (env []string, note string,
 			declared, source, strings.Join(checked, ", "))
 	}
 
+	return prependNodeBinToPath(sctx, binDir), fmt.Sprintf("resolved repository Node pin %q from %s to exact v%s from %s", declared, source, matched, manager), nil
+}
+
+func prependNodeBinToPath(sctx *pipeline.StepContext, binDir string) []string {
 	currentPath := os.Getenv("PATH")
 	if stepPath, ok := envValue(sctx.Env, "PATH"); ok {
 		currentPath = stepPath
 	}
 	newPath := binDir
 	if currentPath != "" {
-		newPath = binDir + string(os.PathListSeparator) + currentPath
+		newPath += string(os.PathListSeparator) + currentPath
 	}
-	return []string{"PATH=" + newPath}, fmt.Sprintf("resolved repository Node pin %q from %s to exact v%s from %s", declared, source, matched, manager), nil
+	return []string{"PATH=" + newPath}
 }
 
 func runConfiguredTestCommand(sctx *pipeline.StepContext, testCmd string) (string, int, error) {

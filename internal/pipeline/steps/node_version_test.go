@@ -444,11 +444,40 @@ func TestNodeVersionOverride_ProvesExactHostNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if env != nil {
-		t.Fatalf("exact proven host Node should need no override, got %v", env)
+	if len(env) != 1 || !strings.HasPrefix(env[0], "PATH="+hostBin+string(os.PathListSeparator)) {
+		t.Fatalf("exact proven host Node override = %v, want absolute executable directory first", env)
 	}
 	if !strings.Contains(note, `"20.19.0" from .nvmrc to exact v20.19.0`) || !strings.Contains(note, hostBin) {
 		t.Fatalf("resolution note does not state declaration, source, exact version, and executable: %q", note)
+	}
+}
+
+func TestRunConfiguredTestCommand_PinsVerifiedRelativePATHAfterDirectoryChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-specific")
+	}
+	workDir := t.TempDir()
+	writeFile(t, filepath.Join(workDir, ".nvmrc"), "20.19.0\n")
+	verifiedBin := filepath.Join(workDir, "relative-bin")
+	wrongBin := filepath.Join(workDir, "frontend", "relative-bin")
+	if err := os.MkdirAll(verifiedBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(wrongBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeNodeVersion(t, filepath.Join(verifiedBin, "node"), "20.19.0")
+	writeNodeVersion(t, filepath.Join(wrongBin, "node"), "99.0.0")
+
+	sctx := nodeVersionTestContext(workDir)
+	sctx.Env = []string{"PATH=relative-bin" + string(os.PathListSeparator) + os.Getenv("PATH")}
+	sctx.Log = func(string) {}
+	output, exitCode, err := runConfiguredTestCommand(sctx, "cd frontend && node --version")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exitCode != 0 || strings.TrimSpace(output) != "v20.19.0" {
+		t.Fatalf("configured test output=%q exit=%d, want verified v20.19.0", output, exitCode)
 	}
 }
 
