@@ -88,6 +88,23 @@ func TestDeclaredNodeVersion_PackageJSONVoltaBeforeEngines(t *testing.T) {
 	}
 }
 
+func TestDeclaredNodeVersion_UnrelatedInvalidPackageMetadataWithoutPinIsNoop(t *testing.T) {
+	for _, content := range []string{
+		`{"volta":[],"engines":42,"scripts":"unexpected"}`,
+		`{"name":"broken",`,
+	} {
+		dir := t.TempDir()
+		writeFile(t, filepath.Join(dir, "package.json"), content)
+		version, source, err := declaredNodeVersion(dir)
+		if err != nil {
+			t.Fatalf("package.json %q: unexpected error: %v", content, err)
+		}
+		if version != "" || source != "" {
+			t.Fatalf("package.json %q: got version=%q source=%q, want no pin", content, version, source)
+		}
+	}
+}
+
 func TestNormalizeExactVersionParts(t *testing.T) {
 	cases := []struct {
 		in    string
@@ -465,6 +482,36 @@ func TestNodeVersionOverride_PartialPinUsesHighestManagedInstallAndLogsResolutio
 	}
 }
 
+func TestFindPinnedNodeInstall_PartialDirectoryCanSatisfyFullPinAfterProbe(t *testing.T) {
+	root := t.TempDir()
+	bin := filepath.Join(root, "20", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nodePath := filepath.Join(bin, nodeBinaryName())
+	writeExecutable(t, nodePath)
+	manager := nodeVersionManager{
+		name: "test",
+		installsDir: func() (string, bool) {
+			return root, true
+		},
+		binSubpath: []string{"bin"},
+	}
+
+	gotBin, matched, _, _, err := findPinnedNodeInstallForOS([]int{20, 19, 0}, runtime.GOOS, []nodeVersionManager{manager}, func(path string) ([]int, bool) {
+		if path != nodePath {
+			t.Fatalf("probed %q, want %q", path, nodePath)
+		}
+		return []int{20, 19, 0}, true
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBin != bin || matched != "20.19.0" {
+		t.Fatalf("verified partial-directory candidate = %q, %q; want %q, 20.19.0", gotBin, matched, bin)
+	}
+}
+
 func TestFindPinnedNodeInstall_PartialDirectoryRequiresVerifiedExactVersion(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture is Unix-specific")
@@ -493,6 +540,28 @@ func TestFindPinnedNodeInstall_PartialDirectoryRequiresVerifiedExactVersion(t *t
 	writeNodeVersion(t, nodePath, "21.0.0")
 	if _, _, _, _, err := findPinnedNodeInstall(nodeVersionTestContext(root), []int{20}); err == nil {
 		t.Fatal("expected candidate whose executed version does not match to be rejected")
+	}
+}
+
+func TestPathNodeVersion_ResolvesRelativePATHFromWorkDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-specific")
+	}
+	workDir := t.TempDir()
+	bin := filepath.Join(workDir, "relative-bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nodePath := filepath.Join(bin, "node")
+	writeExecutable(t, nodePath)
+	t.Setenv("PATH", "relative-bin")
+
+	parts, gotPath, ok := pathNodeVersion(nodeVersionTestContext(workDir))
+	if !ok || !intSlicesEqual(parts, []int{20, 19, 0}) {
+		t.Fatalf("relative worktree Node version = %v, %v; want 20.19.0, true", parts, ok)
+	}
+	if gotPath != nodePath {
+		t.Fatalf("resolved Node = %q, want %q", gotPath, nodePath)
 	}
 }
 

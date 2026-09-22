@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -61,21 +60,25 @@ func declaredNodeVersion(workDir string) (version, source string, err error) {
 		}
 		return "", "", fmt.Errorf("read package.json: %w", readErr)
 	}
-	var pkg struct {
-		Volta struct {
-			Node string `json:"node"`
-		} `json:"volta"`
-		Engines struct {
-			Node string `json:"node"`
-		} `json:"engines"`
+	var pkg map[string]json.RawMessage
+	if json.Unmarshal(pkgBytes, &pkg) != nil {
+		return "", "", nil
 	}
-	if err := json.Unmarshal(pkgBytes, &pkg); err != nil {
-		return "", "", fmt.Errorf("parse package.json: %w", err)
+	packageNodeVersion := func(section string) string {
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(pkg[section], &fields) != nil {
+			return ""
+		}
+		var version string
+		if json.Unmarshal(fields["node"], &version) != nil {
+			return ""
+		}
+		return strings.TrimSpace(version)
 	}
-	if v := strings.TrimSpace(pkg.Volta.Node); v != "" {
+	if v := packageNodeVersion("volta"); v != "" {
 		return v, "package.json (volta.node)", nil
 	}
-	if v := strings.TrimSpace(pkg.Engines.Node); v != "" {
+	if v := packageNodeVersion("engines"); v != "" {
 		return v, "package.json (engines.node)", nil
 	}
 	return "", "", nil
@@ -139,6 +142,10 @@ func versionSatisfies(declared, installed []int) bool {
 		}
 	}
 	return true
+}
+
+func versionPrefixesCompatible(a, b []int) bool {
+	return versionSatisfies(a, b) || versionSatisfies(b, a)
 }
 
 func compareVersionParts(a, b []int) int {
@@ -315,7 +322,7 @@ func findPinnedNodeInstallForOS(declaredParts []int, goos string, managers []nod
 				versionStr = strings.TrimPrefix(versionStr, "v")
 			}
 			directoryParts, ok := normalizeExactVersionParts(versionStr)
-			if !ok || !versionSatisfies(declaredParts, directoryParts) {
+			if !ok || !versionPrefixesCompatible(declaredParts, directoryParts) {
 				continue
 			}
 			binDirPath := filepath.Join(append([]string{root, name}, mgr.binSubpath...)...)
@@ -351,20 +358,13 @@ func probeNodeVersion(sctx *pipeline.StepContext, nodePath string) (parts []int,
 }
 
 func pathNodeVersion(sctx *pipeline.StepContext) (parts []int, nodePath string, ok bool) {
-	if len(sctx.Env) > 0 {
-		nodePath = findInCustomPath(sctx.WorkDir, sctx.Env, nodeBinaryName())
-		if nodePath == "" {
-			if _, hasCustomPath := envValue(sctx.Env, "PATH"); hasCustomPath {
-				return nil, "", false
-			}
-		}
+	pathEnv := sctx.Env
+	if _, hasCustomPath := envValue(pathEnv, "PATH"); !hasCustomPath {
+		pathEnv = []string{"PATH=" + os.Getenv("PATH")}
 	}
+	nodePath = findInCustomPath(sctx.WorkDir, pathEnv, nodeBinaryName())
 	if nodePath == "" {
-		var err error
-		nodePath, err = exec.LookPath(nodeBinaryName())
-		if err != nil {
-			return nil, "", false
-		}
+		return nil, "", false
 	}
 	absolutePath, err := filepath.Abs(nodePath)
 	if err != nil {
