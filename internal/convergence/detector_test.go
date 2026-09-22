@@ -1,8 +1,10 @@
 package convergence
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -165,6 +167,41 @@ func TestObserveRecordsProbabilityAndRespondingModelVersion(t *testing.T) {
 	}
 }
 
+func TestObserveRedactsSecretsAcrossTheCompleteRequestState(t *testing.T) {
+	const key = "resolved-key-exact-match"
+	clearKeyEnv(t)
+	t.Setenv(openRouterKeyEnv, key)
+	var requestBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		requestBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request: %v", err)
+		}
+		_, _ = w.Write(answerBody(t, 0.5, "jev-test"))
+	}))
+	t.Cleanup(srv.Close)
+	d := New(Settings{Enabled: true, BaseURL: srv.URL, Timeout: time.Second})
+	if d == nil {
+		t.Fatal("expected a detector")
+	}
+	d.SetHTTPClient(srv.Client())
+
+	obs := twoRoundObservation()
+	obs.Intent = "intent contains " + key
+	obs.Earlier[1].FixSummary = "fixed using " + key
+	obs.Current.Findings[0].Description = "finding exposes " + key
+	if _, err := d.Observe(context.Background(), obs); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(string(requestBody), key) {
+		t.Fatalf("serialized request leaked resolved key: %s", requestBody)
+	}
+	if !bytes.Contains(requestBody, []byte("[REDACTED]")) {
+		t.Fatalf("serialized request did not carry redaction markers: %s", requestBody)
+	}
+}
+
 func TestObserveSendsIntentCurrentAndEveryEarlierRound(t *testing.T) {
 	var got struct {
 		Model     string `json:"model"`
@@ -266,6 +303,19 @@ func TestObserveEmitsNothingWhenTheExpectedAnswerIsMissing(t *testing.T) {
 	}
 }
 
+func TestObserveEmitsNothingWhenTheRespondingModelIsBlank(t *testing.T) {
+	d, _ := okDetector(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"model":"  ","answers":{"non_convergence":{"type":"noul","noul":0.7}}}`))
+	})
+	sig, err := d.Observe(context.Background(), twoRoundObservation())
+	if sig != nil || err == nil {
+		t.Fatalf("a blank responding model must emit nothing, got sig=%v err=%v", sig, err)
+	}
+	if !strings.Contains(err.Error(), "model") {
+		t.Fatalf("blank model error must identify the unusable response, got %v", err)
+	}
+}
+
 func TestObserveEmitsNothingWhenTheProbabilityIsOutOfRange(t *testing.T) {
 	d, _ := okDetector(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":7}}}`))
@@ -273,6 +323,22 @@ func TestObserveEmitsNothingWhenTheProbabilityIsOutOfRange(t *testing.T) {
 	sig, err := d.Observe(context.Background(), twoRoundObservation())
 	if sig != nil || err == nil {
 		t.Fatalf("an out-of-range probability must emit nothing, got sig=%v err=%v", sig, err)
+	}
+}
+
+func TestObserveOmitsMalformedScoreWhileKeepingTheNoul(t *testing.T) {
+	d, _ := okDetector(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"model":"jev-test","answers":{"non_convergence":{"type":"noul","noul":0.6},"causal_themes":{"type":"noul","score":999,"confidence":4}}}`))
+	})
+	sig, err := d.Observe(context.Background(), twoRoundObservation())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sig == nil || sig.Probability != 0.6 {
+		t.Fatalf("a malformed Score must not suppress the valid Noul, got %+v", sig)
+	}
+	if sig.CausalThemes != nil || sig.CausalThemeConfidence != nil {
+		t.Fatalf("malformed Score data must be omitted, got score=%v confidence=%v", sig.CausalThemes, sig.CausalThemeConfidence)
 	}
 }
 

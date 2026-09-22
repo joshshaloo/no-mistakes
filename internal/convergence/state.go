@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/intent"
 )
 
 // stateDoc is the exact shape the question is asked over. Field names are part
@@ -23,6 +25,45 @@ type stateDoc struct {
 // but lost round two could not answer whether round three repeats its cause -
 // so every round survives at the shortest description length before anything
 // else is considered.
+func redactObservation(obs Observation, exactSecret string) Observation {
+	redact := func(text string) string {
+		if exactSecret != "" {
+			text = strings.ReplaceAll(text, exactSecret, "[REDACTED]")
+		}
+		return intent.RedactSecrets(text)
+	}
+	redactFinding := func(f Finding) Finding {
+		f.ID = redact(f.ID)
+		f.Severity = redact(f.Severity)
+		f.File = redact(f.File)
+		f.Action = redact(f.Action)
+		f.Description = redact(f.Description)
+		return f
+	}
+	redactRound := func(r Round) Round {
+		r.Trigger = redact(r.Trigger)
+		r.FixSummary = redact(r.FixSummary)
+		r.SelectedForFix = append([]string(nil), r.SelectedForFix...)
+		for i := range r.SelectedForFix {
+			r.SelectedForFix[i] = redact(r.SelectedForFix[i])
+		}
+		r.Findings = append([]Finding(nil), r.Findings...)
+		for i := range r.Findings {
+			r.Findings[i] = redactFinding(r.Findings[i])
+		}
+		return r
+	}
+
+	obs.Intent = redact(obs.Intent)
+	obs.Step = redact(obs.Step)
+	obs.Current = redactRound(obs.Current)
+	obs.Earlier = append([]Round(nil), obs.Earlier...)
+	for i := range obs.Earlier {
+		obs.Earlier[i] = redactRound(obs.Earlier[i])
+	}
+	return obs
+}
+
 func buildState(obs Observation) ([]byte, error) {
 	for _, limit := range descriptionLimits {
 		encoded, err := json.Marshal(renderState(obs, limit))

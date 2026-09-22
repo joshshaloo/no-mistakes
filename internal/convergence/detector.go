@@ -135,11 +135,15 @@ func (d *Detector) Observe(ctx context.Context, obs Observation) (*Signal, error
 		return nil, nil
 	}
 
+	obs = redactObservation(obs, d.key)
 	state, err := buildState(obs)
 	if err != nil {
 		return nil, err
 	}
 
+	// This sends only an operator's own code-review text about their own repositories,
+	// is off unless they configure a key, and must never be used for tenant data,
+	// which may not leave the tenant account.
 	// One request carries both questions: they are independent judgments over
 	// the same state, so the Score costs only its own tokens and cannot delay
 	// the Noul. A missing or malformed Score never suppresses the Noul.
@@ -209,15 +213,19 @@ func (d *Detector) Observe(ctx context.Context, obs Observation) (*Signal, error
 	if probability < 0 || probability > 1 {
 		return nil, fmt.Errorf("non-convergence probability out of range")
 	}
+	model := strings.TrimSpace(decoded.Model)
+	if model == "" {
+		return nil, fmt.Errorf("response carried no responding model version")
+	}
 
 	sig := &Signal{
 		Probability: probability,
-		Model:       strings.TrimSpace(decoded.Model),
+		Model:       model,
 		Step:        obs.Step,
 		Round:       obs.Current.Number,
 		ObservedAt:  d.now().Unix(),
 	}
-	if themes, ok := decoded.Answers[questionCausalThemes]; ok && themes.Score != nil {
+	if themes, ok := decoded.Answers[questionCausalThemes]; ok && validScoreAnswer(themes) {
 		score := *themes.Score
 		sig.CausalThemes = &score
 		if themes.Confidence != nil {
@@ -226,6 +234,13 @@ func (d *Detector) Observe(ctx context.Context, obs Observation) (*Signal, error
 		}
 	}
 	return sig, nil
+}
+
+func validScoreAnswer(answer answer) bool {
+	if answer.Type != "score" || answer.Score == nil || *answer.Score < 0 || *answer.Score > 1 {
+		return false
+	}
+	return answer.Confidence == nil || (*answer.Confidence >= 0 && *answer.Confidence <= 1)
 }
 
 // --- wire types ---
