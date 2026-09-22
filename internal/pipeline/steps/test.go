@@ -103,8 +103,15 @@ Previous test findings to address:
 	testCmd := sctx.Config.Commands.Test
 	tested := []string{}
 	if testCmd != "" {
+		nodeEnv, nodeNote, nodeErr := nodeVersionOverride(sctx.WorkDir)
+		if nodeErr != nil {
+			return nil, fmt.Errorf("resolve repository-pinned Node version: %w", nodeErr)
+		}
+		if nodeNote != "" {
+			sctx.Log(nodeNote)
+		}
 		sctx.Log(fmt.Sprintf("running tests: %s", testCmd))
-		output, exitCode, err := runConfiguredStepShellCommand(sctx, configuredCommandTest, testCmd)
+		output, exitCode, err := runConfiguredStepShellCommandWithExtraEnv(sctx, configuredCommandTest, testCmd, nodeEnv)
 		if err != nil {
 			return nil, fmt.Errorf("run test command: %w", err)
 		}

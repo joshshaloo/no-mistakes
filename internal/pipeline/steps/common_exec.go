@@ -271,7 +271,19 @@ const (
 // turns "the tool is not installed in this worktree" into a concrete step
 // failure. A missing tool is never a passing check and never an approval gate.
 func runConfiguredStepShellCommand(sctx *pipeline.StepContext, commandKey string, cmdStr string) (string, int, error) {
-	output, exitCode, err := runStepShellCommand(sctx, cmdStr)
+	return runConfiguredStepShellCommandWithExtraEnv(sctx, commandKey, cmdStr, nil)
+}
+
+// runConfiguredStepShellCommandWithExtraEnv is runConfiguredStepShellCommand
+// with additional environment entries (such as a repository-pinned tool's
+// PATH override) layered on top of sctx.Env. Entries in extraEnv win over any
+// matching key already in sctx.Env.
+func runConfiguredStepShellCommandWithExtraEnv(sctx *pipeline.StepContext, commandKey string, cmdStr string, extraEnv []string) (string, int, error) {
+	env := sctx.Env
+	if len(extraEnv) > 0 {
+		env = append(append([]string{}, sctx.Env...), extraEnv...)
+	}
+	output, exitCode, err := runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, env, cmdStr)
 	if err != nil {
 		return output, exitCode, err
 	}

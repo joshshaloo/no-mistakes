@@ -261,6 +261,90 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 	}
 }
 
+// TestTestStep_RefusesConfiguredCommandWhenRepositoryNodePinCannotBeHonored
+// covers the EBADENGINE defect: a repository that pins Node via .nvmrc must
+// have its configured test command refuse outright when no matching Node
+// install exists on the host, rather than silently running commands.test
+// under whatever Node the host happens to have.
+func TestTestStep_RefusesConfiguredCommandWhenRepositoryNodePinCannotBeHonored(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	writeFile(t, filepath.Join(dir, ".nvmrc"), "20.19.0\n")
+
+	root := t.TempDir()
+	t.Setenv("MISE_DATA_DIR", filepath.Join(root, "mise"))
+	t.Setenv("NVM_DIR", filepath.Join(root, "nvm"))
+	t.Setenv("VOLTA_HOME", filepath.Join(root, "volta"))
+	t.Setenv("FNM_DIR", filepath.Join(root, "fnm"))
+	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "true"})
+
+	step := &TestStep{}
+	outcome, err := step.Execute(sctx)
+	if err == nil {
+		t.Fatalf("expected the step to refuse when the repository's Node pin cannot be honored, got outcome %+v", outcome)
+	}
+	if !strings.Contains(err.Error(), "20.19.0") {
+		t.Fatalf("expected error to name the unresolved pin, got: %v", err)
+	}
+	if len(ag.calls) != 0 {
+		t.Fatal("expected the evidence agent not to run once the Node pin check refuses")
+	}
+}
+
+// TestTestStep_RunsConfiguredCommandUnderPinnedNodeInstall covers the fix
+// path: when a matching Node install exists under a version manager
+// directory, the configured test command must run with that install's bin
+// directory first on PATH instead of the host's default Node.
+func TestTestStep_RunsConfiguredCommandUnderPinnedNodeInstall(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	writeFile(t, filepath.Join(dir, ".nvmrc"), "20.19.0\n")
+
+	root := t.TempDir()
+	t.Setenv("MISE_DATA_DIR", root)
+	t.Setenv("NVM_DIR", filepath.Join(root, "no-nvm-here"))
+	t.Setenv("VOLTA_HOME", filepath.Join(root, "no-volta-here"))
+	t.Setenv("FNM_DIR", filepath.Join(root, "no-fnm-here"))
+	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "no-asdf-here"))
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	installBin := filepath.Join(root, "installs", "node", "20.19.0", "bin")
+	if err := os.MkdirAll(installBin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeNode := filepath.Join(installBin, nodeBinaryName())
+	writeExecutable(t, fakeNode)
+
+	whichLog := filepath.Join(dir, "which-node.log")
+	testCmd := "command -v node > " + whichLog
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"tested":["evidence"]}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: testCmd})
+
+	step := &TestStep{}
+	outcome, err := step.Execute(sctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("expected the resolvable pin to let the run proceed, got %+v", outcome)
+	}
+	resolved, err := os.ReadFile(whichLog)
+	if err != nil {
+		t.Fatalf("expected configured test command to run: %v", err)
+	}
+	if strings.TrimSpace(string(resolved)) != fakeNode {
+		t.Fatalf("configured test command resolved node to %q, want the pinned install %q", strings.TrimSpace(string(resolved)), fakeNode)
+	}
+}
+
 func TestTestStep_InRepoEvidenceFallsBackWhenConfiguredDirEscapesWorktree(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
