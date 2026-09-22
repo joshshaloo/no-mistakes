@@ -79,6 +79,28 @@ Alternatively, authenticate the Azure DevOps extension with `az devops login`.
 
 See [Provider Integration](/no-mistakes/guides/provider-integration/#azure-devops).
 
+## `OPENROUTER_API_KEY`
+
+API key used by the optional round-over-round non-convergence signal.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+When the global [`nonconvergence`](/no-mistakes/reference/global-config/#nonconvergence) feature is enabled, the daemon prefers this variable over `TYPESAFE_API_KEY` and `nonconvergence.key_file`. The key is sent only as the judgment service's bearer credential and is never accepted as a command argument or logged.
+
+## `TYPESAFE_API_KEY`
+
+Fallback API key used by the optional round-over-round non-convergence signal.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+Used only when `OPENROUTER_API_KEY` is unset or blank. If both variables are unset or blank, the detector can read either key from the operator-owned env file named by [`nonconvergence.key_file`](/no-mistakes/reference/global-config/#nonconvergence).
+
 ## `NO_MISTAKES_NO_UPDATE_CHECK`
 
 Disable background update checks.

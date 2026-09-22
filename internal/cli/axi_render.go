@@ -104,7 +104,18 @@ type runView struct {
 	// awaiting the driving agent, or nil when the run is not parked. It powers
 	// the top-level parked signal in the run object.
 	AwaitingAgentSince *int64
-	Steps              []stepView
+	// Nonconvergence is the round-over-round non-convergence signal, or nil
+	// when it was not measured. Rendering it changes nothing about the run.
+	Nonconvergence *nonconvergenceView
+	Steps          []stepView
+}
+
+// nonconvergenceView is a render-ready view of the non-convergence signal.
+type nonconvergenceView struct {
+	Probability  float64
+	Model        string
+	Round        int
+	CausalThemes *float64
 }
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
@@ -114,6 +125,14 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
 		AwaitingAgentSince: r.AwaitingAgentSince,
+	}
+	if nc := r.Nonconvergence; nc != nil {
+		rv.Nonconvergence = &nonconvergenceView{
+			Probability:  nc.Probability,
+			Model:        nc.Model,
+			Round:        nc.Round,
+			CausalThemes: nc.CausalThemes,
+		}
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -153,6 +172,14 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult) runView {
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
 		AwaitingAgentSince: r.AwaitingAgentSince,
+	}
+	if nc := r.Nonconvergence(); nc != nil {
+		rv.Nonconvergence = &nonconvergenceView{
+			Probability:  nc.Probability,
+			Model:        nc.Model,
+			Round:        nc.Round,
+			CausalThemes: nc.Themes,
+		}
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -365,6 +392,20 @@ func (s stepView) roundSummary() string {
 	return "starting"
 }
 
+// formatNonconvergence renders the signal as one advisory line. It states the
+// probability rather than a verdict, names the model version that produced it,
+// and says outright that nothing acted on it.
+func formatNonconvergence(nc nonconvergenceView) string {
+	out := fmt.Sprintf("p=%.2f after round %d", nc.Probability, nc.Round)
+	if nc.CausalThemes != nil {
+		out += fmt.Sprintf(", causal_themes=%.2f", *nc.CausalThemes)
+	}
+	if nc.Model != "" {
+		out += ", model " + nc.Model
+	}
+	return out + " (advisory signal that earlier fixes may not be settling the cause; it gates nothing - you decide)"
+}
+
 func formatDurationSince(sinceUnix int64) string {
 	secs := nowUnix() - sinceUnix
 	if secs < 0 {
@@ -415,6 +456,14 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	// while genuinely parked (non-nil marker on a non-terminal run).
 	if rv.AwaitingAgentSince != nil && !terminalStatus(rv.Status) {
 		fields = append(fields, toon.Field{Key: "awaiting_agent", Value: formatParkedFor(*rv.AwaitingAgentSince)})
+	}
+	// The non-convergence signal sits beside the other run-level signals so a
+	// worker or supervisor reading one `axi status` sees it without asking for
+	// it. It is advisory: it never appears as a gate, never suppresses a
+	// finding, and its absence means it was not measured, not that the run is
+	// converging. Someone reading it decides what to do about it.
+	if rv.Nonconvergence != nil {
+		fields = append(fields, toon.Field{Key: "nonconvergence", Value: formatNonconvergence(*rv.Nonconvergence)})
 	}
 	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
 	if rv.PRURL != "" {

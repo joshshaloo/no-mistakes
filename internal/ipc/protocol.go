@@ -236,11 +236,29 @@ type RunInfo struct {
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both
 	// are observability only and clear the moment the agent responds.
-	AwaitingAgent      bool             `json:"awaiting_agent,omitempty"`
-	AwaitingAgentSince *int64           `json:"awaiting_agent_since,omitempty"`
-	Steps              []StepResultInfo `json:"steps,omitempty"`
-	CreatedAt          int64            `json:"created_at"`
-	UpdatedAt          int64            `json:"updated_at"`
+	AwaitingAgent      bool   `json:"awaiting_agent,omitempty"`
+	AwaitingAgentSince *int64 `json:"awaiting_agent_since,omitempty"`
+	// Nonconvergence is the round-over-round non-convergence signal, or nil
+	// when it was not measured (the default - the detector is opt-in). It is
+	// observability only: no gate, outcome, or exit code depends on it, and a
+	// nil value means "not measured", never "converging".
+	Nonconvergence *NonconvergenceInfo `json:"nonconvergence,omitempty"`
+	Steps          []StepResultInfo    `json:"steps,omitempty"`
+	CreatedAt      int64               `json:"created_at"`
+	UpdatedAt      int64               `json:"updated_at"`
+}
+
+// NonconvergenceInfo is the IPC representation of the non-convergence signal.
+// Probability is carried rather than a boolean so a reader can apply its own
+// threshold, and Model is the exact responding model version so a decision
+// made from the signal can be traced back to what produced it.
+type NonconvergenceInfo struct {
+	Probability  float64  `json:"probability"`
+	Model        string   `json:"model,omitempty"`
+	Step         string   `json:"step,omitempty"`
+	Round        int      `json:"round,omitempty"`
+	CausalThemes *float64 `json:"causal_themes,omitempty"`
+	ObservedAt   int64    `json:"observed_at,omitempty"`
 }
 
 // StepResultInfo is the IPC representation of a step result.

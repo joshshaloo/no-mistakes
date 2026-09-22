@@ -34,6 +34,12 @@ CREATE TABLE IF NOT EXISTS runs (
     error                   TEXT,
     awaiting_agent_since INTEGER,
     parked_ms            INTEGER,
+    nonconvergence_probability  REAL,
+    nonconvergence_model        TEXT,
+    nonconvergence_step         TEXT,
+    nonconvergence_round        INTEGER,
+    nonconvergence_themes       REAL,
+    nonconvergence_observed_at  INTEGER,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
@@ -152,6 +158,17 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN intent_score REAL`,
 	`ALTER TABLE runs ADD COLUMN awaiting_agent_since INTEGER`,
 	`ALTER TABLE runs ADD COLUMN parked_ms INTEGER`,
+	// The round-over-round non-convergence signal. Every column is nullable
+	// and never backfilled: NULL means "not measured", never "converging".
+	// The signal gates nothing (internal/convergence package doc), so a run
+	// with these columns empty behaves exactly like a run from before they
+	// existed.
+	`ALTER TABLE runs ADD COLUMN nonconvergence_probability REAL`,
+	`ALTER TABLE runs ADD COLUMN nonconvergence_model TEXT`,
+	`ALTER TABLE runs ADD COLUMN nonconvergence_step TEXT`,
+	`ALTER TABLE runs ADD COLUMN nonconvergence_round INTEGER`,
+	`ALTER TABLE runs ADD COLUMN nonconvergence_themes REAL`,
+	`ALTER TABLE runs ADD COLUMN nonconvergence_observed_at INTEGER`,
 	// Branch synchronization provenance is intentionally nullable. Historical
 	// rows stay unbound because mutable head_sha cannot prove a successful push.
 	`ALTER TABLE runs ADD COLUMN submitted_head_sha TEXT`,

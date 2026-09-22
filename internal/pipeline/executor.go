@@ -15,6 +15,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/convergence"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/gateguidance"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -63,6 +64,11 @@ type Executor struct {
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
+
+	// convergence is the round-over-round non-convergence detector, or nil
+	// when it is not configured on this host - which is the default. It is a
+	// signal only: nothing in the executor branches on what it returns.
+	convergence *convergence.Detector
 }
 
 // SetSkippedSteps configures steps that should be marked skipped without running.
@@ -82,7 +88,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 	if onEvent == nil {
 		onEvent = func(ipc.Event) {}
 	}
-	return &Executor{
+	e := &Executor{
 		db:                    database,
 		paths:                 p,
 		config:                cfg,
@@ -93,6 +99,17 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		gateReconcileInterval: defaultGateReconcileInterval,
 		gateReconcileTimeout:  defaultGateReconcileTimeout,
 	}
+	if cfg != nil {
+		// nil unless the host explicitly opted in AND a key resolves.
+		e.convergence = convergence.New(cfg.ConvergenceSettings())
+	}
+	return e
+}
+
+// SetConvergenceDetector overrides the non-convergence detector. Tests use it
+// to point at a local server; production builds it from config.
+func (e *Executor) SetConvergenceDetector(d *convergence.Detector) {
+	e.convergence = d
 }
 
 // SetGateReconcileTimings overrides the interval between approval-gate
@@ -780,6 +797,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		} else {
 			currentRoundID = roundInsertID(currentRoundID, inserted, nil)
 		}
+
+		// Observability only, and placed here on purpose: the round is already
+		// persisted, so the detector reads the same history a human would, and
+		// nothing below this line reads what it records. It cannot fail the
+		// step and is bounded by its own short timeout.
+		e.observeNonconvergence(ctx, run.ID, sr.ID, stepName, userIntent, writeLog)
 
 		// If the step produced a PR URL, propagate it to the run and emit an update.
 		if outcome.PRURL != "" {

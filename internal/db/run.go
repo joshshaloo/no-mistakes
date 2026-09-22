@@ -63,11 +63,62 @@ type Run struct {
 	IntentSource    *string
 	IntentSessionID *string
 	IntentScore     *float64
-	CreatedAt       int64
-	UpdatedAt       int64
+	// Nonconvergence* hold the round-over-round non-convergence signal: the
+	// probability that the fixes already applied on this run have failed to
+	// settle the underlying cause, the exact responding model version, and the
+	// round it was measured after. They are observability only and change no
+	// gate, finding, or outcome (see internal/convergence).
+	//
+	// All are nil whenever the signal was not measured - the detector is off,
+	// unconfigured, the call failed, or the run never went past its first
+	// round. A nil probability means "not measured"; it never means
+	// "converging". Only the latest measurement is kept.
+	NonconvergenceProbability *float64
+	NonconvergenceModel       *string
+	NonconvergenceStep        *string
+	NonconvergenceRound       *int
+	NonconvergenceThemes      *float64
+	NonconvergenceObservedAt  *int64
+	CreatedAt                 int64
+	UpdatedAt                 int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, submitted_head_sha, review_approved_head_sha, test_verified_tree_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, created_at, updated_at`
+// Nonconvergence is a recorded non-convergence measurement read back off a run.
+type Nonconvergence struct {
+	Probability float64
+	Model       string
+	Step        string
+	Round       int
+	// Themes is the secondary "how many distinct causal themes" score, nil
+	// when that answer was absent.
+	Themes     *float64
+	ObservedAt int64
+}
+
+// Nonconvergence returns the run's non-convergence measurement, or nil when
+// none was recorded. Callers must treat nil as "not measured".
+func (r *Run) Nonconvergence() *Nonconvergence {
+	if r == nil || r.NonconvergenceProbability == nil {
+		return nil
+	}
+	nc := &Nonconvergence{Probability: *r.NonconvergenceProbability}
+	if r.NonconvergenceModel != nil {
+		nc.Model = *r.NonconvergenceModel
+	}
+	if r.NonconvergenceStep != nil {
+		nc.Step = *r.NonconvergenceStep
+	}
+	if r.NonconvergenceRound != nil {
+		nc.Round = *r.NonconvergenceRound
+	}
+	nc.Themes = r.NonconvergenceThemes
+	if r.NonconvergenceObservedAt != nil {
+		nc.ObservedAt = *r.NonconvergenceObservedAt
+	}
+	return nc
+}
+
+const runColumns = `id, repo_id, branch, head_sha, base_sha, submitted_head_sha, review_approved_head_sha, test_verified_tree_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, nonconvergence_probability, nonconvergence_model, nonconvergence_step, nonconvergence_round, nonconvergence_themes, nonconvergence_observed_at, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -79,6 +130,8 @@ func scanRun(row interface {
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive,
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
+		&r.NonconvergenceProbability, &r.NonconvergenceModel, &r.NonconvergenceStep,
+		&r.NonconvergenceRound, &r.NonconvergenceThemes, &r.NonconvergenceObservedAt,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
 }
@@ -690,4 +743,24 @@ func recoveryExclusionClause(preserved map[string]struct{}) (string, []any) {
 		args = append(args, id)
 	}
 	return " AND id NOT IN (" + strings.Join(placeholders, ", ") + ")", args
+}
+
+// RecordRunNonconvergence stores the latest non-convergence measurement on a
+// run, replacing any earlier one.
+//
+// This is a pure observability write: it touches no status, no step, no gate,
+// and deliberately does NOT bump updated_at, so recording a signal cannot be
+// mistaken for run progress by anything that watches that column. Callers only
+// ever call it with a measurement that actually came back; there is no "record
+// that we could not measure" path, because a missing row already means exactly
+// that.
+func (d *DB) RecordRunNonconvergence(runID string, nc Nonconvergence) error {
+	_, err := d.sql.Exec(
+		`UPDATE runs SET nonconvergence_probability = ?, nonconvergence_model = ?, nonconvergence_step = ?, nonconvergence_round = ?, nonconvergence_themes = ?, nonconvergence_observed_at = ? WHERE id = ?`,
+		nc.Probability, nc.Model, nc.Step, nc.Round, nc.Themes, nc.ObservedAt, runID,
+	)
+	if err != nil {
+		return fmt.Errorf("record run nonconvergence: %w", err)
+	}
+	return nil
 }

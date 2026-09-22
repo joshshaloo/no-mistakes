@@ -878,6 +878,16 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		CreatedAt:          r.CreatedAt,
 		UpdatedAt:          r.UpdatedAt,
 	}
+	if nc := r.Nonconvergence(); nc != nil {
+		info.Nonconvergence = &ipc.NonconvergenceInfo{
+			Probability:  nc.Probability,
+			Model:        nc.Model,
+			Step:         nc.Step,
+			Round:        nc.Round,
+			CausalThemes: nc.Themes,
+			ObservedAt:   nc.ObservedAt,
+		}
+	}
 	if len(steps) > 0 {
 		info.Steps = make([]ipc.StepResultInfo, 0, len(steps))
 		for _, s := range steps {
