@@ -172,41 +172,55 @@ func homeDir() (string, bool) {
 	return h, true
 }
 
-func envOrHomeSubpath(envVar string, homeSubpath ...string) func() (string, bool) {
-	return func() (string, bool) {
-		if v := os.Getenv(envVar); v != "" {
-			return v, true
-		}
-		h, ok := homeDir()
-		if !ok {
-			return "", false
-		}
-		return filepath.Join(append([]string{h}, homeSubpath...)...), true
-	}
+func nodeVersionManagersForOS(goos string) []nodeVersionManager {
+	home, _ := homeDir()
+	return nodeVersionManagersForOSWithHome(goos, home, os.Getenv)
 }
 
-func nodeVersionManagersForOS(goos string) []nodeVersionManager {
+func nodeVersionManagersForOSWithHome(goos, home string, getenv func(string) string) []nodeVersionManager {
 	windows := goos == "windows"
 	unixBin := []string{"bin"}
 	miseBin := unixBin
 	nvmBin := unixBin
 	voltaBin := unixBin
 	fnmBin := []string{"installation", "bin"}
+	miseRoot := filepath.Join(home, ".local", "share", "mise")
+	nvmRoot := filepath.Join(home, ".nvm")
+	voltaRoot := filepath.Join(home, ".volta")
+	fnmRoot := filepath.Join(home, ".local", "share", "fnm")
+	if goos == "darwin" {
+		fnmRoot = filepath.Join(home, "Library", "Application Support", "fnm")
+	}
 	if windows {
+		localAppData := getenv("LOCALAPPDATA")
+		if localAppData == "" {
+			localAppData = filepath.Join(home, "AppData", "Local")
+		}
+		appData := getenv("APPDATA")
+		if appData == "" {
+			appData = filepath.Join(home, "AppData", "Roaming")
+		}
+		miseRoot = filepath.Join(localAppData, "mise")
+		nvmRoot = filepath.Join(appData, "nvm")
+		voltaRoot = filepath.Join(localAppData, "Volta")
+		fnmRoot = filepath.Join(appData, "fnm")
 		miseBin = nil
 		nvmBin = nil
 		voltaBin = nil
 		fnmBin = []string{"installation"}
 	}
+	configuredRoot := func(envVar, fallback string) string {
+		if root := getenv(envVar); root != "" {
+			return root
+		}
+		return fallback
+	}
 	return []nodeVersionManager{
 		{
 			name: "mise",
 			installsDir: func() (string, bool) {
-				root, ok := envOrHomeSubpath("MISE_DATA_DIR", ".local", "share", "mise")()
-				if !ok {
-					return "", false
-				}
-				return filepath.Join(root, "installs", "node"), true
+				root := configuredRoot("MISE_DATA_DIR", miseRoot)
+				return filepath.Join(root, "installs", "node"), root != ""
 			},
 			binSubpath: miseBin,
 		},
@@ -214,16 +228,11 @@ func nodeVersionManagersForOS(goos string) []nodeVersionManager {
 			name: "nvm",
 			installsDir: func() (string, bool) {
 				if windows {
-					if root := os.Getenv("NVM_HOME"); root != "" {
-						return root, true
-					}
-					return envOrHomeSubpath("NVM_DIR", ".nvm")()
+					root := configuredRoot("NVM_HOME", configuredRoot("NVM_DIR", nvmRoot))
+					return root, root != ""
 				}
-				root, ok := envOrHomeSubpath("NVM_DIR", ".nvm")()
-				if !ok {
-					return "", false
-				}
-				return filepath.Join(root, "versions", "node"), true
+				root := configuredRoot("NVM_DIR", nvmRoot)
+				return filepath.Join(root, "versions", "node"), root != ""
 			},
 			dirHasVPrefix: true,
 			binSubpath:    nvmBin,
@@ -231,22 +240,16 @@ func nodeVersionManagersForOS(goos string) []nodeVersionManager {
 		{
 			name: "volta",
 			installsDir: func() (string, bool) {
-				root, ok := envOrHomeSubpath("VOLTA_HOME", ".volta")()
-				if !ok {
-					return "", false
-				}
-				return filepath.Join(root, "tools", "image", "node"), true
+				root := configuredRoot("VOLTA_HOME", voltaRoot)
+				return filepath.Join(root, "tools", "image", "node"), root != ""
 			},
 			binSubpath: voltaBin,
 		},
 		{
 			name: "fnm",
 			installsDir: func() (string, bool) {
-				root, ok := envOrHomeSubpath("FNM_DIR", ".local", "share", "fnm")()
-				if !ok {
-					return "", false
-				}
-				return filepath.Join(root, "node-versions"), true
+				root := configuredRoot("FNM_DIR", fnmRoot)
+				return filepath.Join(root, "node-versions"), root != ""
 			},
 			dirHasVPrefix: true,
 			binSubpath:    fnmBin,
@@ -254,11 +257,8 @@ func nodeVersionManagersForOS(goos string) []nodeVersionManager {
 		{
 			name: "asdf",
 			installsDir: func() (string, bool) {
-				root, ok := envOrHomeSubpath("ASDF_DATA_DIR", ".asdf")()
-				if !ok {
-					return "", false
-				}
-				return filepath.Join(root, "installs", "nodejs"), true
+				root := configuredRoot("ASDF_DATA_DIR", filepath.Join(home, ".asdf"))
+				return filepath.Join(root, "installs", "nodejs"), root != ""
 			},
 			binSubpath: unixBin,
 		},
@@ -277,17 +277,17 @@ func nodeBinaryName() string {
 }
 
 // findPinnedNodeInstall searches every known Node version manager's install
-// directory for a Node build matching declaredParts, and returns the
-// platform-specific executable directory of the highest matching version
-// found. Manager layouts differ on Windows, where several archives place
-// node.exe at the version root. It never invokes a
-// version-manager CLI and never installs anything - it only looks at what is
-// already on disk, so it stays fast and side-effect free.
-func findPinnedNodeInstall(declaredParts []int) (binDir, matchedVersion, managerName string, checked []string, err error) {
-	return findPinnedNodeInstallForOS(declaredParts, runtime.GOOS)
+// directory for a Node build matching declaredParts, executes each plausible
+// candidate to prove its exact version, and returns the executable directory
+// of the highest verified match. It never invokes a version-manager CLI or
+// installs anything.
+func findPinnedNodeInstall(sctx *pipeline.StepContext, declaredParts []int) (binDir, matchedVersion, managerName string, checked []string, err error) {
+	return findPinnedNodeInstallForOS(declaredParts, runtime.GOOS, nodeVersionManagersForOS(runtime.GOOS), func(path string) ([]int, bool) {
+		return probeNodeVersion(sctx, path)
+	})
 }
 
-func findPinnedNodeInstallForOS(declaredParts []int, goos string) (binDir, matchedVersion, managerName string, checked []string, err error) {
+func findPinnedNodeInstallForOS(declaredParts []int, goos string, managers []nodeVersionManager, probe func(string) ([]int, bool)) (binDir, matchedVersion, managerName string, checked []string, err error) {
 	type candidate struct {
 		parts   []int
 		binDir  string
@@ -295,7 +295,7 @@ func findPinnedNodeInstallForOS(declaredParts []int, goos string) (binDir, match
 	}
 	var best *candidate
 
-	for _, mgr := range nodeVersionManagersForOS(goos) {
+	for _, mgr := range managers {
 		root, ok := mgr.installsDir()
 		if !ok {
 			continue
@@ -314,13 +314,17 @@ func findPinnedNodeInstallForOS(declaredParts []int, goos string) (binDir, match
 			if mgr.dirHasVPrefix {
 				versionStr = strings.TrimPrefix(versionStr, "v")
 			}
-			parts, ok := normalizeExactVersionParts(versionStr)
-			if !ok || !versionSatisfies(declaredParts, parts) {
+			directoryParts, ok := normalizeExactVersionParts(versionStr)
+			if !ok || !versionSatisfies(declaredParts, directoryParts) {
 				continue
 			}
 			binDirPath := filepath.Join(append([]string{root, name}, mgr.binSubpath...)...)
 			nodeBin := filepath.Join(binDirPath, nodeBinaryNameForOS(goos))
 			if fi, statErr := os.Stat(nodeBin); statErr != nil || !pathCandidateUsable(goos, nodeBin, fi) {
+				continue
+			}
+			parts, verified := probe(nodeBin)
+			if !verified || len(parts) != 3 || !versionSatisfies(declaredParts, parts) {
 				continue
 			}
 			cand := candidate{parts: parts, binDir: binDirPath, manager: mgr.name}
@@ -334,6 +338,16 @@ func findPinnedNodeInstallForOS(declaredParts []int, goos string) (binDir, match
 		return "", "", "", checked, fmt.Errorf("no installed Node matching %s found", versionPartsString(declaredParts))
 	}
 	return best.binDir, versionPartsString(best.parts), best.manager, checked, nil
+}
+
+func probeNodeVersion(sctx *pipeline.StepContext, nodePath string) (parts []int, ok bool) {
+	cmd := stepCmd(sctx, nodePath, "--version")
+	out, err := shellenv.OutputShellCommand(cmd)
+	if err != nil {
+		return nil, false
+	}
+	parts, ok = normalizeExactVersionParts(strings.TrimSpace(string(out)))
+	return parts, ok && len(parts) == 3
 }
 
 func pathNodeVersion(sctx *pipeline.StepContext) (parts []int, nodePath string, ok bool) {
@@ -360,12 +374,7 @@ func pathNodeVersion(sctx *pipeline.StepContext) (parts []int, nodePath string, 
 	if err != nil || !pathCandidateUsable(runtime.GOOS, absolutePath, fi) {
 		return nil, "", false
 	}
-	cmd := stepCmd(sctx, absolutePath, "--version")
-	out, err := shellenv.OutputShellCommand(cmd)
-	if err != nil {
-		return nil, "", false
-	}
-	parts, ok = normalizeExactVersionParts(strings.TrimSpace(string(out)))
+	parts, ok = probeNodeVersion(sctx, absolutePath)
 	return parts, absolutePath, ok
 }
 
@@ -401,7 +410,7 @@ func nodeVersionOverride(sctx *pipeline.StepContext) (env []string, note string,
 		}
 	}
 
-	binDir, matched, manager, checked, findErr := findPinnedNodeInstall(declaredParts)
+	binDir, matched, manager, checked, findErr := findPinnedNodeInstall(sctx, declaredParts)
 	if findErr != nil {
 		return nil, "", fmt.Errorf(
 			"repository pins Node to %s (via %s), but no installed Node matches it on this host (checked: %s); refusing to run tests on the host's default Node instead of the pinned version",

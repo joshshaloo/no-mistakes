@@ -168,7 +168,7 @@ func TestFindPinnedNodeInstall_ResolvesViaMiseLayout(t *testing.T) {
 	}
 	writeExecutable(t, filepath.Join(otherBin, nodeBinaryName()))
 
-	binDir, matched, manager, _, err := findPinnedNodeInstall([]int{20, 19, 0})
+	binDir, matched, manager, _, err := findPinnedNodeInstall(nodeVersionTestContext(root), []int{20, 19, 0})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -213,12 +213,63 @@ func TestFindPinnedNodeInstall_WindowsManagerLayouts(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			binDir, matched, manager, _, err := findPinnedNodeInstallForOS([]int{20, 19, 0}, "windows")
+			binDir, matched, manager, _, err := findPinnedNodeInstallForOS([]int{20, 19, 0}, "windows", nodeVersionManagersForOS("windows"), func(string) ([]int, bool) {
+				return []int{20, 19, 0}, true
+			})
 			if err != nil {
 				t.Fatalf("resolve Windows %s layout: %v", tc.manager, err)
 			}
 			if binDir != tc.binDir || matched != "20.19.0" || manager != tc.manager {
 				t.Fatalf("got bin=%q version=%q manager=%q, want %q, 20.19.0, %q", binDir, matched, manager, tc.binDir, tc.manager)
+			}
+		})
+	}
+}
+
+func TestNodeVersionManagers_DefaultRootsAreOSSpecific(t *testing.T) {
+	home := filepath.Join("root", "home")
+	noEnv := func(string) string { return "" }
+	cases := []struct {
+		goos string
+		want map[string]string
+	}{
+		{
+			goos: "linux",
+			want: map[string]string{
+				"mise":  filepath.Join(home, ".local", "share", "mise", "installs", "node"),
+				"nvm":   filepath.Join(home, ".nvm", "versions", "node"),
+				"volta": filepath.Join(home, ".volta", "tools", "image", "node"),
+				"fnm":   filepath.Join(home, ".local", "share", "fnm", "node-versions"),
+				"asdf":  filepath.Join(home, ".asdf", "installs", "nodejs"),
+			},
+		},
+		{
+			goos: "darwin",
+			want: map[string]string{
+				"fnm": filepath.Join(home, "Library", "Application Support", "fnm", "node-versions"),
+			},
+		},
+		{
+			goos: "windows",
+			want: map[string]string{
+				"mise":  filepath.Join(home, "AppData", "Local", "mise", "installs", "node"),
+				"nvm":   filepath.Join(home, "AppData", "Roaming", "nvm"),
+				"volta": filepath.Join(home, "AppData", "Local", "Volta", "tools", "image", "node"),
+				"fnm":   filepath.Join(home, "AppData", "Roaming", "fnm", "node-versions"),
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.goos, func(t *testing.T) {
+			for _, manager := range nodeVersionManagersForOSWithHome(tc.goos, home, noEnv) {
+				want, asserted := tc.want[manager.name]
+				if !asserted {
+					continue
+				}
+				got, ok := manager.installsDir()
+				if !ok || got != want {
+					t.Fatalf("%s default root = %q, %v; want %q, true", manager.name, got, ok, want)
+				}
 			}
 		})
 	}
@@ -232,15 +283,15 @@ func TestFindPinnedNodeInstall_PicksHighestMatchingForPartialPin(t *testing.T) {
 	t.Setenv("FNM_DIR", filepath.Join(root, "no-fnm-here"))
 	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "no-asdf-here"))
 
-	for _, v := range []string{"20.10.0", "20.19.0"} {
-		bin := filepath.Join(root, "installs", "node", v, "bin")
+	for _, version := range []string{"20.10.0", "20.19.0"} {
+		bin := filepath.Join(root, "installs", "node", version, "bin")
 		if err := os.MkdirAll(bin, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		writeExecutable(t, filepath.Join(bin, nodeBinaryName()))
+		writeNodeVersion(t, filepath.Join(bin, nodeBinaryName()), version)
 	}
 
-	binDir, matched, _, _, err := findPinnedNodeInstall([]int{20})
+	binDir, matched, _, _, err := findPinnedNodeInstall(nodeVersionTestContext(root), []int{20})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -261,7 +312,7 @@ func TestFindPinnedNodeInstall_NoneFoundFailsWithCheckedList(t *testing.T) {
 	t.Setenv("FNM_DIR", filepath.Join(root, "fnm"))
 	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
 
-	_, _, _, checked, err := findPinnedNodeInstall([]int{20, 19, 0})
+	_, _, _, checked, err := findPinnedNodeInstall(nodeVersionTestContext(root), []int{20, 19, 0})
 	if err == nil {
 		t.Fatal("expected an error when no manager has a matching install")
 	}
@@ -360,7 +411,7 @@ func TestFindPinnedNodeInstall_RejectsNonExecutableCandidate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bin, nodeBinaryName()), []byte("node"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, _, err := findPinnedNodeInstall([]int{20, 19, 0}); err == nil {
+	if _, _, _, _, err := findPinnedNodeInstall(nodeVersionTestContext(root), []int{20, 19, 0}); err == nil {
 		t.Fatal("expected a non-executable Node candidate to be rejected")
 	}
 }
@@ -399,7 +450,7 @@ func TestNodeVersionOverride_PartialPinUsesHighestManagedInstallAndLogsResolutio
 		if err := os.MkdirAll(bin, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		writeExecutable(t, filepath.Join(bin, nodeBinaryName()))
+		writeNodeVersion(t, filepath.Join(bin, nodeBinaryName()), version)
 	}
 
 	env, note, err := nodeVersionOverride(nodeVersionTestContext(dir))
@@ -411,6 +462,37 @@ func TestNodeVersionOverride_PartialPinUsesHighestManagedInstallAndLogsResolutio
 	}
 	if !strings.Contains(note, `"20" from .nvmrc to exact v20.19.0`) {
 		t.Fatalf("partial resolution is not visible in note: %q", note)
+	}
+}
+
+func TestFindPinnedNodeInstall_PartialDirectoryRequiresVerifiedExactVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-specific")
+	}
+	root := t.TempDir()
+	t.Setenv("MISE_DATA_DIR", root)
+	t.Setenv("NVM_DIR", filepath.Join(root, "nvm"))
+	t.Setenv("VOLTA_HOME", filepath.Join(root, "volta"))
+	t.Setenv("FNM_DIR", filepath.Join(root, "fnm"))
+	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
+	bin := filepath.Join(root, "installs", "node", "20", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	nodePath := filepath.Join(bin, nodeBinaryName())
+	writeNodeVersion(t, nodePath, "20.19.7")
+
+	gotBin, matched, _, _, err := findPinnedNodeInstall(nodeVersionTestContext(root), []int{20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBin != bin || matched != "20.19.7" {
+		t.Fatalf("verified partial-directory candidate = %q, %q; want %q, 20.19.7", gotBin, matched, bin)
+	}
+
+	writeNodeVersion(t, nodePath, "21.0.0")
+	if _, _, _, _, err := findPinnedNodeInstall(nodeVersionTestContext(root), []int{20}); err == nil {
+		t.Fatal("expected candidate whose executed version does not match to be rejected")
 	}
 }
 
@@ -443,7 +525,12 @@ func writeFile(t *testing.T, path, content string) {
 
 func writeExecutable(t *testing.T, path string) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte("#!/bin/sh\necho v20.19.0\n"), 0o755); err != nil {
+	writeNodeVersion(t, path, "20.19.0")
+}
+
+func writeNodeVersion(t *testing.T, path, version string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho v"+version+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
