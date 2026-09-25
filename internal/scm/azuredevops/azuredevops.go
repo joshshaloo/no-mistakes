@@ -226,17 +226,61 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	return pr, nil
 }
 
+type azureThreadCreate struct {
+	Comments []azureThreadComment `json:"comments"`
+	Status   int                  `json:"status"`
+}
+
+type azureThreadComment struct {
+	ParentCommentID int    `json:"parentCommentId"`
+	Content         string `json:"content"`
+	CommentType     int    `json:"commentType"`
+}
+
 func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) error {
 	id := h.prID(pr)
 	if id == "" {
-		return errors.New("az repos pr comment create: missing PR id")
+		return errors.New("az devops invoke pullRequestThreads: missing PR id")
 	}
-	body = strings.ReplaceAll(body, "\r\n", "\n")
-	body = strings.ReplaceAll(body, "\n", "<br>")
-	args := []string{"repos", "pr", "comment", "create", "--id", id, "--content", body}
+	if h.project == "" || h.repo == "" {
+		return errors.New("az devops invoke pullRequestThreads: missing project or repository")
+	}
+
+	f, err := os.CreateTemp("", "nm-pr-notice-*.json")
+	if err != nil {
+		return fmt.Errorf("create PR notice temp file: %w", err)
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	payload := azureThreadCreate{
+		Comments: []azureThreadComment{{
+			ParentCommentID: 0,
+			Content:         body,
+			CommentType:     1,
+		}},
+		Status: 1,
+	}
+	if err := json.NewEncoder(f).Encode(payload); err != nil {
+		f.Close()
+		return fmt.Errorf("write PR notice temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close PR notice temp file: %w", err)
+	}
+
+	args := []string{
+		"devops", "invoke",
+		"--area", "git",
+		"--resource", "pullRequestThreads",
+		"--route-parameters", "project=" + h.project, "repositoryId=" + h.repo, "pullRequestId=" + id,
+		"--http-method", "POST",
+		"--api-version", "7.1",
+		"--in-file", path,
+	}
 	args = append(args, h.orgArgs()...)
+	args = append(args, "--output", "none")
 	if out, err := shellenv.CombinedOutputShellCommand(h.cmd(ctx, "az", args...)); err != nil {
-		return fmt.Errorf("az repos pr comment create: %s: %w", strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("az devops invoke pullRequestThreads: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
