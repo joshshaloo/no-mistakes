@@ -429,7 +429,7 @@ func (d *DB) CompleteSuccessfulRun(id string, completeTerminalPRStep bool) error
 		if err := completeTerminalPRRun(tx, id, ts); err != nil {
 			return fmt.Errorf("complete successful run: %w", err)
 		}
-	} else if _, err := tx.Exec(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ?`, types.RunCompleted, ts, id); err != nil {
+	} else if _, err := tx.Exec(`UPDATE runs SET status = ?, push_active = 0, updated_at = ? WHERE id = ?`, types.RunCompleted, ts, id); err != nil {
 		return fmt.Errorf("complete successful run: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

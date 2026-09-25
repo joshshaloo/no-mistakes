@@ -9,6 +9,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/runcompletion"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -157,6 +158,31 @@ func TestTargetIdentityNeverPersistsOrDisplaysHTTPUserinfo(t *testing.T) {
 	}
 	if got := displayTarget(credentialed); got != plain || strings.Contains(got, "secret") || strings.Contains(got, "token") {
 		t.Fatalf("display target = %q", got)
+	}
+}
+
+func TestSuccessfulFinalizationClearsPushMarkerBeforeBranchSyncInspection(t *testing.T) {
+	f := newSyncFixture(t)
+	if err := f.db.UpdateRunStatus(f.run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.SetRunPushActive(f.run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := (runcompletion.Finalizer{DB: f.db, Cleanup: func() error { return nil }}).Finalize(f.ctx, f.run, f.repo); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := f.db.GetRun(f.run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCompleted || got.PushActive {
+		t.Fatalf("finalized run = status %s push_active %t", got.Status, got.PushActive)
+	}
+	state := f.service.InspectCached(f.ctx)
+	if state.State == StatePushInProgress || state.Safety == "blocked_push_in_progress" {
+		t.Fatalf("completed run retained stale push block: %#v", state)
 	}
 }
 
