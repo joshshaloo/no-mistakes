@@ -3,14 +3,17 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestReviewRisk_MissingRunDatabaseFailsClosed(t *testing.T) {
-	if _, err := RefreshReviewRisk(context.Background(), nil, "owned-run", t.TempDir(), ""); !errors.Is(err, ErrReviewRisk) {
+	if _, err := RefreshReviewRisk(context.Background(), nil, "owned-run", t.TempDir(), "", nil); !errors.Is(err, ErrReviewRisk) {
 		t.Fatalf("refresh without a run database = %v", err)
 	}
 	if _, err := StoredReviewRiskStale(nil, "owned-run"); !errors.Is(err, ErrReviewRisk) {
@@ -44,6 +47,51 @@ func TestOnlyMechanicalDocumentation(t *testing.T) {
 	}
 }
 
+func TestRefreshReviewRisk_SubmoduleChangeOverridesIgnoreConfiguration(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	dir := t.TempDir()
+	initGitRepo(t, dir)
+	submoduleDir := filepath.Join(dir, "vendor", "dependency")
+	if err := os.MkdirAll(submoduleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	initGitRepo(t, submoduleDir)
+	execGit(t, dir, "add", "vendor/dependency")
+	execGit(t, dir, "commit", "-m", "add dependency")
+	base, err := git.Run(context.Background(), dir, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base = strings.TrimSpace(base)
+	if err := database.UpdateRunReviewApprovedHeadSHA(run.ID, base); err != nil {
+		t.Fatal(err)
+	}
+	sr, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"findings":[],"risk_level":"low","risk_rationale":"old"}`
+	if err := database.SetStepFindings(sr.ID, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, 0, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, submoduleDir, "README.md", "# changed dependency\n")
+	execGit(t, submoduleDir, "add", "README.md")
+	execGit(t, submoduleDir, "commit", "-m", "change dependency")
+	execGit(t, dir, "add", "vendor/dependency")
+	execGit(t, dir, "config", "diff.ignoreSubmodules", "all")
+
+	stale, err := RefreshReviewRisk(context.Background(), database, run.ID, dir, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stale {
+		t.Fatal("gitlink change hidden by diff.ignoreSubmodules retained the prior risk")
+	}
+}
+
 func TestRefreshReviewRisk_LegacyFallbackRetiredWithoutRewritingHistory(t *testing.T) {
 	database, _, run, _ := setupTest(t)
 	sr, err := database.InsertStepResult(run.ID, types.StepReview)
@@ -58,7 +106,7 @@ func TestRefreshReviewRisk_LegacyFallbackRetiredWithoutRewritingHistory(t *testi
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		stale, err := RefreshReviewRisk(context.Background(), database, run.ID, t.TempDir(), "")
+		stale, err := RefreshReviewRisk(context.Background(), database, run.ID, t.TempDir(), "", nil)
 		if err != nil || !stale {
 			t.Fatalf("stale=%v, err=%v", stale, err)
 		}

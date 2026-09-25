@@ -686,12 +686,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	autoFixAttempts := state.autoFixAttempts
 	roundNum := state.roundNum
 
+	reviewRiskInvalidated := func(findings string) {
+		e.emitStepEventWithFindings(ipc.EventStepCompleted, run, repo, types.StepReview, string(types.StepStatusCompleted), findings)
+	}
 	stepAgent := e.agent
 	if stepAgent != nil {
 		boundaryAgent := &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
 		if stepName.Order() > types.StepReview.Order() {
 			boundaryAgent.afterRun = func(ctx context.Context) error {
-				_, err := RefreshReviewRisk(ctx, e.db, run.ID, workDir, "")
+				_, err := RefreshReviewRisk(ctx, e.db, run.ID, workDir, "", reviewRiskInvalidated)
 				return err
 			}
 		}
@@ -706,22 +709,23 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 	}
 	sctx := &StepContext{
-		Ctx:              ctx,
-		Run:              run,
-		Repo:             repo,
-		WorkDir:          workDir,
-		Agent:            stepAgent,
-		Config:           e.config,
-		DB:               e.db,
-		StepResultID:     sr.ID,
-		UserIntent:       userIntent,
-		IntentSource:     userIntentSource,
-		Sessions:         e.sessions,
-		Shared:           e.shared,
-		Fixing:           state.fixing,
-		PreviousFindings: state.previousFindings,
-		Log:              writeLog,
-		LogChunk:         writeLogChunk,
+		Ctx:                   ctx,
+		Run:                   run,
+		Repo:                  repo,
+		WorkDir:               workDir,
+		Agent:                 stepAgent,
+		Config:                e.config,
+		DB:                    e.db,
+		StepResultID:          sr.ID,
+		UserIntent:            userIntent,
+		IntentSource:          userIntentSource,
+		Sessions:              e.sessions,
+		Shared:                e.shared,
+		ReviewRiskInvalidated: reviewRiskInvalidated,
+		Fixing:                state.fixing,
+		PreviousFindings:      state.previousFindings,
+		Log:                   writeLog,
+		LogChunk:              writeLogChunk,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)

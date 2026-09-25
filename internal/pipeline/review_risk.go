@@ -52,7 +52,7 @@ func StoredReviewRiskStale(database *db.DB, runID string) (bool, error) {
 // or a few conventional root documents. Tests, configuration, agent instructions,
 // MDX, scripts, symlinks and mode changes are NOT mechanical documentation.
 // Unreadable evidence fails safe to stale, never to the old low/medium rating.
-func RefreshReviewRisk(ctx context.Context, database *db.DB, runID, workDir, target string) (stale bool, err error) {
+func RefreshReviewRisk(ctx context.Context, database *db.DB, runID, workDir, target string, onInvalidated func(string)) (stale bool, err error) {
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("%w: %w", ErrReviewRisk, err)
@@ -103,7 +103,7 @@ func RefreshReviewRisk(ctx context.Context, database *db.DB, runID, workDir, tar
 		}
 		current := false
 		if run.ReviewApprovedHeadSHA != nil && *run.ReviewApprovedHeadSHA != "" {
-			args := []string{"diff", "--raw", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", *run.ReviewApprovedHeadSHA}
+			args := []string{"diff", "--raw", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", "--ignore-submodules=none", *run.ReviewApprovedHeadSHA}
 			if target != "" {
 				args = append(args, target)
 			}
@@ -123,6 +123,9 @@ func RefreshReviewRisk(ctx context.Context, database *db.DB, runID, workDir, tar
 		}
 		if err := database.SetStepFindings(sr.ID, raw); err != nil {
 			return false, fmt.Errorf("invalidate review risk: %w", err)
+		}
+		if onInvalidated != nil {
+			onInvalidated(raw)
 		}
 		return true, nil
 	}

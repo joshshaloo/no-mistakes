@@ -91,7 +91,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		sctx.Log(fmt.Sprintf("pull request already exists: %s, updating...", describePR(existing)))
 		updated, err := host.UpdatePR(ctx, existing, scm.PRContent(content))
 		if err != nil {
-			stale, riskErr := pipeline.RefreshReviewRisk(ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, "")
+			stale, riskErr := pipeline.RefreshReviewRisk(ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, "", sctx.ReviewRiskInvalidated)
 			if riskErr != nil {
 				return nil, riskErr
 			}
@@ -187,7 +187,7 @@ Diff stat:
 	})
 	// Even the drafting agent can edit tracked files. Re-read deterministic
 	// evidence after it returns, before advertising risk on the remote PR.
-	if _, riskErr := pipeline.RefreshReviewRisk(ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, ""); riskErr != nil {
+	if _, riskErr := pipeline.RefreshReviewRisk(ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, "", sctx.ReviewRiskInvalidated); riskErr != nil {
 		return prContent{}, riskErr
 	}
 	pipelineMD, riskLine, testingMD = s.buildPipelineSection(sctx)

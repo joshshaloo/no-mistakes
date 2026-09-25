@@ -7,6 +7,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -57,8 +58,19 @@ func TestExecutor_AgentRiskCheckFinishesBeforeStepCanPublishOutcome(t *testing.T
 		}
 		return &StepOutcome{}, nil
 	}}
-	exec := NewExecutor(database, p, &config.Config{}, &promptCaptureAgent{}, []Step{review, later}, nil)
+	events := &eventCollector{}
+	exec := NewExecutor(database, p, &config.Config{}, &promptCaptureAgent{}, []Step{review, later}, events.handler)
 	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
 		t.Fatal(err)
+	}
+	var invalidationEvent *ipc.Event
+	for _, event := range events.all() {
+		if event.Type == ipc.EventStepCompleted && event.StepName != nil && *event.StepName == types.StepReview && event.Findings != nil && strings.Contains(*event.Findings, `"risk_level":"stale"`) {
+			copy := event
+			invalidationEvent = &copy
+		}
+	}
+	if invalidationEvent == nil {
+		t.Fatal("review invalidation was not published to live subscribers")
 	}
 }

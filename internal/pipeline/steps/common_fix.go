@@ -179,7 +179,7 @@ func publishPipelineHeadWithRunner(sctx *pipeline.StepContext, headSHA string, r
 		if err := git.PinExactCommitWithRunner(run, git.RunHeadRef(sctx.Run.ID), headSHA); err != nil {
 			return fmt.Errorf("preserve unchanged pipeline head: %w", err)
 		}
-		_, err := pipeline.RefreshReviewRisk(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, headSHA)
+		_, err := pipeline.RefreshReviewRisk(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, headSHA, sctx.ReviewRiskInvalidated)
 		return err
 	}
 	if err := git.PublishRunHeadWithRunner(run, sctx.Run.ID, sctx.Run.Branch, oldHead, headSHA); err != nil {
@@ -187,7 +187,7 @@ func publishPipelineHeadWithRunner(sctx *pipeline.StepContext, headSHA string, r
 	}
 	// Preserve Git custody first, then retire the rating before recording or
 	// pushing this head. A DB failure must never lose the newly created commit.
-	if _, err := pipeline.RefreshReviewRisk(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, headSHA); err != nil {
+	if _, err := pipeline.RefreshReviewRisk(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, headSHA, sctx.ReviewRiskInvalidated); err != nil {
 		return fmt.Errorf("invalidate risk for pipeline head %s (preserved at %s): %w", headSHA, git.RunHeadRef(sctx.Run.ID), err)
 	}
 	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {

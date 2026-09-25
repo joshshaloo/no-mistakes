@@ -291,7 +291,7 @@ func runConfiguredStepShellCommandWithExtraEnv(sctx *pipeline.StepContext, comma
 	// Standalone configured-command users (for example tool resolution probes)
 	// have no owning run and therefore no assessment to invalidate.
 	if sctx.Run != nil {
-		_, riskErr := pipeline.RefreshReviewRisk(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, "")
+		_, riskErr := pipeline.RefreshReviewRisk(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, "", sctx.ReviewRiskInvalidated)
 		err = errors.Join(err, riskErr)
 	}
 	if err != nil {
