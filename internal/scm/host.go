@@ -97,6 +97,29 @@ type PRContent struct {
 	Body  string
 }
 
+// ValidationNoticeSupportChecker verifies that validation notices and their
+// currentness evidence are supported for the host selected by an adapter.
+type ValidationNoticeSupportChecker interface {
+	ValidateValidationNoticeSupport() error
+}
+
+// PRNoticePublisher appends a pipeline-owned validation notice to the PR
+// conversation without modifying its title, description, or existing comments.
+type PRNoticePublisher interface {
+	PublishPRNotice(context.Context, *PR, string) error
+}
+
+// PRNoticeReader returns PR conversation notices in chronological order.
+type PRNoticeReader interface {
+	ListPRNotices(context.Context, *PR) ([]string, error)
+}
+
+// CIAttemptIdentityReader resolves provider-authoritative execution identity for
+// the checks currently reported on an exact pull request head.
+type CIAttemptIdentityReader interface {
+	GetCIAttemptIdentity(context.Context, *PR, string, []Check) (string, error)
+}
+
 // PRState is the normalized lifecycle state of a PR.
 type PRState string
 
@@ -139,6 +162,8 @@ const (
 type Check struct {
 	Name        string
 	Bucket      CheckBucket
+	AttemptID   string    // provider-owned identity for this execution of the check
+	DetailsURL  string    // provider detail locator; never sufficient as execution identity
 	CompletedAt time.Time // zero when unknown; used to detect CI re-runs between polls
 }
 

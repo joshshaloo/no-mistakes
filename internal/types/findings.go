@@ -77,6 +77,12 @@ type findingWire struct {
 	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
 }
 
+// RiskStale replaces a historical rating on the current step result. It is
+// pipeline-owned, never an agent-assigned risk level; rounds retain the original.
+const RiskStale = "stale"
+
+const StaleRiskRationale = "Post-review changes are not covered by the previous assessment. Review required; do not use the previous rating as merge authority."
+
 // Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.
 type Findings struct {
 	Items          []Finding      `json:"findings"`

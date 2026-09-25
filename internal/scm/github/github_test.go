@@ -1,15 +1,18 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/notices"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
@@ -94,21 +97,86 @@ func TestHostPrefixedSlugForHost_SSHAlias(t *testing.T) {
 	}
 }
 
-func TestGetChecksPassesRepoFlag(t *testing.T) {
+func TestGetChecksResolvesAuthoritativeActionsAttempt(t *testing.T) {
 	t.Parallel()
 
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt": {
-			stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass"}]` + "\n",
+	responses := map[string]githubTestResponse{
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+			stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass","link":"https://github.com/test/repo/actions/runs/123/job/456"}]` + "\n",
 		},
-	}), nil, "", "test/repo")
+		"gh api repos/test/repo/actions/jobs/456": {
+			stdout: `{"id":456,"run_id":123,"run_attempt":2,"head_sha":"abc123","name":"build"}` + "\n",
+		},
+		"gh api repos/test/repo/actions/runs/123/attempts/2": {
+			stdout: `{"id":123,"run_attempt":2,"head_sha":"abc123","repository":{"full_name":"test/repo"}}` + "\n",
+		},
+	}
+	host := New(githubTestCmdFactory(responses), nil, "github.com", "test/repo")
 
 	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123"})
 	if err != nil {
 		t.Fatalf("GetChecks() error = %v", err)
 	}
-	if len(checks) != 1 || checks[0].Name != "build" {
-		t.Fatalf("checks = %+v, want single build check", checks)
+	if len(checks) != 1 || checks[0].Name != "build" || checks[0].AttemptID != "" {
+		t.Fatalf("checks = %+v, want unresolved provider check", checks)
+	}
+	identity, err := host.GetCIAttemptIdentity(context.Background(), &scm.PR{Number: "123"}, "abc123", checks)
+	if err != nil {
+		t.Fatalf("GetCIAttemptIdentity() error = %v", err)
+	}
+	if identity != "github:test/repo:run:123:attempt:2" {
+		t.Fatalf("identity = %q", identity)
+	}
+}
+
+func TestGetCIAttemptIdentityBoundsAuthoritativeAPIReads(t *testing.T) {
+	jobEndpoint := "gh api repos/test/repo/actions/jobs/456"
+	attemptEndpoint := "gh api repos/test/repo/actions/runs/123/attempts/2"
+	validJob := `{"id":456,"run_id":123,"run_attempt":2,"head_sha":"abc123","name":"build"}`
+	validAttempt := `{"id":123,"run_attempt":2,"head_sha":"abc123","repository":{"full_name":"test/repo"}}`
+	checks := []scm.Check{{Name: "build", DetailsURL: "https://github.com/test/repo/actions/runs/123/job/456"}}
+
+	tests := []struct {
+		name        string
+		job         githubTestResponse
+		attempt     githubTestResponse
+		cancelAfter time.Duration
+		want        string
+	}{
+		{name: "job stdout overflow", job: githubTestResponse{stdoutBytes: notices.MaxResponseBytes + 1}, want: "response exceeds"},
+		{name: "job diagnostic overflow", job: githubTestResponse{stdout: validJob, stderrBytes: notices.MaxDiagnosticBytes + 1}, want: "diagnostic output exceeds"},
+		{name: "attempt stdout overflow", job: githubTestResponse{stdout: validJob}, attempt: githubTestResponse{stdoutBytes: notices.MaxResponseBytes + 1}, want: "response exceeds"},
+		{name: "attempt diagnostic overflow", job: githubTestResponse{stdout: validJob}, attempt: githubTestResponse{stdout: validAttempt, stderrBytes: notices.MaxDiagnosticBytes + 1}, want: "diagnostic output exceeds"},
+		{name: "job malformed", job: githubTestResponse{stdout: `{"id":`}, want: "parse response"},
+		{name: "attempt malformed", job: githubTestResponse{stdout: validJob}, attempt: githubTestResponse{stdout: `{"id":`}, want: "parse response"},
+		{name: "job cancellation", job: githubTestResponse{delay: 10 * time.Second}, cancelAfter: 50 * time.Millisecond, want: "read GitHub API repos/test/repo/actions/jobs/456"},
+		{name: "attempt cancellation", job: githubTestResponse{stdout: validJob}, attempt: githubTestResponse{delay: 10 * time.Second}, cancelAfter: 50 * time.Millisecond, want: "read GitHub API repos/test/repo/actions/runs/123/attempts/2"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			responses := map[string]githubTestResponse{jobEndpoint: tc.job, attemptEndpoint: tc.attempt}
+			host := New(githubTestCmdFactory(responses), nil, "github.com", "test/repo")
+			ctx := context.Background()
+			if tc.cancelAfter > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.cancelAfter)
+				defer cancel()
+			}
+			identity, err := host.GetCIAttemptIdentity(ctx, &scm.PR{Number: "123"}, "abc123", checks)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("identity = %q, error = %v, want named refusal containing %q", identity, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestGetCIAttemptIdentityRejectsReusableGenericDetailsURL(t *testing.T) {
+	t.Parallel()
+
+	host := New(failIfInvokedCmdFactory(t), nil, "github.com", "test/repo")
+	checks := []scm.Check{{Name: "external", DetailsURL: "https://ci.example.test/status/reusable"}}
+	if _, err := host.GetCIAttemptIdentity(context.Background(), &scm.PR{Number: "123"}, "abc123", checks); err == nil || !strings.Contains(err.Error(), "not an authoritative GitHub Actions job") {
+		t.Fatalf("GetCIAttemptIdentity() error = %v", err)
 	}
 }
 
@@ -223,7 +291,7 @@ func TestGetChecksFallsBackToStateWhenBucketMissing(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --json name,state,bucket,completedAt": {
+		"gh pr checks 123 --json name,state,bucket,completedAt,link": {
 			stdout: `[{"name":"build","state":"FAILURE","bucket":""},{"name":"tests","state":"PENDING","bucket":""}]` + "\n",
 		},
 	}), nil, "", "")
@@ -376,7 +444,7 @@ func TestGetChecksParsesCompletedAt(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --json name,state,bucket,completedAt": {
+		"gh pr checks 123 --json name,state,bucket,completedAt,link": {
 			stdout: `[{"name":"build","state":"FAILURE","bucket":"fail","completedAt":"2026-04-24T04:15:00Z"},{"name":"tests","state":"SUCCESS","bucket":"pass","completedAt":"not-a-time"}]` + "\n",
 		},
 	}), nil, "", "")
@@ -535,10 +603,13 @@ func TestAvailableFallsBackToUnscopedAuthWhenHostUnknown(t *testing.T) {
 }
 
 type githubTestResponse struct {
-	stdout    string
-	stderr    string
-	wantStdin string
-	code      int
+	stdout      string
+	stderr      string
+	wantStdin   string
+	stdoutBytes int
+	stderrBytes int
+	delay       time.Duration
+	code        int
 }
 
 func githubTestCmdFactory(responses map[string]githubTestResponse) CmdFactory {
@@ -554,6 +625,9 @@ func githubTestCmdFactory(responses map[string]githubTestResponse) CmdFactory {
 			"GITHUB_TEST_STDOUT="+response.stdout,
 			"GITHUB_TEST_STDERR="+response.stderr,
 			"GITHUB_TEST_WANT_STDIN="+response.wantStdin,
+			fmt.Sprintf("GITHUB_TEST_STDOUT_BYTES=%d", response.stdoutBytes),
+			fmt.Sprintf("GITHUB_TEST_STDERR_BYTES=%d", response.stderrBytes),
+			fmt.Sprintf("GITHUB_TEST_DELAY=%s", response.delay),
 			fmt.Sprintf("GITHUB_TEST_EXIT_CODE=%d", response.code),
 		)
 		return cmd
@@ -576,11 +650,24 @@ func TestGitHubHelperProcess(t *testing.T) {
 			os.Exit(1)
 		}
 	}
+	if delay, err := time.ParseDuration(os.Getenv("GITHUB_TEST_DELAY")); err == nil && delay > 0 {
+		time.Sleep(delay)
+	}
 	if _, err := fmt.Fprint(os.Stdout, os.Getenv("GITHUB_TEST_STDOUT")); err != nil {
 		os.Exit(1)
 	}
+	if count, _ := strconv.Atoi(os.Getenv("GITHUB_TEST_STDOUT_BYTES")); count > 0 {
+		if _, err := os.Stdout.Write(bytes.Repeat([]byte("x"), count)); err != nil {
+			os.Exit(1)
+		}
+	}
 	if _, err := fmt.Fprint(os.Stderr, os.Getenv("GITHUB_TEST_STDERR")); err != nil {
 		os.Exit(1)
+	}
+	if count, _ := strconv.Atoi(os.Getenv("GITHUB_TEST_STDERR_BYTES")); count > 0 {
+		if _, err := os.Stderr.Write(bytes.Repeat([]byte("x"), count)); err != nil {
+			os.Exit(1)
+		}
 	}
 	if code := os.Getenv("GITHUB_TEST_EXIT_CODE"); code != "" && code != "0" {
 		os.Exit(1)

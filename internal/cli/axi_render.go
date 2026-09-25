@@ -438,6 +438,17 @@ func joinComma(parts []string) string {
 	return out
 }
 
+func (rv runView) reviewRiskStale() bool {
+	for _, step := range rv.Steps {
+		if step.Name != string(types.StepReview) {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(step.FindingsJSON)
+		return err == nil && findings.RiskLevel == types.RiskStale
+	}
+	return false
+}
+
 // runObjectField renders a run as a TOON "run:" object with a steps table.
 func runObjectField(rv runView) toon.Field {
 	return runObjectFieldWithKey("run", rv)
@@ -448,6 +459,9 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		{Key: "id", Value: rv.ID},
 		{Key: "branch", Value: rv.Branch},
 		{Key: "status", Value: rv.Status},
+	}
+	if rv.reviewRiskStale() {
+		fields = append(fields, toon.Field{Key: "risk", Value: types.RiskStale}, toon.Field{Key: "risk_note", Value: types.StaleRiskRationale})
 	}
 	// Surface the parked-awaiting-agent signal right after status so one read
 	// distinguishes a run waiting for the agent to drive a gate from one that

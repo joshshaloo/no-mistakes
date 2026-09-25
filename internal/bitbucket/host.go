@@ -69,6 +69,22 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	return h.toPR(updated), nil
 }
 
+func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) error {
+	id, err := strconv.Atoi(pr.Number)
+	if err != nil {
+		return fmt.Errorf("invalid Bitbucket PR number %q: %w", pr.Number, err)
+	}
+	return h.client.AddPRComment(ctx, h.repo, id, body)
+}
+
+func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) {
+	id, err := strconv.Atoi(pr.Number)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Bitbucket PR number %q: %w", pr.Number, err)
+	}
+	return h.client.ListPRComments(ctx, h.repo, id)
+}
+
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
 	id, err := strconv.Atoi(pr.Number)
 	if err != nil {
@@ -97,11 +113,16 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	checks := make([]scm.Check, 0, len(statuses))
 	for _, status := range statuses {
 		checks = append(checks, scm.Check{
-			Name:   statusName(status),
-			Bucket: statusBucket(status.State),
+			Name:       statusName(status),
+			Bucket:     statusBucket(status.State),
+			DetailsURL: strings.TrimSpace(status.URL),
 		})
 	}
 	return checks, nil
+}
+
+func (h *Host) GetCIAttemptIdentity(context.Context, *scm.PR, string, []scm.Check) (string, error) {
+	return "", errors.New("Bitbucket build-status path does not expose authoritative per-attempt identity")
 }
 
 func (h *Host) GetMergeableState(_ context.Context, _ *scm.PR) (scm.MergeableState, error) {

@@ -158,6 +158,10 @@ func (s *CIStep) pushUpdatedHeadSHA(sctx *pipeline.StepContext, newHeadSHA strin
 		}
 	}
 
+	if err := s.publishRiskNoticeBeforePush(sctx); err != nil {
+		return false, err
+	}
+
 	// Anchor the force-with-lease to the head the run last recorded for this
 	// branch (what the pipeline last pushed/observed), NOT to a SHA freshly read
 	// from the remote a moment before pushing - that self-defeating anchor always

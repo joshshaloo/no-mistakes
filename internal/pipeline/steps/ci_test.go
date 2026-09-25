@@ -12,6 +12,8 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
@@ -449,6 +451,54 @@ func TestCIStep_CIWarningAllowsChecksPassedToBeReannounced(t *testing.T) {
 	if passedLogs != 2 {
 		t.Fatalf("expected checks-passed status before and after CI warning, got %d logs: %v", passedLogs, logs)
 	}
+}
+
+func TestCIStep_ReadinessClearFailureIsReturned(t *testing.T) {
+	t.Parallel()
+	want := errors.New("injected clear failure")
+	step := &CIStep{setRunCIReady: func(_ string, ready bool) error {
+		if ready {
+			t.Fatal("clear attempted to persist ready=true")
+		}
+		return want
+	}}
+	sctx := &pipeline.StepContext{Run: &db.Run{ID: "run-1"}}
+	if err := step.clearCIMonitorReady(sctx); !errors.Is(err, want) || !strings.Contains(err.Error(), "clear durable CI readiness") {
+		t.Fatalf("clear error = %v", err)
+	}
+}
+
+func TestCIStep_PreviouslyReadyClearWriteFailureIsFailClosed(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = fakeCIGH(t, "OPEN", `not-json`)
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = 10 * time.Second
+	if err := sctx.DB.SetRunCIReady(sctx.Run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	want := errors.New("injected clear failure")
+	step := &CIStep{setRunCIReady: func(_ string, ready bool) error {
+		if !ready {
+			return want
+		}
+		return sctx.DB.SetRunCIReady(sctx.Run.ID, ready)
+	}}
+	_, err := step.Execute(sctx)
+	if !errors.Is(err, want) || !strings.Contains(err.Error(), "read CI checks") || !strings.Contains(err.Error(), "clear durable CI readiness") {
+		t.Fatalf("Execute error = %v", err)
+	}
+	dbRun, getErr := sctx.DB.GetRun(sctx.Run.ID)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if dbRun.CIReadyAt == nil {
+		t.Fatal("injected failed clear was represented as successful")
+	}
+	t.Logf("READINESS-CLEAR-REFUSED persisted_ready=%t error=%v", dbRun.CIReadyAt != nil, err)
 }
 
 func TestCIStep_CIWarningClearsPersistedReadiness(t *testing.T) {

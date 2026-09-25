@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -132,7 +134,7 @@ func fakeGHHandler(args []string) {
 		}
 		os.Exit(1)
 	}
-	if len(args) >= 2 && args[0] == "pr" && args[1] == "edit" {
+	if len(args) >= 2 && args[0] == "pr" && (args[1] == "edit" || args[1] == "comment") {
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "create" {
@@ -250,7 +252,7 @@ func fakeGlabHandler(args []string) {
 		}
 		os.Exit(1)
 	}
-	if len(args) >= 2 && args[0] == "mr" && args[1] == "update" {
+	if len(args) >= 2 && args[0] == "mr" && (args[1] == "update" || args[1] == "note") {
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "mr" && args[1] == "create" {
@@ -289,6 +291,9 @@ func fakeCIGHReconcileHandler(args []string) {
 		fmt.Println("https://github.com/test/repo/pull/42")
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "pr comment") {
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json state") {
 		state, err := os.ReadFile(os.Getenv("FAKE_CLI_STATE_PATH"))
 		if err != nil {
@@ -316,7 +321,95 @@ func fakeCIGHReconcileHandler(args []string) {
 	os.Exit(1)
 }
 
+func fakeGitHubActionsAPI(args []string) bool {
+	if len(args) < 2 || args[0] != "api" || !strings.Contains(args[len(args)-1], "/actions/") {
+		return false
+	}
+	endpoint := args[len(args)-1]
+	head := os.Getenv("FAKE_CLI_ACTIONS_HEAD")
+	attempt := 1
+	if indexPath := os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH"); indexPath != "" {
+		if raw, err := os.ReadFile(indexPath); err == nil {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && parsed > 0 {
+				attempt = parsed
+			}
+		}
+	}
+	parts := strings.Split(strings.Trim(endpoint, "/"), "/")
+	if len(parts) == 6 && parts[3] == "actions" && parts[4] == "jobs" {
+		jobID, _ := strconv.ParseInt(parts[5], 10, 64)
+		fmt.Printf(`{"id":%d,"run_id":123,"run_attempt":%d,"head_sha":%q,"name":"test"}`+"\n", jobID, attempt, head)
+		return true
+	}
+	if len(parts) == 8 && parts[3] == "actions" && parts[4] == "runs" && parts[6] == "attempts" {
+		runID, _ := strconv.ParseInt(parts[5], 10, 64)
+		requestedAttempt, _ := strconv.Atoi(parts[7])
+		fmt.Printf(`{"id":%d,"run_attempt":%d,"head_sha":%q,"repository":{"full_name":"test/repo"}}`+"\n", runID, requestedAttempt, head)
+		return true
+	}
+	fmt.Fprintln(os.Stderr, "unsupported Actions API endpoint:", endpoint)
+	os.Exit(1)
+	return true
+}
+
+func writeFakeIncludedNotices(bodyPath string) {
+	fmt.Print("HTTP/2.0 200 OK\n\n[")
+	data, err := os.ReadFile(bodyPath + ".jsonl")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		os.Exit(1)
+	}
+	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+	for i, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		if i > 0 {
+			fmt.Print(",")
+		}
+		fmt.Print(string(line))
+	}
+	fmt.Println("]")
+	os.Exit(0)
+}
+
 func fakeCIGHHandler(args []string) {
+	if fakeGitHubActionsAPI(args) {
+		return
+	}
+	if bodyPath := os.Getenv("FAKE_CLI_RISK_BODY"); bodyPath != "" {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "pr comment") {
+			if os.Getenv("FAKE_CLI_RISK_EDIT_FAIL") == "1" {
+				os.Exit(1)
+			}
+			body, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				os.Exit(1)
+			}
+			f, err := os.OpenFile(bodyPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				os.Exit(1)
+			}
+			if _, err := f.Write(append(body, '\n')); err != nil {
+				f.Close()
+				os.Exit(1)
+			}
+			f.Close()
+			notices, _ := os.OpenFile(bodyPath+".jsonl", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if notices == nil || json.NewEncoder(notices).Encode(map[string]string{"body": string(body)}) != nil {
+				os.Exit(1)
+			}
+			notices.Close()
+			os.Exit(0)
+		}
+		if len(args) >= 2 && args[0] == "api" {
+			if os.Getenv("FAKE_CLI_RISK_LOOKUP_FAIL") == "1" {
+				fmt.Fprintln(os.Stderr, "injected notice lookup failure")
+				os.Exit(1)
+			}
+			writeFakeIncludedNotices(bodyPath)
+		}
+	}
 	state := os.Getenv("FAKE_CLI_STATE")
 	stateErr := os.Getenv("FAKE_CLI_STATE_ERR")
 	checksJSON := os.Getenv("FAKE_CLI_CHECKS")
@@ -363,6 +456,36 @@ func fakeCIGHHandler(args []string) {
 }
 
 func fakeCIGHSequenceHandler(args []string) {
+	if fakeGitHubActionsAPI(args) {
+		return
+	}
+	if bodyPath := os.Getenv("FAKE_CLI_RISK_BODY"); bodyPath != "" {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "pr comment") {
+			body, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				os.Exit(1)
+			}
+			f, err := os.OpenFile(bodyPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				os.Exit(1)
+			}
+			if _, err := f.Write(append(body, '\n')); err != nil {
+				f.Close()
+				os.Exit(1)
+			}
+			f.Close()
+			notices, _ := os.OpenFile(bodyPath+".jsonl", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if notices == nil || json.NewEncoder(notices).Encode(map[string]string{"body": string(body)}) != nil {
+				os.Exit(1)
+			}
+			notices.Close()
+			os.Exit(0)
+		}
+		if len(args) >= 2 && args[0] == "api" {
+			writeFakeIncludedNotices(bodyPath)
+		}
+	}
 	state := os.Getenv("FAKE_CLI_STATE")
 	checksPath := os.Getenv("FAKE_CLI_CHECKS_PATH")
 	indexPath := os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH")

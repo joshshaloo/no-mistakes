@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -523,7 +524,11 @@ func TestAzdoHelperProcess(t *testing.T) {
 	if os.Getenv("AZDO_TEST_HELPER") != "1" {
 		return
 	}
-	if _, err := fmt.Fprint(os.Stdout, os.Getenv("AZDO_TEST_STDOUT")); err != nil {
+	if count, err := strconv.Atoi(os.Getenv("AZDO_TEST_STDOUT_BYTES")); err == nil && count > 0 {
+		if _, err := fmt.Fprint(os.Stdout, strings.Repeat("x", count)); err != nil {
+			os.Exit(1)
+		}
+	} else if _, err := fmt.Fprint(os.Stdout, os.Getenv("AZDO_TEST_STDOUT")); err != nil {
 		os.Exit(1)
 	}
 	if _, err := fmt.Fprint(os.Stderr, os.Getenv("AZDO_TEST_STDERR")); err != nil {

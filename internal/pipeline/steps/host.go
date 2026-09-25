@@ -32,11 +32,13 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 		// host cannot make this repo look unauthenticated.
 		host := scm.ResolveHost(sctx.Ctx, sctx.Repo.UpstreamURL)
 		repo := github.HostPrefixedSlugForHost(sctx.Repo.UpstreamURL, host)
-		if repo == "" && sctx.Run.PRURL != nil {
+		if sctx.Run.PRURL != nil {
 			prHost := scm.ResolveHost(sctx.Ctx, *sctx.Run.PRURL)
-			repo = github.HostPrefixedSlugForHost(*sctx.Run.PRURL, prHost)
 			if host == "" {
 				host = prHost
+				repo = github.HostPrefixedSlugForHost(*sctx.Run.PRURL, prHost)
+			} else if repo == "" {
+				repo = github.HostPrefixedSlugForHost(*sctx.Run.PRURL, prHost)
 			}
 		}
 		forkRepo := ""

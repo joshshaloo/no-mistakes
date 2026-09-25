@@ -686,9 +686,19 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	autoFixAttempts := state.autoFixAttempts
 	roundNum := state.roundNum
 
+	reviewRiskInvalidated := func(findings string, durationMS *int64) {
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, types.StepReview, string(types.StepStatusCompleted), findings, "", "", durationMS)
+	}
 	stepAgent := e.agent
 	if stepAgent != nil {
-		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
+		boundaryAgent := &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
+		if stepName.Order() > types.StepReview.Order() {
+			boundaryAgent.afterRun = func(ctx context.Context) error {
+				_, err := RefreshReviewRisk(ctx, e.db, run.ID, workDir, "", reviewRiskInvalidated)
+				return err
+			}
+		}
+		stepAgent = boundaryAgent
 		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
 		stepAgent = &perfRecordingAgent{
 			inner:    stepAgent,
@@ -699,22 +709,23 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 	}
 	sctx := &StepContext{
-		Ctx:              ctx,
-		Run:              run,
-		Repo:             repo,
-		WorkDir:          workDir,
-		Agent:            stepAgent,
-		Config:           e.config,
-		DB:               e.db,
-		StepResultID:     sr.ID,
-		UserIntent:       userIntent,
-		IntentSource:     userIntentSource,
-		Sessions:         e.sessions,
-		Shared:           e.shared,
-		Fixing:           state.fixing,
-		PreviousFindings: state.previousFindings,
-		Log:              writeLog,
-		LogChunk:         writeLogChunk,
+		Ctx:                   ctx,
+		Run:                   run,
+		Repo:                  repo,
+		WorkDir:               workDir,
+		Agent:                 stepAgent,
+		Config:                e.config,
+		DB:                    e.db,
+		StepResultID:          sr.ID,
+		UserIntent:            userIntent,
+		IntentSource:          userIntentSource,
+		Sessions:              e.sessions,
+		Shared:                e.shared,
+		ReviewRiskInvalidated: reviewRiskInvalidated,
+		Fixing:                state.fixing,
+		PreviousFindings:      state.previousFindings,
+		Log:                   writeLog,
+		LogChunk:              writeLogChunk,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
@@ -1030,13 +1041,21 @@ func roundInsertID(_ string, inserted *db.StepRound, err error) string {
 type gateStepBoundaryAgent struct {
 	inner agent.Agent
 	phase types.StepName
+	// Resolve freshness synchronously at the mutation boundary, including
+	// failed turns. Never add Git work after a step has published a terminal
+	// outcome, or on skipped/read-only steps on the way to cleanup.
+	afterRun func(context.Context) error
 }
 
 func (a *gateStepBoundaryAgent) Name() string { return a.inner.Name() }
 
 func (a *gateStepBoundaryAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	opts.Prompt = gateguidance.PromptBoundary(string(a.phase)) + opts.Prompt
-	return a.inner.Run(ctx, opts)
+	result, err := a.inner.Run(ctx, opts)
+	if a.afterRun != nil {
+		err = errors.Join(err, a.afterRun(ctx))
+	}
+	return result, err
 }
 
 func (a *gateStepBoundaryAgent) Close() error { return a.inner.Close() }

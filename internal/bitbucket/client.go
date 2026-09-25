@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/notices"
 )
 
 const (
@@ -27,6 +29,8 @@ type RepoRef struct {
 }
 
 type PullRequest struct {
+	Title            string
+	Description      string
 	ID               int
 	URL              string
 	State            string
@@ -39,6 +43,8 @@ type CommitStatus struct {
 	State       string `json:"state"`
 	Description string `json:"description"`
 	URL         string `json:"url"`
+	UUID        string `json:"uuid"`
+	UpdatedOn   string `json:"updated_on"`
 }
 
 type Pipeline struct {
@@ -165,6 +171,58 @@ func (c *Client) UpdatePR(ctx context.Context, repo RepoRef, prID int, title, bo
 		return nil, err
 	}
 	return response.toPullRequest(), nil
+}
+
+func (c *Client) AddPRComment(ctx context.Context, repo RepoRef, prID int, body string) error {
+	requestBody := map[string]any{"content": map[string]string{"raw": body}}
+	return c.doJSON(ctx, http.MethodPost, fmt.Sprintf("%s/%d/comments", repoPRPath(repo), prID), nil, requestBody, nil)
+}
+
+func (c *Client) ListPRComments(ctx context.Context, repo RepoRef, prID int) ([]string, error) {
+	query := url.Values{}
+	query.Set("sort", "created_on")
+	next := fmt.Sprintf("%s/%d/comments?%s", repoPRPath(repo), prID, query.Encode())
+	var bodies []string
+	pages := 0
+	totalBytes := 0
+	for next != "" {
+		if err := notices.ValidateAggregate(pages, len(bodies), totalBytes, true); err != nil {
+			return nil, fmt.Errorf("read Bitbucket PR notices before next request: %w", err)
+		}
+		var response struct {
+			Values []struct {
+				Content struct {
+					Raw string `json:"raw"`
+				} `json:"content"`
+			} `json:"values"`
+			Next string `json:"next"`
+		}
+		pageBytes, err := c.doJSONPathOrURLLimited(ctx, http.MethodGet, next, nil, &response, notices.MaxResponseBytes-totalBytes)
+		if err != nil {
+			return nil, err
+		}
+		totalBytes += pageBytes
+		if totalBytes > notices.MaxResponseBytes {
+			return nil, fmt.Errorf("read Bitbucket PR notices: %w: aggregate response exceeds %d bytes", notices.ErrCapacity, notices.MaxResponseBytes)
+		}
+		pages++
+		commentCount := len(bodies) + len(response.Values)
+		if err := notices.ValidateAggregate(pages, commentCount, totalBytes, response.Next != ""); err != nil {
+			return nil, fmt.Errorf("read Bitbucket PR notices: %w", err)
+		}
+		for _, comment := range response.Values {
+			bodies = append(bodies, comment.Content.Raw)
+		}
+		if response.Next == "" {
+			break
+		}
+		validated, err := c.validatePaginationURL(response.Next)
+		if err != nil {
+			return nil, err
+		}
+		next = validated
+	}
+	return bodies, nil
 }
 
 func (c *Client) GetPR(ctx context.Context, repo RepoRef, prID int) (*PullRequest, error) {
@@ -355,9 +413,11 @@ func readTail(r io.Reader, maxBytes int) ([]byte, error) {
 }
 
 type bitbucketPullRequest struct {
-	ID     int    `json:"id"`
-	State  string `json:"state"`
-	Source struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	ID          int    `json:"id"`
+	State       string `json:"state"`
+	Source      struct {
 		Commit struct {
 			Hash string `json:"hash"`
 		} `json:"commit"`
@@ -371,6 +431,8 @@ type bitbucketPullRequest struct {
 
 func (pr bitbucketPullRequest) toPullRequest() *PullRequest {
 	return &PullRequest{
+		Title:            pr.Title,
+		Description:      pr.Description,
 		ID:               pr.ID,
 		URL:              strings.TrimSpace(pr.Links.HTML.Href),
 		State:            strings.TrimSpace(pr.State),
@@ -405,11 +467,21 @@ func (c *Client) doJSON(ctx context.Context, method, path string, query url.Valu
 }
 
 func (c *Client) doJSONPathOrURL(ctx context.Context, method, pathOrURL string, requestBody any, responseBody any) error {
+	_, err := c.doJSONPathOrURLWithLimit(ctx, method, pathOrURL, requestBody, responseBody, -1)
+	return err
+}
+
+func (c *Client) doJSONPathOrURLLimited(ctx context.Context, method, pathOrURL string, requestBody any, responseBody any, limit int) (int, error) {
+	return c.doJSONPathOrURLWithLimit(ctx, method, pathOrURL, requestBody, responseBody, limit)
+}
+
+func (c *Client) doJSONPathOrURLWithLimit(ctx context.Context, method, pathOrURL string, requestBody any, responseBody any, limit int) (int, error) {
+	bounded := limit >= 0
 	var bodyReader io.Reader = http.NoBody
 	if requestBody != nil {
 		payload, err := json.Marshal(requestBody)
 		if err != nil {
-			return fmt.Errorf("marshal Bitbucket request body: %w", err)
+			return 0, fmt.Errorf("marshal Bitbucket request body: %w", err)
 		}
 		bodyReader = bytes.NewReader(payload)
 	}
@@ -421,7 +493,7 @@ func (c *Client) doJSONPathOrURL(ctx context.Context, method, pathOrURL string, 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, bodyReader)
 	if err != nil {
-		return fmt.Errorf("build Bitbucket request: %w", err)
+		return 0, fmt.Errorf("build Bitbucket request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 	req.SetBasicAuth(c.email, c.token)
@@ -431,21 +503,42 @@ func (c *Client) doJSONPathOrURL(ctx context.Context, method, pathOrURL string, 
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("Bitbucket %s %s: %w", method, requestLabel, err)
+		return 0, fmt.Errorf("Bitbucket %s %s: %w", method, requestLabel, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Bitbucket %s %s: status %d: %s", method, requestLabel, resp.StatusCode, strings.TrimSpace(string(data)))
+		var data []byte
+		if bounded {
+			data, err = notices.ReadAll(io.LimitReader(resp.Body, notices.MaxDiagnosticBytes+1), "read Bitbucket PR notice diagnostics")
+			if len(data) > notices.MaxDiagnosticBytes {
+				err = notices.ErrCapacity
+			}
+		} else {
+			data, _ = io.ReadAll(resp.Body)
+		}
+		if err != nil {
+			return 0, fmt.Errorf("Bitbucket %s %s: status %d: %w", method, requestLabel, resp.StatusCode, err)
+		}
+		return 0, fmt.Errorf("Bitbucket %s %s: status %d: %s", method, requestLabel, resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 	if responseBody == nil {
-		return nil
+		return 0, nil
+	}
+	if bounded {
+		data, err := notices.ReadAllLimit(resp.Body, "read Bitbucket PR notices", limit)
+		if err != nil {
+			return 0, err
+		}
+		if err := json.Unmarshal(data, responseBody); err != nil {
+			return 0, fmt.Errorf("decode Bitbucket response: %w", err)
+		}
+		return len(data), nil
 	}
 	if err := json.NewDecoder(resp.Body).Decode(responseBody); err != nil {
-		return fmt.Errorf("decode Bitbucket response: %w", err)
+		return 0, fmt.Errorf("decode Bitbucket response: %w", err)
 	}
-	return nil
+	return 0, nil
 }
 
 func repoPRPath(repo RepoRef) string {

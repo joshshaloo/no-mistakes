@@ -236,6 +236,7 @@ type fakeBitbucketPRAPI struct {
 	listCalls      int
 	createCalls    int
 	updateCalls    int
+	commentCalls   int
 	lastAuthHeader string
 	lastCreateBody string
 	lastUpdateBody string
@@ -280,6 +281,11 @@ func newFakeBitbucketPRAPI(t *testing.T, existingPRID int, existingPRURL string)
 			fmt.Fprintf(w, `{"id":99,"links":{"html":{"href":%q}}}`,
 				api.createdPRURL,
 			)
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/2.0/repositories/test/repo/pullrequests/") && strings.HasSuffix(r.URL.Path, "/comments"):
+			api.commentCalls++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{}`)
 		case r.Method == http.MethodPut && r.URL.Path == fmt.Sprintf("/2.0/repositories/test/repo/pullrequests/%d", api.existingPRID):
 			api.updateCalls++
 			body, err := io.ReadAll(r.Body)
