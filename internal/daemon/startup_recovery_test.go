@@ -421,6 +421,85 @@ func TestCrashRecoveryPinsRecordedHeadBeforeFailureAndRetainsAmbiguity(t *testin
 	}
 }
 
+func TestReconcileTerminalPRRunsUsesCompletionCleanup(t *testing.T) {
+	for _, ambiguous := range []bool{false, true} {
+		name := "cleanup succeeds"
+		if ambiguous {
+			name = "cleanup refuses"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			repo, recorded := setupTestGitRepo(t, p, database, "terminal-pr-cleanup")
+			run, err := database.InsertRun(repo.ID, "feature", recorded, recorded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.ObserveRunPRState(run.ID, "merged"); err != nil {
+				t.Fatal(err)
+			}
+			ci, err := database.InsertStepResult(run.ID, types.StepCI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.StartStep(ci.ID); err != nil {
+				t.Fatal(err)
+			}
+			worktree := p.WorktreeDir(repo.ID, run.ID)
+			if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, recorded); err != nil {
+				t.Fatal(err)
+			}
+			if ambiguous {
+				gitCmd(t, worktree, "config", "user.name", "test")
+				gitCmd(t, worktree, "config", "user.email", "test@example.com")
+				if err := os.WriteFile(worktree+"/candidate.txt", []byte("candidate\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, worktree, "add", "candidate.txt")
+				gitCmd(t, worktree, "commit", "-m", "candidate")
+			}
+
+			count := reconcileTerminalPRRuns(database, p, NewRunManager(database, p, nil))
+			got, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ambiguous {
+				if count != 0 || got.Status != types.RunFailed {
+					t.Fatalf("refused cleanup = count %d status %s", count, got.Status)
+				}
+				if got.Error == nil || !strings.Contains(*got.Error, db.RunCustodyDiagnosticMarker) {
+					t.Fatalf("custody diagnostic = %v", got.Error)
+				}
+				if _, err := os.Stat(worktree); err != nil {
+					t.Fatalf("refused worktree was not retained: %v", err)
+				}
+				return
+			}
+			if count != 1 || got.Status != types.RunCompleted {
+				t.Fatalf("successful cleanup = count %d status %s", count, got.Status)
+			}
+			if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+				t.Fatalf("completed worktree still exists: %v", err)
+			}
+			gotCI, err := database.GetStepResult(ci.ID)
+			if err != nil || gotCI.Status != types.StepStatusCompleted {
+				t.Fatalf("CI finalization = %#v, %v", gotCI, err)
+			}
+		})
+	}
+}
+
 // TestRunWithOptions_RequiresSingletonLockBeforeRecovery proves the ordering
 // the fix depends on: when another process already holds the singleton lock
 // for this root, RunWithOptions must fail before ever calling

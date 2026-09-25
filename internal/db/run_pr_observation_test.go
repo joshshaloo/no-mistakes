@@ -47,11 +47,12 @@ func TestObserveRunPRStateLeavesCompletionToOwner(t *testing.T) {
 					t.Fatalf("observation prematurely completed CI: %s", step.Status)
 				}
 			}
-			// If the owner crashes before crossing its cleanup barrier, exclusive
-			// startup still has enough durable truth to finalize this run.
-			n, err := d.ReconcileTerminalPRRuns()
-			if err != nil || n != 1 {
-				t.Fatalf("reconcile = %d, %v", n, err)
+			candidates, err := d.TerminalPRCompletionCandidates()
+			if err != nil || len(candidates) != 1 {
+				t.Fatalf("completion candidates = %d, %v", len(candidates), err)
+			}
+			if err := d.CompleteSuccessfulRun(run.ID, true); err != nil {
+				t.Fatal(err)
 			}
 			got, err := d.GetRun(run.ID)
 			if err != nil {

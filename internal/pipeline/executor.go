@@ -21,6 +21,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/runcompletion"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -52,9 +53,7 @@ type Executor struct {
 
 	onEvent EventFunc
 
-	// beforeComplete is the owner's synchronous resource-cleanup barrier.
-	// A completed DB row/event must never get ahead of worktree removal.
-	beforeComplete func() error
+	completionFinalizer runcompletion.Finalizer
 
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
@@ -102,6 +101,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		approvalCh:            make(chan approvalResponse, 1),
 		gateReconcileInterval: defaultGateReconcileInterval,
 		gateReconcileTimeout:  defaultGateReconcileTimeout,
+		completionFinalizer:   runcompletion.Finalizer{DB: database, OnEvent: onEvent},
 	}
 	if cfg != nil {
 		// nil unless the host explicitly opted in AND a key resolves.
@@ -115,7 +115,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 // fails the run instead. The owner must make it idempotent for deferred cleanup
 // on failure/panic paths, which do not pass through successful completion.
 func (e *Executor) SetBeforeComplete(cleanup func() error) {
-	e.beforeComplete = cleanup
+	e.completionFinalizer.Cleanup = cleanup
 }
 
 // SetConvergenceDetector overrides the non-convergence detector. Tests use it
@@ -240,26 +240,8 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 // had persisted and emitted completion, letting readers win that race under
 // contention. Cleanup must precede BOTH publications, not just the IPC event.
 func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) error {
-	var cleanupErr error
-	if e.beforeComplete != nil {
-		cleanupErr = e.beforeComplete()
-	}
-	if cause := context.Cause(ctx); cause != nil {
-		err := cause
-		if cleanupErr != nil {
-			err = errors.Join(cause, fmt.Errorf("complete run cleanup: %w", cleanupErr))
-		}
-		return e.failRun(run, repo, err, ctx)
-	}
-	if cleanupErr != nil {
-		return e.failRun(run, repo, fmt.Errorf("complete run cleanup: %w", cleanupErr))
-	}
-	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
-	}
-	run.Status = types.RunCompleted
-	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
-	return nil
+	e.completionFinalizer.OnEvent = e.onEvent
+	return e.completionFinalizer.Finalize(ctx, run, repo)
 }
 
 func (e *Executor) initializeRunScopes(runID string) {
@@ -354,7 +336,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		},
 		LogChunk:           func(string) {},
 		LogFile:            func(string) {},
-		deferRunCompletion: e.beforeComplete != nil,
+		deferRunCompletion: e.completionFinalizer.Cleanup != nil,
 	}
 	if reconciled, reconcileErr := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx); reconciled {
 		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
@@ -742,7 +724,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
 		},
-		deferRunCompletion: e.beforeComplete != nil,
+		deferRunCompletion: e.completionFinalizer.Cleanup != nil,
 	}
 
 	nextTrigger := "initial"

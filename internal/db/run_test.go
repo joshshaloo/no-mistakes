@@ -465,7 +465,7 @@ func TestUpdateRunPRStateDoesNotRewriteAlreadyTerminalStatus(t *testing.T) {
 	}
 }
 
-func TestReconcileTerminalPRRunsFinalizesLegacyActiveRows(t *testing.T) {
+func TestTerminalPRCompletionCandidatesRequireExplicitFinalization(t *testing.T) {
 	for _, state := range []string{"merged", "closed"} {
 		t.Run(state, func(t *testing.T) {
 			d := openTestDB(t)
@@ -487,12 +487,15 @@ func TestReconcileTerminalPRRunsFinalizesLegacyActiveRows(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			count, err := d.ReconcileTerminalPRRuns()
+			candidates, err := d.TerminalPRCompletionCandidates()
 			if err != nil {
 				t.Fatal(err)
 			}
-			if count != 1 {
-				t.Fatalf("reconciled count = %d, want 1", count)
+			if len(candidates) != 1 || candidates[0].ID != run.ID {
+				t.Fatalf("completion candidates = %+v, want run %s", candidates, run.ID)
+			}
+			if err := d.CompleteSuccessfulRun(run.ID, true); err != nil {
+				t.Fatal(err)
 			}
 			got, _ := d.GetRun(run.ID)
 			if got.Status != types.RunCompleted || got.AwaitingAgentSince != nil {
@@ -502,9 +505,9 @@ func TestReconcileTerminalPRRunsFinalizesLegacyActiveRows(t *testing.T) {
 			if gotCI.Status != types.StepStatusCompleted {
 				t.Fatalf("reconciled CI status = %s, want completed", gotCI.Status)
 			}
-			count, err = d.ReconcileTerminalPRRuns()
-			if err != nil || count != 0 {
-				t.Fatalf("idempotent reconciliation = count %d err %v, want 0/nil", count, err)
+			candidates, err = d.TerminalPRCompletionCandidates()
+			if err != nil || len(candidates) != 0 {
+				t.Fatalf("idempotent candidates = %d err %v, want 0/nil", len(candidates), err)
 			}
 		})
 	}

@@ -108,31 +108,49 @@ func TestExecutor_CompletionWaitsForCleanup(t *testing.T) {
 				}
 				return &StepOutcome{SkipRemaining: mode == "execute-skip"}, nil
 			}}
-			exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+			steps := []Step{step}
+			gateName := types.StepCI
+			if mode == "resume" || mode == "resume-skip" {
+				gateName = types.StepRebase
+				steps = []Step{
+					&adaptiveCallStep{name: gateName, fn: func(*StepContext) (*StepOutcome, error) { return &StepOutcome{}, nil }},
+					&adaptiveCallStep{name: types.StepPush, fn: func(*StepContext) (*StepOutcome, error) {
+						return &StepOutcome{SkipRemaining: mode == "resume-skip"}, nil
+					}},
+					&adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) { return &StepOutcome{}, nil }},
+				}
+			}
+			exec := NewExecutor(database, p, nil, nil, steps, nil)
 			if mode == "resume" || mode == "resume-skip" {
 				if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 					t.Fatal(err)
 				}
-				sr, err := database.InsertStepResult(run.ID, types.StepCI)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if err := database.StartStep(sr.ID); err != nil {
-					t.Fatal(err)
-				}
-				findings := `{"findings":[{"id":"ci-1","severity":"warning","description":"decision","action":"ask-user"}]}`
-				if err := database.SetStepFindings(sr.ID, findings); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := database.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 1); err != nil {
-					t.Fatal(err)
-				}
-				if err := database.UpdateStepStatusWithDuration(sr.ID, types.StepStatusAwaitingApproval, 1); err != nil {
-					t.Fatal(err)
+				for index, resumeStep := range steps {
+					sr, err := database.InsertStepResult(run.ID, resumeStep.Name())
+					if err != nil {
+						t.Fatal(err)
+					}
+					if index != 0 {
+						continue
+					}
+					if err := database.StartStep(sr.ID); err != nil {
+						t.Fatal(err)
+					}
+					findings := `{"findings":[{"id":"review-1","severity":"warning","description":"decision","action":"ask-user"}]}`
+					if err := database.SetStepFindings(sr.ID, findings); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := database.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 1); err != nil {
+						t.Fatal(err)
+					}
+					if err := database.UpdateStepStatusWithDuration(sr.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+						t.Fatal(err)
+					}
 				}
 				if err := database.SetRunAwaitingAgent(run.ID); err != nil {
 					t.Fatal(err)
 				}
+				var err error
 				run, err = database.GetRun(run.ID)
 				if err != nil {
 					t.Fatal(err)
@@ -160,11 +178,7 @@ func TestExecutor_CompletionWaitsForCleanup(t *testing.T) {
 					}
 				}
 				if event.Type == ipc.EventStepCompleted && event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
-					action := types.ActionApprove
-					if mode == "resume-skip" {
-						action = types.ActionSkip
-					}
-					if err := exec.Respond(types.StepCI, action, nil); err != nil {
+					if err := exec.Respond(gateName, types.ActionApprove, nil); err != nil {
 						t.Error(err)
 					}
 				}
