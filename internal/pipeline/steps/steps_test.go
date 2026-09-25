@@ -321,7 +321,41 @@ func fakeCIGHReconcileHandler(args []string) {
 	os.Exit(1)
 }
 
+func fakeGitHubActionsAPI(args []string) bool {
+	if len(args) < 2 || args[0] != "api" || !strings.Contains(args[len(args)-1], "/actions/") {
+		return false
+	}
+	endpoint := args[len(args)-1]
+	head := os.Getenv("FAKE_CLI_ACTIONS_HEAD")
+	attempt := 1
+	if indexPath := os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH"); indexPath != "" {
+		if raw, err := os.ReadFile(indexPath); err == nil {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(string(raw))); err == nil && parsed > 0 {
+				attempt = parsed
+			}
+		}
+	}
+	parts := strings.Split(strings.Trim(endpoint, "/"), "/")
+	if len(parts) == 6 && parts[3] == "actions" && parts[4] == "jobs" {
+		jobID, _ := strconv.ParseInt(parts[5], 10, 64)
+		fmt.Printf(`{"id":%d,"run_id":123,"run_attempt":%d,"head_sha":%q,"name":"test"}`+"\n", jobID, attempt, head)
+		return true
+	}
+	if len(parts) == 8 && parts[3] == "actions" && parts[4] == "runs" && parts[6] == "attempts" {
+		runID, _ := strconv.ParseInt(parts[5], 10, 64)
+		requestedAttempt, _ := strconv.Atoi(parts[7])
+		fmt.Printf(`{"id":%d,"run_attempt":%d,"head_sha":%q,"repository":{"full_name":"test/repo"}}`+"\n", runID, requestedAttempt, head)
+		return true
+	}
+	fmt.Fprintln(os.Stderr, "unsupported Actions API endpoint:", endpoint)
+	os.Exit(1)
+	return true
+}
+
 func fakeCIGHHandler(args []string) {
+	if fakeGitHubActionsAPI(args) {
+		return
+	}
 	if bodyPath := os.Getenv("FAKE_CLI_RISK_BODY"); bodyPath != "" {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "pr comment") {
@@ -419,6 +453,9 @@ func fakeCIGHHandler(args []string) {
 }
 
 func fakeCIGHSequenceHandler(args []string) {
+	if fakeGitHubActionsAPI(args) {
+		return
+	}
 	if bodyPath := os.Getenv("FAKE_CLI_RISK_BODY"); bodyPath != "" {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "pr comment") {

@@ -113,21 +113,16 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	checks := make([]scm.Check, 0, len(statuses))
 	for _, status := range statuses {
 		checks = append(checks, scm.Check{
-			Name:      statusName(status),
-			Bucket:    statusBucket(status.State),
-			AttemptID: statusAttemptID(status),
+			Name:       statusName(status),
+			Bucket:     statusBucket(status.State),
+			DetailsURL: strings.TrimSpace(status.URL),
 		})
 	}
 	return checks, nil
 }
 
-func statusAttemptID(status CommitStatus) string {
-	for _, candidate := range []string{status.UUID, status.UpdatedOn, status.URL} {
-		if value := strings.TrimSpace(candidate); value != "" {
-			return value
-		}
-	}
-	return ""
+func (h *Host) GetCIAttemptIdentity(context.Context, *scm.PR, string, []scm.Check) (string, error) {
+	return "", errors.New("Bitbucket build-status path does not expose authoritative per-attempt identity")
 }
 
 func (h *Host) GetMergeableState(_ context.Context, _ *scm.PR) (scm.MergeableState, error) {

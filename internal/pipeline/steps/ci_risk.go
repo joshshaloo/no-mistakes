@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -103,6 +104,17 @@ func (s *CIStep) publishRiskNoticeBeforePush(sctx *pipeline.StepContext) error {
 		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
 	}
 	return s.reconcileRiskNotice(sctx, host, &scm.PR{Number: number, URL: *sctx.Run.PRURL}, "CI repair push pending", "pre-push:"+sctx.Run.HeadSHA)
+}
+
+func currentCIAttemptIdentity(ctx context.Context, host scm.Host, pr *scm.PR, headSHA string, checks []scm.Check) (string, error) {
+	if reader, ok := host.(scm.CIAttemptIdentityReader); ok {
+		identity, err := reader.GetCIAttemptIdentity(ctx, pr, headSHA, checks)
+		if err != nil {
+			return "", err
+		}
+		return ciAttemptIdentity([]scm.Check{{Name: string(host.Provider()), AttemptID: identity}})
+	}
+	return ciAttemptIdentity(checks)
 }
 
 func ciAttemptIdentity(checks []scm.Check) (string, error) {

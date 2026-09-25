@@ -65,7 +65,7 @@ func TestCIStep_RepairInvalidatesPublishedReviewRisk(t *testing.T) {
 			sctx.Run.PRURL = &prURL
 			sctx.Config.AutoFix.CI = 1
 			sctx.Config.CITimeout = time.Minute
-			sctx.Env = fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"fail","link":"https://github.test/runs/attempt-1"}]`, "MERGEABLE")
+			sctx.Env = append(fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"fail","link":"https://github.com/test/repo/actions/runs/123/job/456"}]`, "MERGEABLE"), "FAKE_CLI_ACTIONS_HEAD="+head)
 			bodyPath := filepath.Join(t.TempDir(), "pr-body.md")
 			sctx.Env = append(sctx.Env, "FAKE_CLI_RISK_BODY="+bodyPath)
 			if failPR {
@@ -156,7 +156,7 @@ func TestCIStep_ValidationEvidenceReadFailureFailsClosed(t *testing.T) {
 	sctx.Config.AutoFix.CI = 1
 	sctx.Config.CITimeout = time.Minute
 	bodyPath := filepath.Join(t.TempDir(), "notice.md")
-	sctx.Env = append(fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"fail","link":"https://github.test/runs/attempt-1"}]`, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
+	sctx.Env = append(fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"fail","link":"https://github.com/test/repo/actions/runs/123/job/456"}]`, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath, "FAKE_CLI_ACTIONS_HEAD="+head)
 	step := &CIStep{
 		buildValidationNotice: func(*pipeline.StepContext, string, string) (string, error) {
 			return "", errors.New("read validation notice evidence: injected step-round read failure")
@@ -211,7 +211,7 @@ func TestCIStep_ValidationEvidenceReadFailureBlocksReady(t *testing.T) {
 	sctx.Run.PRURL = &prURL
 	sctx.Config.CITimeout = time.Minute
 	bodyPath := filepath.Join(t.TempDir(), "notice.md")
-	sctx.Env = append(fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"pass","link":"https://github.test/runs/attempt-1"}]`, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
+	sctx.Env = append(fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"pass","link":"https://github.com/test/repo/actions/runs/123/job/456"}]`, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath, "FAKE_CLI_ACTIONS_HEAD="+head)
 	step := &CIStep{
 		buildValidationNotice: func(*pipeline.StepContext, string, string) (string, error) {
 			return "", errors.New("read validation notice evidence: injected step-round read failure")
@@ -283,13 +283,13 @@ func TestCIStep_SameHeadRerunBetweenPollsPublishesCurrentAttempt(t *testing.T) {
 	prURL := "https://github.com/test/repo/pull/42"
 	sctx.Run.PRURL = &prURL
 	sctx.Config.CITimeout = time.Minute
-	firstLink := "https://github.test/runs/attempt-1"
-	secondLink := "https://github.test/runs/attempt-2"
-	firstID, err := ciAttemptIdentity([]scm.Check{{Name: "test", AttemptID: firstLink}})
+	firstLink := "https://github.com/test/repo/actions/runs/123/job/456"
+	secondLink := firstLink
+	firstID, err := ciAttemptIdentity([]scm.Check{{Name: "github", AttemptID: "github:test/repo:run:123:attempt:1"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondID, err := ciAttemptIdentity([]scm.Check{{Name: "test", AttemptID: secondLink}})
+	secondID, err := ciAttemptIdentity([]scm.Check{{Name: "github", AttemptID: "github:test/repo:run:123:attempt:2"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestCIStep_SameHeadRerunBetweenPollsPublishesCurrentAttempt(t *testing.T) {
 	sctx.Env = append(fakeCIGHSequenceMergeable(t, "OPEN", []string{
 		fmt.Sprintf(`[{"name":"test","bucket":"pass","link":%q}]`, firstLink),
 		fmt.Sprintf(`[{"name":"test","bucket":"pass","link":%q}]`, secondLink),
-	}, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
+	}, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath, "FAKE_CLI_ACTIONS_HEAD="+head)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sctx.Ctx = ctx

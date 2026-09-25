@@ -108,6 +108,12 @@ type PRNoticeReader interface {
 	ListPRNotices(context.Context, *PR) ([]string, error)
 }
 
+// CIAttemptIdentityReader resolves provider-authoritative execution identity for
+// the checks currently reported on an exact pull request head.
+type CIAttemptIdentityReader interface {
+	GetCIAttemptIdentity(context.Context, *PR, string, []Check) (string, error)
+}
+
 // PRState is the normalized lifecycle state of a PR.
 type PRState string
 
@@ -151,6 +157,7 @@ type Check struct {
 	Name        string
 	Bucket      CheckBucket
 	AttemptID   string    // provider-owned identity for this execution of the check
+	DetailsURL  string    // provider detail locator; never sufficient as execution identity
 	CompletedAt time.Time // zero when unknown; used to detect CI re-runs between polls
 }
 

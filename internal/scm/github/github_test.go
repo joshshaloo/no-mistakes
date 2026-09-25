@@ -94,21 +94,45 @@ func TestHostPrefixedSlugForHost_SSHAlias(t *testing.T) {
 	}
 }
 
-func TestGetChecksPassesRepoFlag(t *testing.T) {
+func TestGetChecksResolvesAuthoritativeActionsAttempt(t *testing.T) {
 	t.Parallel()
 
-	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+	responses := map[string]githubTestResponse{
 		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
 			stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass","link":"https://github.com/test/repo/actions/runs/123/job/456"}]` + "\n",
 		},
-	}), nil, "", "test/repo")
+		"gh api repos/test/repo/actions/jobs/456": {
+			stdout: `{"id":456,"run_id":123,"run_attempt":2,"head_sha":"abc123","name":"build"}` + "\n",
+		},
+		"gh api repos/test/repo/actions/runs/123/attempts/2": {
+			stdout: `{"id":123,"run_attempt":2,"head_sha":"abc123","repository":{"full_name":"test/repo"}}` + "\n",
+		},
+	}
+	host := New(githubTestCmdFactory(responses), nil, "github.com", "test/repo")
 
 	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123"})
 	if err != nil {
 		t.Fatalf("GetChecks() error = %v", err)
 	}
-	if len(checks) != 1 || checks[0].Name != "build" || checks[0].AttemptID != "https://github.com/test/repo/actions/runs/123/job/456" {
-		t.Fatalf("checks = %+v, want single build check with provider attempt identity", checks)
+	if len(checks) != 1 || checks[0].Name != "build" || checks[0].AttemptID != "" {
+		t.Fatalf("checks = %+v, want unresolved provider check", checks)
+	}
+	identity, err := host.GetCIAttemptIdentity(context.Background(), &scm.PR{Number: "123"}, "abc123", checks)
+	if err != nil {
+		t.Fatalf("GetCIAttemptIdentity() error = %v", err)
+	}
+	if identity != "github:test/repo:run:123:attempt:2" {
+		t.Fatalf("identity = %q", identity)
+	}
+}
+
+func TestGetCIAttemptIdentityRejectsReusableGenericDetailsURL(t *testing.T) {
+	t.Parallel()
+
+	host := New(failIfInvokedCmdFactory(t), nil, "github.com", "test/repo")
+	checks := []scm.Check{{Name: "external", DetailsURL: "https://ci.example.test/status/reusable"}}
+	if _, err := host.GetCIAttemptIdentity(context.Background(), &scm.PR{Number: "123"}, "abc123", checks); err == nil || !strings.Contains(err.Error(), "not an authoritative GitHub Actions job") {
+		t.Fatalf("GetCIAttemptIdentity() error = %v", err)
 	}
 }
 

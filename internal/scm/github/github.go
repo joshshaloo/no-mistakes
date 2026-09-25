@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os/exec"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -368,9 +371,114 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 				completedAt = parsed
 			}
 		}
-		checks = append(checks, scm.Check{Name: r.Name, Bucket: normalizeCheckBucket(r.Bucket, r.State), AttemptID: strings.TrimSpace(r.Link), CompletedAt: completedAt})
+		checks = append(checks, scm.Check{Name: r.Name, Bucket: normalizeCheckBucket(r.Bucket, r.State), DetailsURL: strings.TrimSpace(r.Link), CompletedAt: completedAt})
 	}
 	return checks, nil
+}
+
+func (h *Host) GetCIAttemptIdentity(ctx context.Context, _ *scm.PR, headSHA string, checks []scm.Check) (string, error) {
+	repo := h.apiRepoSlug()
+	if repo == "" {
+		return "", errors.New("GitHub repository is unknown")
+	}
+	headSHA = strings.TrimSpace(headSHA)
+	if headSHA == "" {
+		return "", errors.New("exact PR head is unknown")
+	}
+	identities := make([]string, 0, len(checks))
+	for _, check := range checks {
+		runFromURL, jobID, err := h.actionsJobLocator(check.DetailsURL, repo)
+		if err != nil {
+			return "", fmt.Errorf("check %q is not an authoritative GitHub Actions job: %w", check.Name, err)
+		}
+		var job struct {
+			ID         int64  `json:"id"`
+			RunID      int64  `json:"run_id"`
+			RunAttempt int    `json:"run_attempt"`
+			HeadSHA    string `json:"head_sha"`
+			Name       string `json:"name"`
+		}
+		if err := h.getAPIJSON(ctx, fmt.Sprintf("repos/%s/actions/jobs/%d", repo, jobID), &job); err != nil {
+			return "", fmt.Errorf("read GitHub Actions job %d for check %q: %w", jobID, check.Name, err)
+		}
+		if job.ID != jobID || job.RunID != runFromURL || job.RunAttempt < 1 || !strings.EqualFold(strings.TrimSpace(job.HeadSHA), headSHA) || strings.TrimSpace(job.Name) != strings.TrimSpace(check.Name) {
+			return "", fmt.Errorf("GitHub Actions job %d does not establish the exact head and run attempt for check %q", jobID, check.Name)
+		}
+		var attempt struct {
+			ID         int64  `json:"id"`
+			RunAttempt int    `json:"run_attempt"`
+			HeadSHA    string `json:"head_sha"`
+			Repository struct {
+				FullName string `json:"full_name"`
+			} `json:"repository"`
+		}
+		endpoint := fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d", repo, job.RunID, job.RunAttempt)
+		if err := h.getAPIJSON(ctx, endpoint, &attempt); err != nil {
+			return "", fmt.Errorf("read GitHub Actions run %d attempt %d for check %q: %w", job.RunID, job.RunAttempt, check.Name, err)
+		}
+		if attempt.ID != job.RunID || attempt.RunAttempt != job.RunAttempt || !strings.EqualFold(strings.TrimSpace(attempt.HeadSHA), headSHA) || !strings.EqualFold(strings.TrimSpace(attempt.Repository.FullName), repo) {
+			return "", fmt.Errorf("GitHub Actions run %d attempt %d is not bound to repository %s and head %s", job.RunID, job.RunAttempt, repo, headSHA)
+		}
+		identities = append(identities, fmt.Sprintf("github:%s:run:%d:attempt:%d", strings.ToLower(repo), job.RunID, job.RunAttempt))
+	}
+	if len(identities) == 0 {
+		return "", errors.New("GitHub reported no checks with authoritative Actions attempt identity")
+	}
+	sort.Strings(identities)
+	return strings.Join(identities, "\x00"), nil
+}
+
+func (h *Host) apiRepoSlug() string {
+	repo := strings.Trim(strings.TrimSpace(h.repo), "/")
+	host := strings.Trim(strings.TrimSpace(h.host), "/")
+	if host != "" && !strings.EqualFold(host, "github.com") {
+		repo = strings.TrimPrefix(repo, host+"/")
+	}
+	if strings.Count(repo, "/") != 1 {
+		return ""
+	}
+	return repo
+}
+
+func (h *Host) actionsJobLocator(rawURL, repo string) (int64, int64, error) {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		return 0, 0, errors.New("details URL is invalid")
+	}
+	expectedHost := strings.TrimSpace(h.host)
+	if expectedHost == "" {
+		expectedHost = "github.com"
+	}
+	if !strings.EqualFold(u.Hostname(), expectedHost) {
+		return 0, 0, fmt.Errorf("details host %q does not match %q", u.Hostname(), expectedHost)
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	repoParts := strings.Split(repo, "/")
+	if len(parts) != 7 || len(repoParts) != 2 || !strings.EqualFold(parts[0], repoParts[0]) || !strings.EqualFold(parts[1], repoParts[1]) || parts[2] != "actions" || parts[3] != "runs" || parts[5] != "job" {
+		return 0, 0, errors.New("details URL is not an Actions job URL for this repository")
+	}
+	runID, runErr := strconv.ParseInt(parts[4], 10, 64)
+	jobID, jobErr := strconv.ParseInt(parts[6], 10, 64)
+	if runErr != nil || jobErr != nil || runID < 1 || jobID < 1 {
+		return 0, 0, errors.New("Actions run or job ID is invalid")
+	}
+	return runID, jobID, nil
+}
+
+func (h *Host) getAPIJSON(ctx context.Context, endpoint string, dst any) error {
+	args := []string{"api"}
+	if host := strings.TrimSpace(h.host); host != "" && !strings.EqualFold(host, "github.com") {
+		args = append(args, "--hostname", host)
+	}
+	args = append(args, endpoint)
+	out, err := shellenv.OutputShellCommand(h.cmd(ctx, "gh", args...))
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(out, dst); err != nil {
+		return fmt.Errorf("parse response: %w", err)
+	}
+	return nil
 }
 
 func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.MergeableState, error) {

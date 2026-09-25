@@ -334,17 +334,21 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			default:
 				noticePhase = "CI ready: checks passed"
 			}
-			attemptID, err := ciAttemptIdentity(checks)
-			if err != nil {
-				stale, staleErr := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
-				if staleErr != nil {
-					return nil, fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, staleErr)
+			stale, staleErr := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
+			if staleErr != nil {
+				clearCIMonitorReady(sctx)
+				return nil, fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, staleErr)
+			}
+			if stale {
+				attemptID, identityErr := currentCIAttemptIdentity(ctx, host, pr, sctx.Run.HeadSHA, checks)
+				if identityErr != nil {
+					clearCIMonitorReady(sctx)
+					return nil, fmt.Errorf("%w: establish current CI attempt: %w", errPublishStaleRisk, identityErr)
 				}
-				if stale {
-					return nil, fmt.Errorf("%w: establish current CI attempt: %w", errPublishStaleRisk, err)
+				if err := s.reconcileRiskNotice(sctx, host, pr, noticePhase, attemptID); err != nil {
+					clearCIMonitorReady(sctx)
+					return nil, err
 				}
-			} else if err := s.reconcileRiskNotice(sctx, host, pr, noticePhase, attemptID); err != nil {
-				return nil, err
 			}
 
 			// If a failing check completed after our last fix push, CI has
