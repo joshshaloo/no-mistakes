@@ -45,7 +45,7 @@ func TestPRStep_GhNotAvailable(t *testing.T) {
 	}
 }
 
-func TestPRStep_UpdatesExistingPR(t *testing.T) {
+func TestPRStep_PreservesExistingPRAndPublishesNotice(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -63,18 +63,20 @@ func TestPRStep_UpdatesExistingPR(t *testing.T) {
 	if outcome.NeedsApproval {
 		t.Error("pr step should never need approval")
 	}
+	if len(ag.calls) != 0 {
+		t.Fatalf("existing PR rerun drafted replacement metadata with %d agent calls", len(ag.calls))
+	}
 
-	// Verify gh pr edit was called to update the PR body
 	logData, err := os.ReadFile(logFile)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ghLog := string(logData)
-	if !strings.Contains(ghLog, "pr edit") {
-		t.Errorf("expected gh pr edit to be called, got:\n%s", ghLog)
+	if strings.Contains(ghLog, "pr edit") {
+		t.Fatalf("existing PR metadata was rewritten:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "--body") {
-		t.Errorf("expected --body flag in gh pr edit, got:\n%s", ghLog)
+	if !strings.Contains(ghLog, "pr comment") {
+		t.Fatalf("head-bound validation notice was not published:\n%s", ghLog)
 	}
 
 	// Verify PR URL was stored
@@ -87,7 +89,7 @@ func TestPRStep_UpdatesExistingPR(t *testing.T) {
 	}
 }
 
-func TestPRStep_BitbucketUpdatesExistingPR(t *testing.T) {
+func TestPRStep_BitbucketPreservesExistingPRAndPublishesNotice(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketPRAPI(t, 42, "https://bitbucket.org/test/repo/pull-requests/42")
@@ -108,17 +110,17 @@ func TestPRStep_BitbucketUpdatesExistingPR(t *testing.T) {
 	if api.listCalls != 1 {
 		t.Fatalf("list calls = %d, want 1", api.listCalls)
 	}
-	if api.updateCalls != 1 {
-		t.Fatalf("update calls = %d, want 1", api.updateCalls)
+	if api.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want 0", api.updateCalls)
+	}
+	if api.commentCalls != 1 {
+		t.Fatalf("comment calls = %d, want 1", api.commentCalls)
 	}
 	if api.createCalls != 0 {
 		t.Fatalf("create calls = %d, want 0", api.createCalls)
 	}
 	if api.lastAuthHeader == "" {
 		t.Fatal("expected Authorization header for Bitbucket API")
-	}
-	if !strings.Contains(api.lastUpdateBody, "title") || !strings.Contains(api.lastUpdateBody, "description") {
-		t.Fatalf("expected Bitbucket PR update payload to include title and description, got %q", api.lastUpdateBody)
 	}
 
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
@@ -130,7 +132,7 @@ func TestPRStep_BitbucketUpdatesExistingPR(t *testing.T) {
 	}
 }
 
-func TestPRStep_BitbucketUpdatesExistingPRWithoutHTMLLink(t *testing.T) {
+func TestPRStep_BitbucketPublishesNoticeForExistingPRWithoutResponseLink(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketPRAPI(t, 42, "https://bitbucket.org/test/repo/pull-requests/42")
@@ -152,17 +154,11 @@ func TestPRStep_BitbucketUpdatesExistingPRWithoutHTMLLink(t *testing.T) {
 				api.existingPRID,
 				api.existingPRURL,
 			)
-		case r.Method == http.MethodPut && r.URL.Path == fmt.Sprintf("/2.0/repositories/test/repo/pullrequests/%d", api.existingPRID):
-			api.updateCalls++
-			body, err := io.ReadAll(r.Body)
-			if err != nil {
-				t.Fatalf("read update body: %v", err)
-			}
-			api.lastUpdateBody = string(body)
+		case r.Method == http.MethodPost && r.URL.Path == fmt.Sprintf("/2.0/repositories/test/repo/pullrequests/%d/comments", api.existingPRID):
+			api.commentCalls++
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"id":%d}`,
-				api.existingPRID,
-			)
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{}`)
 		default:
 			t.Fatalf("unexpected Bitbucket PR API request: %s %s", r.Method, r.URL.String())
 		}
@@ -179,8 +175,11 @@ func TestPRStep_BitbucketUpdatesExistingPRWithoutHTMLLink(t *testing.T) {
 	if api.listCalls != 1 {
 		t.Fatalf("list calls = %d, want 1", api.listCalls)
 	}
-	if api.updateCalls != 1 {
-		t.Fatalf("update calls = %d, want 1", api.updateCalls)
+	if api.updateCalls != 0 {
+		t.Fatalf("update calls = %d, want 0", api.updateCalls)
+	}
+	if api.commentCalls != 1 {
+		t.Fatalf("comment calls = %d, want 1", api.commentCalls)
 	}
 	if api.createCalls != 0 {
 		t.Fatalf("create calls = %d, want 0", api.createCalls)
@@ -286,7 +285,7 @@ func TestPRStep_CreatesNewPR(t *testing.T) {
 	if !strings.Contains(ghLog, "--title feat: add feature --body") {
 		t.Fatalf("expected fallback PR title to use release-triggering conventional commit format, got:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "add feature\n\n## Risk Assessment\n\n⚠️ Medium: touches critical error handling") {
+	if !strings.Contains(ghLog, "add feature\n\n## Risk Assessment") || !strings.Contains(ghLog, "⚠️ Medium: touches critical error handling") {
 		t.Fatalf("expected fallback PR body to append risk note under Risk Assessment heading, got:\n%s", ghLog)
 	}
 
@@ -435,6 +434,11 @@ func TestPRStep_BitbucketCreatesNewPRWithoutHTMLLink(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprint(w, `{"id":99}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/2.0/repositories/test/repo/pullrequests/99/comments":
+			api.commentCalls++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{}`)
 		default:
 			t.Fatalf("unexpected Bitbucket PR API request: %s %s", r.Method, r.URL.String())
 		}
@@ -567,7 +571,7 @@ func TestPRStep_UsesAgentGeneratedTitleAndBody(t *testing.T) {
 	if !strings.Contains(ghLog, "keep branch status readable") {
 		t.Fatalf("expected generated PR body in gh call, got:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "fix footer truncation\n\n## Risk Assessment\n\n⚠️ Medium: touches critical error handling") {
+	if !strings.Contains(ghLog, "fix footer truncation\n\n## Risk Assessment") || !strings.Contains(ghLog, "⚠️ Medium: touches critical error handling") {
 		t.Fatalf("expected risk note under Risk Assessment heading, got:\n%s", ghLog)
 	}
 	if strings.Contains(ghLog, "--title feature") {
@@ -634,8 +638,10 @@ func TestPRStep_AppendsTestingSectionFromTestStep(t *testing.T) {
 	}
 	ghLog := string(logData)
 
-	wantOrder := "## Risk Assessment\n\n⚠️ Medium: touches critical error handling\n\n## Testing\n\n- 🔧 **Test** - 1 issue found → auto-fixed ✅\n\n## Pipeline"
-	if !strings.Contains(ghLog, wantOrder) {
+	riskAt := strings.Index(ghLog, "## Risk Assessment")
+	testingAt := strings.Index(ghLog, "## Testing")
+	pipelineAt := strings.Index(ghLog, "## Pipeline")
+	if riskAt < 0 || testingAt <= riskAt || pipelineAt <= testingAt || !strings.Contains(ghLog, "🔧 **Test** - 1 issue found → auto-fixed ✅") {
 		t.Fatalf("expected testing section between risk assessment and pipeline, got:\n%s", ghLog)
 	}
 }
@@ -1383,11 +1389,15 @@ func readFakeGHBodyArg(t *testing.T, logFile string) string {
 	}
 	const marker = " --body "
 	log := string(logData)
-	idx := strings.LastIndex(log, marker)
+	idx := strings.Index(log, marker)
 	if idx < 0 {
 		t.Fatalf("expected fake gh log to include --body, got:\n%s", log)
 	}
-	return strings.TrimSuffix(log[idx+len(marker):], "\n")
+	body := log[idx+len(marker):]
+	if end := strings.Index(body, "\npr "); end >= 0 {
+		body = body[:end]
+	}
+	return strings.TrimSuffix(body, "\n")
 }
 
 func assertGitHubBodyLimitForTest(t *testing.T, body string) {

@@ -69,19 +69,12 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	return h.toPR(updated), nil
 }
 
-func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
+func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) error {
 	id, err := strconv.Atoi(pr.Number)
 	if err != nil {
-		return scm.PRContent{}, err
+		return fmt.Errorf("invalid Bitbucket PR number %q: %w", pr.Number, err)
 	}
-	got, err := h.client.GetPR(ctx, h.repo, id)
-	if err != nil {
-		return scm.PRContent{}, err
-	}
-	if got == nil {
-		return scm.PRContent{}, errors.New("Bitbucket PR content unavailable")
-	}
-	return scm.PRContent{Title: got.Title, Body: got.Description}, nil
+	return h.client.AddPRComment(ctx, h.repo, id, body)
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

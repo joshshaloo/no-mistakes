@@ -234,20 +234,20 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	return pr, nil
 }
 
-func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
+func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) error {
 	id := pr.Number
 	if id == "" {
 		var err error
 		id, err = scm.ExtractPRNumber(pr.URL)
 		if err != nil {
-			return scm.PRContent{}, err
+			return err
 		}
 	}
-	mr, err := h.viewMR(ctx, id)
-	if err != nil {
-		return scm.PRContent{}, err
+	cmd := h.cmd(ctx, "glab", "mr", "note", id, "--message", body)
+	if out, err := shellenv.CombinedOutputShellCommand(cmd); err != nil {
+		return fmt.Errorf("glab mr note: %s: %w", strings.TrimSpace(string(out)), err)
 	}
-	return scm.PRContent{Title: mr.Title, Body: mr.Description}, nil
+	return nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

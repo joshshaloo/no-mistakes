@@ -169,6 +169,11 @@ func (c *Client) UpdatePR(ctx context.Context, repo RepoRef, prID int, title, bo
 	return response.toPullRequest(), nil
 }
 
+func (c *Client) AddPRComment(ctx context.Context, repo RepoRef, prID int, body string) error {
+	requestBody := map[string]any{"content": map[string]string{"raw": body}}
+	return c.doJSON(ctx, http.MethodPost, fmt.Sprintf("%s/%d/comments", repoPRPath(repo), prID), nil, requestBody, nil)
+}
+
 func (c *Client) GetPR(ctx context.Context, repo RepoRef, prID int) (*PullRequest, error) {
 	var response bitbucketPullRequest
 	if err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("%s/%d", repoPRPath(repo), prID), nil, nil, &response); err != nil {

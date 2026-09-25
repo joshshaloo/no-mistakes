@@ -226,12 +226,19 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	return pr, nil
 }
 
-func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
-	got, err := h.showPR(ctx, pr)
-	if err != nil {
-		return scm.PRContent{}, err
+func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) error {
+	id := h.prID(pr)
+	if id == "" {
+		return errors.New("az repos pr comment create: missing PR id")
 	}
-	return scm.PRContent{Title: got.Title, Body: got.Description}, nil
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	body = strings.ReplaceAll(body, "\n", "<br>")
+	args := []string{"repos", "pr", "comment", "create", "--id", id, "--content", body}
+	args = append(args, h.orgArgs()...)
+	if out, err := shellenv.CombinedOutputShellCommand(h.cmd(ctx, "az", args...)); err != nil {
+		return fmt.Errorf("az repos pr comment create: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

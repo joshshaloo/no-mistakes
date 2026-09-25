@@ -98,10 +98,13 @@ func TestCIStep_RepairInvalidatesPublishedReviewRisk(t *testing.T) {
 			if err != nil {
 				t.Fatalf("CI did not update PR risk: %v", err)
 			}
-			for _, want := range []string{"STALE", "human-authored summary", "Human intent context", "Test-only change", "Human test evidence", "Human pipeline notes"} {
+			for _, want := range []string{"STALE", sctx.Run.HeadSHA, "green CI does not make the previous rating current"} {
 				if !strings.Contains(string(body), want) {
-					t.Fatalf("PR refresh did not preserve %q alongside the stale warning: %s", want, body)
+					t.Fatalf("PR conversation notice does not contain %q: %s", want, body)
 				}
+			}
+			if strings.Contains(string(body), "human-authored summary") {
+				t.Fatalf("notice unexpectedly rewrote PR description content: %s", body)
 			}
 			remote := gitCmd(t, upstream, "rev-parse", "feature")
 			if remote == head {

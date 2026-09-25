@@ -34,6 +34,7 @@ const (
 // timeout elapses, auto-fixing CI failures.
 type CIStep struct {
 	riskNoticeHead       string               // head for which the stale-risk notice reached the PR
+	riskReadyNoticeHead  string               // head republished at the checks-ready boundary
 	lastFixedChecks      string               // sorted check names from last fix attempt, to avoid re-fixing
 	lastFixedCompletedAt map[string]time.Time // failing check completion times seen before the last fix attempt
 	ciFixAttempts        int                  // number of CI auto-fix attempts made
@@ -251,7 +252,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return timeoutOutcome()
 		}
 
-		if err := s.publishRiskNotice(sctx, host, pr); err != nil {
+		if err := s.publishRiskNotice(sctx, host, pr, false); err != nil {
 			return nil, err
 		}
 
@@ -415,8 +416,20 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
 				case len(checks) == 0:
+					if s.riskReadyNoticeHead != sctx.Run.HeadSHA {
+						if err := s.publishRiskNotice(sctx, host, pr, true); err != nil {
+							return nil, err
+						}
+						s.riskReadyNoticeHead = sctx.Run.HeadSHA
+					}
 					lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
 				default:
+					if s.riskReadyNoticeHead != sctx.Run.HeadSHA {
+						if err := s.publishRiskNotice(sctx, host, pr, true); err != nil {
+							return nil, err
+						}
+						s.riskReadyNoticeHead = sctx.Run.HeadSHA
+					}
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
 				}
 			}

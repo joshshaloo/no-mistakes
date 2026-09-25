@@ -336,6 +336,18 @@ func (c *BKTClient) UpdatePR(ctx context.Context, repo RepoRef, prID int, title,
 	return c.GetPR(ctx, repo, prID)
 }
 
+func (c *BKTClient) AddPRComment(ctx context.Context, repo RepoRef, prID int, body string) error {
+	selectors, err := c.repoArgs(repo)
+	if err != nil {
+		return err
+	}
+	args := []string{"pr", "comment", strconv.Itoa(prID)}
+	args = append(args, selectors...)
+	args = append(args, "--text", body)
+	_, err = c.runPrefix(ctx, bktCommandTimeout, "PR comment", maxBKTJSONBytes, args...)
+	return err
+}
+
 func (c *BKTClient) GetPR(ctx context.Context, repo RepoRef, prID int) (*PullRequest, error) {
 	selectors, err := c.repoArgs(repo)
 	if err != nil {

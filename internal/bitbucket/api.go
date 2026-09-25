@@ -15,6 +15,7 @@ type API interface {
 	FindOpenPRBySourceBranch(context.Context, RepoRef, string, string) (*PullRequest, error)
 	CreatePR(context.Context, RepoRef, string, string, string, string) (*PullRequest, error)
 	UpdatePR(context.Context, RepoRef, int, string, string) (*PullRequest, error)
+	AddPRComment(context.Context, RepoRef, int, string) error
 	GetPR(context.Context, RepoRef, int) (*PullRequest, error)
 	ListPRStatuses(context.Context, RepoRef, int) ([]CommitStatus, error)
 }

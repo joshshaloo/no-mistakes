@@ -277,22 +277,19 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	return pr, nil
 }
 
-func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
+func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) error {
 	selector, err := prSelector(pr)
 	if err != nil {
-		return scm.PRContent{}, err
+		return err
 	}
-	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
-	args = append(args, "--json", "title,body")
-	out, err := shellenv.OutputShellCommand(h.cmd(ctx, "gh", args...))
-	if err != nil {
-		return scm.PRContent{}, fmt.Errorf("gh pr view content: %w", err)
+	args := append([]string{"pr", "comment", selector}, h.repoArgs()...)
+	args = append(args, "--body-file", "-")
+	cmd := h.cmd(ctx, "gh", args...)
+	cmd.Stdin = strings.NewReader(body)
+	if out, err := shellenv.CombinedOutputShellCommand(cmd); err != nil {
+		return fmt.Errorf("gh pr comment: %s: %w", strings.TrimSpace(string(out)), err)
 	}
-	var content scm.PRContent
-	if err := json.Unmarshal(out, &content); err != nil {
-		return content, err
-	}
-	return content, nil
+	return nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

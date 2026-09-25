@@ -41,6 +41,7 @@ const (
 	pullRequestBodySafetyBufferBytes = 2048
 	maxPullRequestBodyBytes          = githubPullRequestBodyHardLimitChars - pullRequestBodySafetyBufferBytes
 	minLatestPipelineUpdateBytes     = 256
+	validationNoticePointer          = "> Validation status is published as head-bound notices in this PR conversation."
 )
 
 type pipelineUpdateGroup struct {
@@ -76,41 +77,32 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 
-	// Resolve the branch base so PR summaries cover the full branch delta.
-	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
-	content, err := s.buildPRContent(sctx, branch, baseSHA, scm.MaxPRBodyChars(provider))
-	if err != nil {
-		return nil, err
-	}
-
 	sctx.Log(fmt.Sprintf("checking for existing pull request on branch %s...", branch))
 	existing, err := host.FindPR(ctx, branch, sctx.Repo.DefaultBranch)
 	if err != nil {
 		return nil, err
 	}
 	if existing != nil {
-		sctx.Log(fmt.Sprintf("pull request already exists: %s, updating...", describePR(existing)))
-		updated, err := host.UpdatePR(ctx, existing, scm.PRContent(content))
-		if err != nil {
-			stale, riskErr := pipeline.RefreshReviewRisk(ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, "", sctx.ReviewRiskInvalidated)
-			if riskErr != nil {
-				return nil, riskErr
-			}
-			if stale {
-				return nil, fmt.Errorf("%w: %w", errPublishStaleRisk, err)
-			}
-			sctx.Log(fmt.Sprintf("warning: failed to update PR: %v", err))
-			updated = existing
+		sctx.Log(fmt.Sprintf("pull request already exists: %s; preserving its title and description", describePR(existing)))
+		if err := publishValidationNotice(sctx, host, existing, "PR step"); err != nil {
+			return nil, err
 		}
-		if updated != nil && updated.URL != "" {
-			if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, updated.URL); err != nil {
-				slog.Warn("failed to persist PR URL", "run", sctx.Run.ID, "url", updated.URL, "err", err)
+		if existing.URL != "" {
+			if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, existing.URL); err != nil {
+				slog.Warn("failed to persist PR URL", "run", sctx.Run.ID, "url", existing.URL, "err", err)
 			}
-			return &pipeline.StepOutcome{PRURL: updated.URL}, nil
+			return &pipeline.StepOutcome{PRURL: existing.URL}, nil
 		}
 		return &pipeline.StepOutcome{}, nil
 	}
 
+	// Resolve the branch base so new PR summaries cover the full branch delta.
+	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	bodyLimit := scm.MaxPRBodyChars(provider)
+	content, err := s.buildPRContent(sctx, branch, baseSHA, bodyLimit)
+	if err != nil {
+		return nil, err
+	}
 	sctx.Log("creating pull request...")
 	created, err := host.CreatePR(ctx, branch, sctx.Repo.DefaultBranch, scm.PRContent(content))
 	if err != nil {
@@ -120,6 +112,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return &pipeline.StepOutcome{}, nil
 	}
 	sctx.Log(fmt.Sprintf("created pull request: %s", created.URL))
+	if err := publishValidationNotice(sctx, host, created, "PR created"); err != nil {
+		return nil, err
+	}
 	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, created.URL); err != nil {
 		slog.Warn("failed to persist PR URL", "run", sctx.Run.ID, "url", created.URL, "err", err)
 	}
@@ -203,8 +198,9 @@ Diff stat:
 			content.Title = strings.TrimSpace(content.Title)
 			content.Body = strings.TrimSpace(content.Body)
 			content.Body = unwrapNestedPRBody(content.Body)
-			content.Body = stripGeneratedSections(content.Body)
+			content.Body = stripAgentReservedSections(stripGeneratedSections(content.Body))
 			if content.Title != "" && content.Body != "" {
+				content.Body = validationNoticePointer + "\n\n" + content.Body
 				originalTitle := content.Title
 				content.Title = conventional.TightenTitle(content.Title)
 				if content.Title != originalTitle {
@@ -930,6 +926,27 @@ func stripGeneratedSections(body string) string {
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
+func stripAgentReservedSections(body string) string {
+	reserved := map[string]bool{
+		"## intent": true, "## risk assessment": true, "## testing": true,
+		"## tests": true, "## pipeline": true,
+	}
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	for i := 0; i < len(lines); {
+		if reserved[strings.ToLower(strings.TrimSpace(lines[i]))] {
+			i++
+			for i < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[i]), "## ") {
+				i++
+			}
+			continue
+		}
+		out = append(out, lines[i])
+		i++
+	}
+	return strings.TrimSpace(strings.Join(out, "\n"))
+}
+
 func markGeneratedSection(section string) string {
 	if strings.TrimSpace(section) == "" {
 		return ""
@@ -978,10 +995,11 @@ func fallbackPRContent(sctx *pipeline.StepContext, branch, commitLog, riskLine, 
 	} else {
 		title = conventional.TightenTitle(title)
 	}
-	body := fmt.Sprintf("## What Changed\n\n%s", strings.TrimSpace(commitLog))
-	if body == "## What Changed\n\n" {
-		body = fmt.Sprintf("## What Changed\n\n- %s", title)
+	commitSummary := strings.TrimSpace(commitLog)
+	if commitSummary == "" {
+		commitSummary = "- " + title
 	}
+	body := fmt.Sprintf("%s\n\n## What Changed\n\n%s", validationNoticePointer, commitSummary)
 	if bodyLimit > 0 {
 		body = assemblePRBody(sctx, body, riskLine, testingMD, pipelineMD, bodyLimit)
 	} else {

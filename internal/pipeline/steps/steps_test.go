@@ -132,7 +132,7 @@ func fakeGHHandler(args []string) {
 		}
 		os.Exit(1)
 	}
-	if len(args) >= 2 && args[0] == "pr" && args[1] == "edit" {
+	if len(args) >= 2 && args[0] == "pr" && (args[1] == "edit" || args[1] == "comment") {
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "create" {
@@ -250,7 +250,7 @@ func fakeGlabHandler(args []string) {
 		}
 		os.Exit(1)
 	}
-	if len(args) >= 2 && args[0] == "mr" && args[1] == "update" {
+	if len(args) >= 2 && args[0] == "mr" && (args[1] == "update" || args[1] == "note") {
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "mr" && args[1] == "create" {
@@ -289,6 +289,9 @@ func fakeCIGHReconcileHandler(args []string) {
 		fmt.Println("https://github.com/test/repo/pull/42")
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "pr comment") {
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json state") {
 		state, err := os.ReadFile(os.Getenv("FAKE_CLI_STATE_PATH"))
 		if err != nil {
@@ -319,11 +322,7 @@ func fakeCIGHReconcileHandler(args []string) {
 func fakeCIGHHandler(args []string) {
 	if bodyPath := os.Getenv("FAKE_CLI_RISK_BODY"); bodyPath != "" {
 		joined := strings.Join(args, " ")
-		if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json title,body") {
-			fmt.Println(`{"title":"fix: original title","body":"## What Changed\n\nhuman-authored summary\n\n## Intent\n\nHuman intent context\n\n## Risk Assessment\n\nLow: Test-only change without production changes\n\n## Testing\n\nHuman test evidence\n\n## Pipeline\n\nHuman pipeline notes"}`)
-			os.Exit(0)
-		}
-		if strings.Contains(joined, "pr edit") {
+		if strings.Contains(joined, "pr comment") {
 			if os.Getenv("FAKE_CLI_RISK_EDIT_FAIL") == "1" {
 				os.Exit(1)
 			}
@@ -331,7 +330,12 @@ func fakeCIGHHandler(args []string) {
 			if err != nil {
 				os.Exit(1)
 			}
-			if err := os.WriteFile(bodyPath, body, 0o644); err != nil {
+			f, err := os.OpenFile(bodyPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				os.Exit(1)
+			}
+			defer f.Close()
+			if _, err := f.Write(append(body, '\n')); err != nil {
 				os.Exit(1)
 			}
 			os.Exit(0)

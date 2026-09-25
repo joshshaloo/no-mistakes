@@ -7,46 +7,51 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
-	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 var errPublishStaleRisk = errors.New("cannot publish stale review assessment")
 
-const staleRiskNotice = "> ⚠️ **Risk assessment: STALE.** " + types.StaleRiskRationale + "\n\n"
+func validationNotice(sctx *pipeline.StepContext, phase string) string {
+	_, riskLine, _ := (&PRStep{}).buildPipelineSection(sctx)
+	if strings.TrimSpace(riskLine) == "" {
+		riskLine = "Review assessment unavailable"
+	}
+	supervisor := ""
+	if strings.Contains(strings.ToUpper(riskLine), "STALE") {
+		supervisor = "\n\nChanges made after review are not covered by the previous assessment. Get a fresh review before relying on that rating to merge; green CI does not make the previous rating current."
+	}
+	return fmt.Sprintf("## no-mistakes validation notice\n\n**Run:** `%s`  \n**Head:** `%s`  \n**Phase:** %s  \n**Review:** %s%s\n\nValidation notices are append-only entries in this PR conversation; the PR title, description, and human comments are not rewritten.", sctx.Run.ID, sctx.Run.HeadSHA, phase, riskLine, supervisor)
+}
 
-// publishRiskNotice runs before a CI push and before reporting checks green,
-// including after monitor recovery. Unlike ordinary best-effort PR cosmetics,
-// failure here must stop the run: the remote must not keep advertising LOW for
-// code we are about to push. Only generated sections are replaced; title and
-// human-authored summary are fetched and preserved. No extra agent is invoked.
-func (s *CIStep) publishRiskNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) error {
+func publishValidationNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, phase string) error {
+	publisher, ok := host.(scm.PRNoticePublisher)
+	if !ok {
+		return errors.New("provider cannot publish validation notices")
+	}
+	if err := publisher.PublishPRNotice(sctx.Ctx, pr, validationNotice(sctx, phase)); err != nil {
+		return fmt.Errorf("publish validation notice: %w", err)
+	}
+	sctx.Log(fmt.Sprintf("published head-bound validation notice in PR conversation for %s", sctx.Run.HeadSHA))
+	return nil
+}
+
+// publishRiskNotice runs before a CI push and again at the CI-ready boundary.
+// It appends a head-bound notice and never modifies PR metadata or prior
+// comments. The ready-boundary publication is intentionally forced so a notice
+// removed after the repair push cannot leave green checks beside an old rating.
+func (s *CIStep) publishRiskNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, force bool) error {
 	stale, err := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
 	}
-	if !stale || s.riskNoticeHead == sctx.Run.HeadSHA {
+	if !stale || (!force && s.riskNoticeHead == sctx.Run.HeadSHA) {
 		return nil
 	}
-	reader, ok := host.(scm.PRContentReader)
-	if !ok {
-		return fmt.Errorf("%w: provider cannot read PR content", errPublishStaleRisk)
-	}
-	content, err := reader.GetPRContent(sctx.Ctx, pr)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
-	}
-	if strings.TrimSpace(content.Title) == "" {
-		return fmt.Errorf("%w: PR title unavailable", errPublishStaleRisk)
-	}
-	pipelineMD, _, testingMD := (&PRStep{}).buildPipelineSection(sctx)
-	body := strings.TrimPrefix(content.Body, staleRiskNotice)
-	content.Body = staleRiskNotice + appendGeneratedSections(body, "⚠️ STALE: "+types.StaleRiskRationale, testingMD, pipelineMD)
-	content.Body = scm.ClampPRBody(content.Body, scm.MaxPRBodyChars(host.Provider()))
-	if _, err := host.UpdatePR(sctx.Ctx, pr, content); err != nil {
+	if err := publishValidationNotice(sctx, host, pr, "CI review assessment STALE"); err != nil {
 		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
 	}
 	s.riskNoticeHead = sctx.Run.HeadSHA
-	sctx.Log("risk assessment STALE: post-review changes require review; previous rating is not merge authority")
+	sctx.Log("risk assessment STALE: post-review changes require fresh review; green CI does not make the previous rating merge authority")
 	return nil
 }
 
@@ -63,5 +68,5 @@ func (s *CIStep) publishRiskNoticeBeforePush(sctx *pipeline.StepContext) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
 	}
-	return s.publishRiskNotice(sctx, host, &scm.PR{Number: number, URL: *sctx.Run.PRURL})
+	return s.publishRiskNotice(sctx, host, &scm.PR{Number: number, URL: *sctx.Run.PRURL}, false)
 }

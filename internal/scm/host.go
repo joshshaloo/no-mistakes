@@ -97,11 +97,10 @@ type PRContent struct {
 	Body  string
 }
 
-// PRContentReader lets a pipeline replace its generated assessment without
-// overwriting the PR's title or human-authored summary. CI fails closed when a
-// stale assessment cannot be removed from the published PR.
-type PRContentReader interface {
-	GetPRContent(context.Context, *PR) (PRContent, error)
+// PRNoticePublisher appends a pipeline-owned validation notice to the PR
+// conversation without modifying its title, description, or existing comments.
+type PRNoticePublisher interface {
+	PublishPRNotice(context.Context, *PR, string) error
 }
 
 // PRState is the normalized lifecycle state of a PR.
