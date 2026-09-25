@@ -21,6 +21,9 @@ var ErrReviewRisk = errors.New("cannot establish review risk freshness")
 // boundaries call RefreshReviewRisk. A poll must not repeat Git verification or
 // move that work into the terminal path before cleanup.
 func StoredReviewRiskStale(database *db.DB, runID string) (bool, error) {
+	if database == nil {
+		return false, fmt.Errorf("%w: missing run database", ErrReviewRisk)
+	}
 	steps, err := database.GetStepsByRun(runID)
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", ErrReviewRisk, err)
@@ -55,6 +58,9 @@ func RefreshReviewRisk(ctx context.Context, database *db.DB, runID, workDir, tar
 			err = fmt.Errorf("%w: %w", ErrReviewRisk, err)
 		}
 	}()
+	if database == nil {
+		return false, errors.New("missing run database")
+	}
 	steps, err := database.GetStepsByRun(runID)
 	if err != nil {
 		return false, err

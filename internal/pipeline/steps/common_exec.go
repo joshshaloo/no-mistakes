@@ -288,8 +288,12 @@ func runConfiguredStepShellCommandWithExtraEnv(sctx *pipeline.StepContext, comma
 	// Configured tools can edit files too, even when they fail. Finish the
 	// freshness check before returning control to the step, not after its
 	// outcome or the run's terminal status has been published.
-	_, riskErr := pipeline.RefreshReviewRisk(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, "")
-	err = errors.Join(err, riskErr)
+	// Standalone configured-command users (for example tool resolution probes)
+	// have no owning run and therefore no assessment to invalidate.
+	if sctx.Run != nil {
+		_, riskErr := pipeline.RefreshReviewRisk(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, "")
+		err = errors.Join(err, riskErr)
+	}
 	if err != nil {
 		return output, exitCode, err
 	}

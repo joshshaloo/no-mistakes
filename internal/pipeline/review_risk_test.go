@@ -2,11 +2,21 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestReviewRisk_MissingRunDatabaseFailsClosed(t *testing.T) {
+	if _, err := RefreshReviewRisk(context.Background(), nil, "owned-run", t.TempDir(), ""); !errors.Is(err, ErrReviewRisk) {
+		t.Fatalf("refresh without a run database = %v", err)
+	}
+	if _, err := StoredReviewRiskStale(nil, "owned-run"); !errors.Is(err, ErrReviewRisk) {
+		t.Fatalf("read without a run database = %v", err)
+	}
+}
 
 func TestOnlyMechanicalDocumentation(t *testing.T) {
 	for _, tt := range []struct {
