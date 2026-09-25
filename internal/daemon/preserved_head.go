@@ -98,6 +98,12 @@ func cleanupRunWorktreeWithSupervisor(ctx context.Context, d *db.DB, gateDir, wo
 	if err := supervisor.Terminate(ctx); err != nil {
 		return err
 	}
+	if _, err := os.Stat(workDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect worktree before cleanup: %w", err)
+	}
 	if run != nil {
 		if preserveErr := preserveWorktreeHead(ctx, gateDir, workDir, run); preserveErr != nil {
 			retained := fmt.Errorf("%w: %w", errWorktreeRetainedForCustody, preserveErr)

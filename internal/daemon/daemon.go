@@ -362,14 +362,10 @@ func reconcileTerminalPRRuns(d *db.DB, p *paths.Paths, mgr *RunManager) int {
 	for _, run := range candidates {
 		workDir := p.WorktreeDir(run.RepoID, run.ID)
 		cleanup := func() error {
-			if _, err := os.Stat(workDir); os.IsNotExist(err) {
-				return nil
-			} else if err != nil {
-				return fmt.Errorf("inspect worktree before completion: %w", err)
-			}
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			return cleanupRunWorktree(ctx, d, p.RepoDir(run.RepoID), workDir, run.ID)
+			supervisor := shellenv.NewRunSupervisor(run.ID, workDir)
+			return cleanupRunWorktreeWithSupervisor(ctx, d, p.RepoDir(run.RepoID), workDir, run.ID, supervisor)
 		}
 		finalizer := runcompletion.Finalizer{
 			DB: d, Cleanup: cleanup, OnEvent: mgr.broadcast, CompleteTerminalPRStep: true,
