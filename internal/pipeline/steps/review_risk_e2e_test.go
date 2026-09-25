@@ -135,6 +135,128 @@ func TestCIStep_RepairInvalidatesPublishedReviewRisk(t *testing.T) {
 	}
 }
 
+func TestCIStep_ValidationEvidenceReadFailureFailsClosed(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main", "feature")
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		if err := os.WriteFile(filepath.Join(dir, "repair.go"), []byte("package repair\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return &agent.Result{}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	seedLowReview(t, sctx)
+	sctx.Repo.UpstreamURL = upstream
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.Run.PRURL = &prURL
+	sctx.Config.AutoFix.CI = 1
+	sctx.Config.CITimeout = time.Minute
+	bodyPath := filepath.Join(t.TempDir(), "notice.md")
+	sctx.Env = append(fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"fail"}]`, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
+	step := &CIStep{
+		buildValidationNotice: func(*pipeline.StepContext, string) (string, error) {
+			return "", errors.New("read validation notice evidence: injected step-round read failure")
+		},
+	}
+
+	if _, err := step.Execute(sctx); !errors.Is(err, errPublishStaleRisk) {
+		t.Fatalf("expected fail-closed evidence error, got %v", err)
+	}
+	if _, err := os.Stat(bodyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("notice published after evidence read failure: %v", err)
+	}
+	if remote := gitCmd(t, upstream, "rev-parse", "feature"); remote != head {
+		t.Fatalf("remote advanced after evidence read failure: %s", remote)
+	}
+	dbRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dbRun.CIReadyAt != nil {
+		t.Fatalf("CI became ready after evidence read failure: %v", *dbRun.CIReadyAt)
+	}
+	t.Logf("FAIL-CLOSED push: notices=0 remote=%s CIReady=false", head)
+
+	step.buildValidationNotice = nil
+	if _, err := step.pushUpdatedHeadSHA(sctx, sctx.Run.HeadSHA); err != nil {
+		t.Fatalf("restored evidence read did not permit CI repair push: %v", err)
+	}
+	body, err := os.ReadFile(bodyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote := gitCmd(t, upstream, "rev-parse", "feature")
+	if remote == head {
+		t.Fatal("restored evidence read did not permit CI repair push")
+	}
+	if count := strings.Count(string(body), "## no-mistakes validation notice"); count != 1 {
+		t.Fatalf("restored push notices = %d, want 1", count)
+	}
+	t.Logf("RESTORED push: notices=1 remote=%s", remote)
+}
+
+func TestCIStep_ValidationEvidenceReadFailureBlocksReady(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	review := seedLowReview(t, sctx)
+	staleFindings := `{"findings":[],"risk_level":"stale","risk_rationale":"post-review change"}`
+	if err := sctx.DB.SetStepFindings(review.ID, staleFindings); err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = time.Minute
+	bodyPath := filepath.Join(t.TempDir(), "notice.md")
+	sctx.Env = append(fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"pass"}]`, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
+	step := &CIStep{
+		buildValidationNotice: func(*pipeline.StepContext, string) (string, error) {
+			return "", errors.New("read validation notice evidence: injected step-round read failure")
+		},
+	}
+
+	if _, err := step.Execute(sctx); !errors.Is(err, errPublishStaleRisk) {
+		t.Fatalf("expected fail-closed evidence error, got %v", err)
+	}
+	if _, err := os.Stat(bodyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("notice published after evidence read failure: %v", err)
+	}
+	dbRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dbRun.CIReadyAt != nil {
+		t.Fatalf("checks passed after evidence read failure: %v", *dbRun.CIReadyAt)
+	}
+	t.Log("FAIL-CLOSED ready: notices=0 CIReady=false checks-passed=false")
+
+	step.buildValidationNotice = nil
+	ctx, cancel := context.WithCancel(context.Background())
+	sctx.Ctx = ctx
+	step.waitForNextPoll = func(context.Context, time.Duration) error { cancel(); return ctx.Err() }
+	if _, err := step.Execute(sctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation after restored ready signal, got %v", err)
+	}
+	body, err := os.ReadFile(bodyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := strings.Count(string(body), "## no-mistakes validation notice")
+	if count != 2 {
+		t.Fatalf("restored ready notices = %d, want initial and ready-boundary notices", count)
+	}
+	dbRun, err = sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dbRun.CIReadyAt == nil {
+		t.Fatal("restored evidence read did not permit checks-passed readiness")
+	}
+	t.Logf("RESTORED ready: notices=%d CIReady=true checks-passed=true", count)
+}
+
 func TestPRStep_AgentEditsInvalidateRiskBeforePRPublication(t *testing.T) {
 	dir, base, head := setupGitRepo(t)
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {

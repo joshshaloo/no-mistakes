@@ -11,8 +11,11 @@ import (
 
 var errPublishStaleRisk = errors.New("cannot publish stale review assessment")
 
-func validationNotice(sctx *pipeline.StepContext, phase string) string {
-	_, riskLine, _ := (&PRStep{}).buildPipelineSection(sctx)
+func validationNotice(sctx *pipeline.StepContext, phase string) (string, error) {
+	_, riskLine, _, err := (&PRStep{}).buildPipelineSectionStrict(sctx)
+	if err != nil {
+		return "", fmt.Errorf("read validation notice evidence: %w", err)
+	}
 	if strings.TrimSpace(riskLine) == "" {
 		riskLine = "Review assessment unavailable"
 	}
@@ -20,15 +23,23 @@ func validationNotice(sctx *pipeline.StepContext, phase string) string {
 	if strings.Contains(strings.ToUpper(riskLine), "STALE") {
 		supervisor = "\n\nChanges made after review are not covered by the previous assessment. Get a fresh review before relying on that rating to merge; green CI does not make the previous rating current."
 	}
-	return fmt.Sprintf("## no-mistakes validation notice\n\n**Run:** `%s`  \n**Head:** `%s`  \n**Phase:** %s  \n**Review:** %s%s\n\nValidation notices are append-only entries in this PR conversation; the PR title, description, and human comments are not rewritten.", sctx.Run.ID, sctx.Run.HeadSHA, phase, riskLine, supervisor)
+	return fmt.Sprintf("## no-mistakes validation notice\n\n**Run:** `%s`  \n**Head:** `%s`  \n**Phase:** %s  \n**Review:** %s%s\n\nValidation notices are append-only entries in this PR conversation; the PR title, description, and human comments are not rewritten.", sctx.Run.ID, sctx.Run.HeadSHA, phase, riskLine, supervisor), nil
 }
 
 func publishValidationNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, phase string) error {
+	body, err := validationNotice(sctx, phase)
+	if err != nil {
+		return err
+	}
+	return publishValidationNoticeBody(sctx, host, pr, body)
+}
+
+func publishValidationNoticeBody(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, body string) error {
 	publisher, ok := host.(scm.PRNoticePublisher)
 	if !ok {
 		return errors.New("provider cannot publish validation notices")
 	}
-	if err := publisher.PublishPRNotice(sctx.Ctx, pr, validationNotice(sctx, phase)); err != nil {
+	if err := publisher.PublishPRNotice(sctx.Ctx, pr, body); err != nil {
 		return fmt.Errorf("publish validation notice: %w", err)
 	}
 	sctx.Log(fmt.Sprintf("published head-bound validation notice in PR conversation for %s", sctx.Run.HeadSHA))
@@ -47,7 +58,15 @@ func (s *CIStep) publishRiskNotice(sctx *pipeline.StepContext, host scm.Host, pr
 	if !stale || (!force && s.riskNoticeHead == sctx.Run.HeadSHA) {
 		return nil
 	}
-	if err := publishValidationNotice(sctx, host, pr, "CI review assessment STALE"); err != nil {
+	buildNotice := validationNotice
+	if s.buildValidationNotice != nil {
+		buildNotice = s.buildValidationNotice
+	}
+	body, err := buildNotice(sctx, "CI review assessment STALE")
+	if err != nil {
+		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
+	}
+	if err := publishValidationNoticeBody(sctx, host, pr, body); err != nil {
 		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
 	}
 	s.riskNoticeHead = sctx.Run.HeadSHA

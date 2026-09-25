@@ -222,25 +222,32 @@ Diff stat:
 // buildPipelineSection queries step results and rounds from the DB and
 // produces the deterministic pipeline, risk, and testing sections.
 func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext) (string, string, string) {
+	pipelineMD, riskLine, testingMD, err := s.buildPipelineSectionStrict(sctx)
+	if err != nil {
+		slog.Warn("failed to build pipeline summary", "error", err)
+		return "", "", ""
+	}
+	return pipelineMD, riskLine, testingMD
+}
+
+func (s *PRStep) buildPipelineSectionStrict(sctx *pipeline.StepContext) (string, string, string, error) {
 	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 	if err != nil {
-		slog.Warn("failed to query step results for pipeline summary", "error", err)
-		return "", "", ""
+		return "", "", "", fmt.Errorf("read step results: %w", err)
 	}
 
 	rounds := make(map[string][]*db.StepRound, len(steps))
 	for _, sr := range steps {
 		r, err := sctx.DB.GetRoundsByStep(sr.ID)
 		if err != nil {
-			slog.Warn("failed to query rounds for step", "step", sr.StepName, "error", err)
-			continue
+			return "", "", "", fmt.Errorf("read %s step rounds: %w", sr.StepName, err)
 		}
 		rounds[sr.ID] = r
 	}
 
 	pipelineMD, riskLine := BuildPipelineSummary(steps, rounds)
 	testingMD := BuildTestingSummaryForPR(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir)
-	return pipelineMD, riskLine, testingMD
+	return pipelineMD, riskLine, testingMD, nil
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a

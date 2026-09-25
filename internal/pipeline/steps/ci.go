@@ -33,15 +33,16 @@ const (
 // CIStep monitors an open PR until it is merged, closed, or its configured idle
 // timeout elapses, auto-fixing CI failures.
 type CIStep struct {
-	riskNoticeHead       string               // head for which the stale-risk notice reached the PR
-	riskReadyNoticeHead  string               // head republished at the checks-ready boundary
-	lastFixedChecks      string               // sorted check names from last fix attempt, to avoid re-fixing
-	lastFixedCompletedAt map[string]time.Time // failing check completion times seen before the last fix attempt
-	ciFixAttempts        int                  // number of CI auto-fix attempts made
-	checksGracePeriod    time.Duration        // minimum wait before trusting empty CI checks (0 = default 60s)
-	pollIntervalOverride time.Duration        // if set, overrides computed poll interval (for testing)
-	waitForNextPoll      func(context.Context, time.Duration) error
-	now                  func() time.Time
+	riskNoticeHead        string // head for which the stale-risk notice reached the PR
+	riskReadyNoticeHead   string // head republished at the checks-ready boundary
+	buildValidationNotice func(*pipeline.StepContext, string) (string, error)
+	lastFixedChecks       string               // sorted check names from last fix attempt, to avoid re-fixing
+	lastFixedCompletedAt  map[string]time.Time // failing check completion times seen before the last fix attempt
+	ciFixAttempts         int                  // number of CI auto-fix attempts made
+	checksGracePeriod     time.Duration        // minimum wait before trusting empty CI checks (0 = default 60s)
+	pollIntervalOverride  time.Duration        // if set, overrides computed poll interval (for testing)
+	waitForNextPoll       func(context.Context, time.Duration) error
+	now                   func() time.Time
 	// baseBranchTip resolves the current tip SHA of the upstream default
 	// branch. The bool is false when the SHA is a fallback/unknown value and
 	// must not re-arm the timeout. Overridable for testing; defaults to
