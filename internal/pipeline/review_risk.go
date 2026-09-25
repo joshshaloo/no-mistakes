@@ -52,7 +52,7 @@ func StoredReviewRiskStale(database *db.DB, runID string) (bool, error) {
 // or a few conventional root documents. Tests, configuration, agent instructions,
 // MDX, scripts, symlinks and mode changes are NOT mechanical documentation.
 // Unreadable evidence fails safe to stale, never to the old low/medium rating.
-func RefreshReviewRisk(ctx context.Context, database *db.DB, runID, workDir, target string, onInvalidated func(string)) (stale bool, err error) {
+func RefreshReviewRisk(ctx context.Context, database *db.DB, runID, workDir, target string, onInvalidated func(string, *int64)) (stale bool, err error) {
 	defer func() {
 		if err != nil {
 			err = fmt.Errorf("%w: %w", ErrReviewRisk, err)
@@ -125,7 +125,7 @@ func RefreshReviewRisk(ctx context.Context, database *db.DB, runID, workDir, tar
 			return false, fmt.Errorf("invalidate review risk: %w", err)
 		}
 		if onInvalidated != nil {
-			onInvalidated(raw)
+			onInvalidated(raw, sr.DurationMS)
 		}
 		return true, nil
 	}

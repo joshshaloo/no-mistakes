@@ -686,8 +686,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	autoFixAttempts := state.autoFixAttempts
 	roundNum := state.roundNum
 
-	reviewRiskInvalidated := func(findings string) {
-		e.emitStepEventWithFindings(ipc.EventStepCompleted, run, repo, types.StepReview, string(types.StepStatusCompleted), findings)
+	reviewRiskInvalidated := func(findings string, durationMS *int64) {
+		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, types.StepReview, string(types.StepStatusCompleted), findings, "", "", durationMS)
 	}
 	stepAgent := e.agent
 	if stepAgent != nil {

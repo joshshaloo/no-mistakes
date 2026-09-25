@@ -320,7 +320,7 @@ func fakeCIGHHandler(args []string) {
 	if bodyPath := os.Getenv("FAKE_CLI_RISK_BODY"); bodyPath != "" {
 		joined := strings.Join(args, " ")
 		if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json title,body") {
-			fmt.Println(`{"title":"fix: original title","body":"## What Changed\n\nhuman-authored summary\n\n## Risk Assessment\n\nLow: Test-only change without production changes"}`)
+			fmt.Println(`{"title":"fix: original title","body":"## What Changed\n\nhuman-authored summary\n\n## Intent\n\nHuman intent context\n\n## Risk Assessment\n\nLow: Test-only change without production changes\n\n## Testing\n\nHuman test evidence\n\n## Pipeline\n\nHuman pipeline notes"}`)
 			os.Exit(0)
 		}
 		if strings.Contains(joined, "pr edit") {

@@ -701,8 +701,8 @@ func TestUnwrapNestedPRBody(t *testing.T) {
 	}
 }
 
-func TestAppendGeneratedSections_StripsAgentGeneratedSections(t *testing.T) {
-	body := "## Summary\n\n- improve PR descriptions\n\n## Testing\n\n- model-added testing\n\n## Risk Assessment\n\nold risk\n\n## Pipeline\n\nold pipeline"
+func TestAppendGeneratedSections_ReplacesOnlyOwnedSections(t *testing.T) {
+	body := "## Summary\n\n- improve PR descriptions\n\n## Testing\n\n- human testing\n\n## Risk Assessment\n\nHuman risk context\n\n## Pipeline\n" + generatedPRSectionMarker + "\n\nold pipeline"
 
 	got := appendGeneratedSections(
 		body,
@@ -711,17 +711,16 @@ func TestAppendGeneratedSections_StripsAgentGeneratedSections(t *testing.T) {
 		"## Pipeline\n\n- deterministic pipeline",
 	)
 
-	if strings.Count(got, "## Testing") != 1 {
-		t.Fatalf("expected one Testing section, got:\n%s", got)
+	for _, want := range []string{"- human testing", "Human risk context", "real risk", "- deterministic testing", "- deterministic pipeline"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected %q to survive generated-section refresh:\n%s", want, got)
+		}
 	}
-	if strings.Count(got, "## Risk Assessment") != 1 {
-		t.Fatalf("expected one Risk Assessment section, got:\n%s", got)
+	if strings.Contains(got, "old pipeline") {
+		t.Fatalf("expected marked pipeline section to be replaced:\n%s", got)
 	}
-	if strings.Count(got, "## Pipeline") != 1 {
-		t.Fatalf("expected one Pipeline section, got:\n%s", got)
-	}
-	if strings.Contains(got, "model-added testing") || strings.Contains(got, "old risk") || strings.Contains(got, "old pipeline") {
-		t.Fatalf("expected generated sections to replace agent-provided ones, got:\n%s", got)
+	if strings.Count(got, generatedPRSectionMarker) != 3 {
+		t.Fatalf("expected each generated section to carry an ownership marker:\n%s", got)
 	}
 }
 
@@ -804,8 +803,8 @@ func TestPRBodyBudgetPromptSection(t *testing.T) {
 	}
 }
 
-func TestAppendGeneratedSections_StripsCommonHeadingVariants(t *testing.T) {
-	body := "## Summary\n\n- improve PR descriptions\n\n## tests:\n\n- model-added testing\n\n## risk assessment\n\nold risk\n\n## Pipeline:\n\nold pipeline"
+func TestAppendGeneratedSections_PreservesUnmarkedHeadingVariants(t *testing.T) {
+	body := "## Summary\n\n- improve PR descriptions\n\n## tests:\n\n- human testing\n\n## risk assessment\n\nhuman risk\n\n## Pipeline:\n\nhuman pipeline"
 
 	got := appendGeneratedSections(
 		body,
@@ -814,17 +813,10 @@ func TestAppendGeneratedSections_StripsCommonHeadingVariants(t *testing.T) {
 		"## Pipeline\n\n- deterministic pipeline",
 	)
 
-	if strings.Contains(got, "model-added testing") || strings.Contains(got, "old risk") || strings.Contains(got, "old pipeline") {
-		t.Fatalf("expected generated heading variants to be replaced, got:\n%s", got)
-	}
-	if strings.Count(got, "## Testing") != 1 {
-		t.Fatalf("expected one normalized Testing section, got:\n%s", got)
-	}
-	if strings.Count(got, "## Risk Assessment") != 1 {
-		t.Fatalf("expected one normalized Risk Assessment section, got:\n%s", got)
-	}
-	if strings.Count(got, "## Pipeline") != 1 {
-		t.Fatalf("expected one normalized Pipeline section, got:\n%s", got)
+	for _, want := range []string{"- human testing", "human risk", "human pipeline", "real risk", "- deterministic testing", "- deterministic pipeline"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected unmarked content %q to survive, got:\n%s", want, got)
+		}
 	}
 }
 
@@ -835,7 +827,7 @@ func TestAppendGeneratedSections_LeavesUnderLimitBodyByteIdentical(t *testing.T)
 	pipelineMD := pipelineMarkdownForTest("review round 001 stayed small", "review round 002 stayed small")
 
 	got := appendGeneratedSections(body, riskLine, testingMD, pipelineMD)
-	want := body + "\n\n## Risk Assessment\n\n" + riskLine + "\n\n" + testingMD + "\n\n" + pipelineMD
+	want := body + "\n\n## Risk Assessment\n" + generatedPRSectionMarker + "\n\n" + riskLine + "\n\n" + markGeneratedSection(testingMD) + "\n\n" + markGeneratedSection(pipelineMD)
 
 	if got != want {
 		t.Fatalf("expected under-limit body to be byte-identical\nwant:\n%s\n\ngot:\n%s", want, got)
@@ -855,7 +847,7 @@ func TestAppendGeneratedSections_TruncatesPipelineUpdatesBeforeGitHubLimit(t *te
 	got := appendGeneratedSections(body, riskLine, testingMD, pipelineMD)
 
 	assertGitHubBodyLimitForTest(t, got)
-	if !strings.Contains(got, "essential summary survives") || !strings.Contains(got, riskLine) || !strings.Contains(got, testingMD) {
+	if !strings.Contains(got, "essential summary survives") || !strings.Contains(got, riskLine) || !strings.Contains(got, "- go test ./internal/pipeline/steps") {
 		t.Fatalf("expected essential sections to survive intact, got:\n%s", got)
 	}
 	if !strings.Contains(got, "earlier update rounds omitted to keep the PR body within GitHub's 65536-char limit") {

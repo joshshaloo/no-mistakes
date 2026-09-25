@@ -35,6 +35,7 @@ var prContentSchema = json.RawMessage(`{
 
 const (
 	githubPullRequestBodyHardLimitChars = 65536
+	generatedPRSectionMarker            = "<!-- no-mistakes:generated-section -->"
 	// Count bytes, not runes, so multi-byte markdown still stays under
 	// GitHub's character limit with room for provider-side formatting drift.
 	pullRequestBodySafetyBufferBytes = 2048
@@ -311,6 +312,8 @@ func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.St
 }
 
 func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD string) string {
+	testingMD = markGeneratedSection(testingMD)
+	pipelineMD = markGeneratedSection(pipelineMD)
 	generatedSections := generatedEssentialSections(riskLine, testingMD)
 	prefix := body + generatedSections
 	if pipelineMD == "" {
@@ -332,7 +335,9 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 func generatedEssentialSections(riskLine, testingMD string) string {
 	var b strings.Builder
 	if riskLine != "" {
-		b.WriteString("\n\n## Risk Assessment\n\n")
+		b.WriteString("\n\n## Risk Assessment\n")
+		b.WriteString(generatedPRSectionMarker)
+		b.WriteString("\n\n")
 		b.WriteString(riskLine)
 	}
 	if testingMD != "" {
@@ -487,8 +492,11 @@ func pipelineOmissionSectionWithinLimit(header string, omitted, maxBytes int) st
 }
 
 func splitPipelineSectionHeader(pipelineMD string) (string, string) {
-	const heading = "## Pipeline\n\n"
-	if !strings.HasPrefix(pipelineMD, heading) {
+	heading := "## Pipeline\n\n"
+	markedHeading := "## Pipeline\n" + generatedPRSectionMarker + "\n\n"
+	if strings.HasPrefix(pipelineMD, markedHeading) {
+		heading = markedHeading
+	} else if !strings.HasPrefix(pipelineMD, heading) {
 		return "", pipelineMD
 	}
 
@@ -902,48 +910,35 @@ func stripGeneratedSections(body string) string {
 
 	lines := strings.Split(body, "\n")
 	out := make([]string, 0, len(lines))
-	skipping := false
-
-	for _, raw := range lines {
-		line := strings.TrimSpace(raw)
-
-		if skipping {
-			if strings.HasPrefix(line, "## ") {
-				if isGeneratedSectionHeading(line) {
-					continue
+	for i := 0; i < len(lines); {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "## ") {
+			marker := i + 1
+			for marker < len(lines) && strings.TrimSpace(lines[marker]) == "" {
+				marker++
+			}
+			if marker < len(lines) && strings.TrimSpace(lines[marker]) == generatedPRSectionMarker {
+				i = marker + 1
+				for i < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[i]), "## ") {
+					i++
 				}
-				skipping = false
-			} else {
 				continue
 			}
 		}
-
-		if isGeneratedSectionHeading(line) {
-			skipping = true
-			continue
-		}
-
-		out = append(out, raw)
+		out = append(out, lines[i])
+		i++
 	}
-
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 
-func isGeneratedSectionHeading(line string) bool {
-	if !strings.HasPrefix(strings.TrimSpace(line), "##") {
-		return false
+func markGeneratedSection(section string) string {
+	if strings.TrimSpace(section) == "" {
+		return ""
 	}
-
-	heading := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "##"))
-	heading = strings.TrimRight(heading, ":.!? ")
-	heading = strings.ToLower(heading)
-
-	switch heading {
-	case "intent", "risk assessment", "testing", "tests", "pipeline":
-		return true
-	default:
-		return false
+	newline := strings.IndexByte(section, '\n')
+	if newline < 0 {
+		return section + "\n" + generatedPRSectionMarker
 	}
+	return section[:newline+1] + generatedPRSectionMarker + "\n" + section[newline+1:]
 }
 
 // prependIntentSection prepends a "## Intent" section sourced from the
@@ -956,7 +951,7 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	if cleaned == "" {
 		return body
 	}
-	section := "## Intent\n\n" + cleaned
+	section := "## Intent\n" + generatedPRSectionMarker + "\n\n" + cleaned
 	if strings.TrimSpace(body) == "" {
 		return section
 	}

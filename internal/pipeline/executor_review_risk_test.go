@@ -73,4 +73,11 @@ func TestExecutor_AgentRiskCheckFinishesBeforeStepCanPublishOutcome(t *testing.T
 	if invalidationEvent == nil {
 		t.Fatal("review invalidation was not published to live subscribers")
 	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if invalidationEvent.DurationMS == nil || results[0].DurationMS == nil || *invalidationEvent.DurationMS != *results[0].DurationMS {
+		t.Fatalf("invalidation duration = %v, persisted review duration = %v", invalidationEvent.DurationMS, results[0].DurationMS)
+	}
 }
