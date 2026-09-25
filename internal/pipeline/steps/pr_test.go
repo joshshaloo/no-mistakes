@@ -95,6 +95,27 @@ func TestPRStep_PreservesExistingPRAndPublishesNotice(t *testing.T) {
 	}
 }
 
+func TestPRStep_RefusesUnverifiedGitHubHostBeforeRemoteMutation(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "https://github.com.evil/test/repo/pull/42")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Repo.UpstreamURL = "https://github.com.evil/test/repo.git"
+
+	_, err := (&PRStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "verified only for github.com") {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	logData, readErr := os.ReadFile(logFile)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
+	}
+	if strings.TrimSpace(string(logData)) != "" {
+		t.Fatalf("unverified GitHub host attempted remote mutation/request:\n%s", logData)
+	}
+}
+
 func TestPRStep_BitbucketPreservesExistingPRAndPublishesNotice(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

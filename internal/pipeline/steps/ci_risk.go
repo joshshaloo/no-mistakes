@@ -33,7 +33,19 @@ func validationNotice(sctx *pipeline.StepContext, phase, attemptID string) (stri
 	return fmt.Sprintf("<!-- no-mistakes-validation run=%s head=%s -->\n## no-mistakes validation notice\n\n**Run:** `%s`  \n**Head:** `%s`  \n%s**Phase:** %s  \n**Review:** %s%s\n\nValidation notices are append-only entries in this PR conversation; the PR title, description, and human comments are not rewritten.", sctx.Run.ID, sctx.Run.HeadSHA, sctx.Run.ID, sctx.Run.HeadSHA, attemptLine, phase, riskLine, supervisor), nil
 }
 
+func validateValidationNoticeSupport(host scm.Host) error {
+	if checker, ok := host.(scm.ValidationNoticeSupportChecker); ok {
+		if err := checker.ValidateValidationNoticeSupport(); err != nil {
+			return fmt.Errorf("validate PR notice host support: %w", err)
+		}
+	}
+	return nil
+}
+
 func publishValidationNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, phase, attemptID string) error {
+	if err := validateValidationNoticeSupport(host); err != nil {
+		return err
+	}
 	body, err := validationNotice(sctx, phase, attemptID)
 	if err != nil {
 		return err
@@ -54,6 +66,9 @@ func publishValidationNoticeBody(sctx *pipeline.StepContext, host scm.Host, pr *
 }
 
 func (s *CIStep) reconcileRiskNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, phase, attemptID string) error {
+	if err := validateValidationNoticeSupport(host); err != nil {
+		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
+	}
 	stale, err := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
 	if err != nil {
 		return fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, err)
@@ -111,6 +126,9 @@ func (s *CIStep) publishRiskNoticeBeforePush(sctx *pipeline.StepContext) error {
 }
 
 func (s *CIStep) reconcileReadyRiskNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, checks []scm.Check) error {
+	if err := validateValidationNoticeSupport(host); err != nil {
+		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
+	}
 	stale, err := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
 	if err != nil {
 		return fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, err)
@@ -126,6 +144,9 @@ func (s *CIStep) reconcileReadyRiskNotice(sctx *pipeline.StepContext, host scm.H
 }
 
 func currentCIAttemptIdentity(ctx context.Context, host scm.Host, pr *scm.PR, headSHA string, checks []scm.Check) (string, error) {
+	if err := validateValidationNoticeSupport(host); err != nil {
+		return "", err
+	}
 	if host.Provider() != scm.ProviderGitHub {
 		return "", fmt.Errorf("provider %q has no verified CI attempt identity contract", host.Provider())
 	}

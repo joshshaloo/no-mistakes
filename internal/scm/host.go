@@ -97,6 +97,12 @@ type PRContent struct {
 	Body  string
 }
 
+// ValidationNoticeSupportChecker verifies that validation notices and their
+// currentness evidence are supported for the host selected by an adapter.
+type ValidationNoticeSupportChecker interface {
+	ValidateValidationNoticeSupport() error
+}
+
 // PRNoticePublisher appends a pipeline-owned validation notice to the PR
 // conversation without modifying its title, description, or existing comments.
 type PRNoticePublisher interface {

@@ -162,6 +162,17 @@ func repoOwner(slug string) string {
 
 func (h *Host) Provider() scm.Provider { return scm.ProviderGitHub }
 
+func (h *Host) ValidateValidationNoticeSupport() error {
+	host := strings.ToLower(strings.TrimSpace(h.host))
+	if host != "github.com" {
+		if host == "" {
+			host = "unknown"
+		}
+		return fmt.Errorf("GitHub validation notices are verified only for github.com; host %q is unsupported because no real GitHub Enterprise host was available for verification", host)
+	}
+	return nil
+}
+
 func (h *Host) Capabilities() scm.Capabilities {
 	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true}
 }
@@ -282,6 +293,9 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 }
 
 func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) error {
+	if err := h.ValidateValidationNoticeSupport(); err != nil {
+		return err
+	}
 	selector, err := prSelector(pr)
 	if err != nil {
 		return err
@@ -297,6 +311,9 @@ func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) err
 }
 
 func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) {
+	if err := h.ValidateValidationNoticeSupport(); err != nil {
+		return nil, err
+	}
 	if h.repo == "" {
 		return nil, errors.New("gh api PR comments: missing repository")
 	}
@@ -394,6 +411,9 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 }
 
 func (h *Host) GetCIAttemptIdentity(ctx context.Context, _ *scm.PR, headSHA string, checks []scm.Check) (string, error) {
+	if err := h.ValidateValidationNoticeSupport(); err != nil {
+		return "", err
+	}
 	repo := h.apiRepoSlug()
 	if repo == "" {
 		return "", errors.New("GitHub repository is unknown")
