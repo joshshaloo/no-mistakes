@@ -119,7 +119,7 @@ reason about in one long-lived process than inside independent hook invocations.
 
 On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
 
-- Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
+- Reconciles legacy active rows whose persisted PR state is already `merged` or `closed` before active-run recovery and parked-run planning. The same successful-completion barrier removes the worktree before marking the run and CI step completed; cleanup refusal fails the run and retains its custody evidence
 - Inspects every stale run's worktree and pins its exact head before marking the run terminal, so no cleanup path can ever be the last reference to pipeline commits
 - Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
