@@ -194,9 +194,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		}
 	}
 	started := now()
+	checksRegistrationDeadline := started.Add(s.gracePeriod())
 	// timeoutAnchor is the point the idle timeout is measured from. It re-arms
 	// to now() whenever the base branch advances, while started stays fixed so
-	// poll-interval and grace-period pacing are unaffected by re-arming.
+	// poll-interval pacing is unaffected by re-arming.
 	timeoutAnchor := started
 	lastBaseTip := ""
 	manualFixAttempted := false
@@ -216,6 +217,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 
 	for {
+		registrationWaiting := false
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -246,7 +248,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			}
 		}
 
-		elapsed := now().Sub(started)
 		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
 			return timeoutOutcome()
 		}
@@ -327,7 +328,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				noticePhase = "CI checks failing"
 			case pending:
 				noticePhase = "CI checks pending"
-			case len(checks) == 0 && elapsed < s.gracePeriod():
+			case len(checks) == 0 && now().Before(checksRegistrationDeadline):
 				noticePhase = "CI checks registering"
 			case len(checks) == 0:
 				noticePhase = "CI ready: no checks reported"
@@ -340,14 +341,22 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				return nil, fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, staleErr)
 			}
 			if stale {
-				attemptID, identityErr := currentCIAttemptIdentity(ctx, host, pr, sctx.Run.HeadSHA, checks)
-				if identityErr != nil {
+				if len(checks) == 0 {
 					clearCIMonitorReady(sctx)
-					return nil, fmt.Errorf("%w: establish current CI attempt: %w", errPublishStaleRisk, identityErr)
-				}
-				if err := s.reconcileRiskNotice(sctx, host, pr, noticePhase, attemptID); err != nil {
-					clearCIMonitorReady(sctx)
-					return nil, err
+					if !now().Before(checksRegistrationDeadline) {
+						return nil, fmt.Errorf("%w: establish current CI attempt: no authoritative checks registered within %s", errPublishStaleRisk, s.gracePeriod())
+					}
+					registrationWaiting = true
+				} else {
+					attemptID, identityErr := currentCIAttemptIdentity(ctx, host, pr, sctx.Run.HeadSHA, checks)
+					if identityErr != nil {
+						clearCIMonitorReady(sctx)
+						return nil, fmt.Errorf("%w: establish current CI attempt: %w", errPublishStaleRisk, identityErr)
+					}
+					if err := s.reconcileRiskNotice(sctx, host, pr, noticePhase, attemptID); err != nil {
+						clearCIMonitorReady(sctx)
+						return nil, err
+					}
 				}
 			}
 
@@ -399,6 +408,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
 						s.lastFixedChecks = fixKey
 						s.lastFixedCompletedAt = fixCompletedAt
+						checksRegistrationDeadline = now().Add(s.gracePeriod())
 					} else {
 						sctx.Log("CI fix produced no changes, returning for manual intervention...")
 						return ciFailureOutcome(failing, mergeConflict, "CI fix produced no changes - failures require manual intervention"), nil
@@ -426,6 +436,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
 						s.lastFixedChecks = fixKey
 						s.lastFixedCompletedAt = fixCompletedAt
+						checksRegistrationDeadline = now().Add(s.gracePeriod())
 					} else {
 						// No changes produced - don't set lastFixedChecks so next
 						// poll treats this as a new failure and retries if attempts remain.
@@ -444,7 +455,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					// so a PR that passed checks and starts re-running clears the
 					// previous passed-checks signal instead of looking stale.
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
-				case len(checks) == 0 && elapsed < s.gracePeriod():
+				case len(checks) == 0 && now().Before(checksRegistrationDeadline):
 					clearCIMonitorReady(sctx)
 					// CI checks may not be registered yet, keep polling.
 					lastMonitorLog = ""
@@ -464,6 +475,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		}
 		if !unlimited {
 			remaining := timeout - now().Sub(timeoutAnchor)
+			if remaining < interval {
+				interval = remaining
+			}
+		}
+		if registrationWaiting {
+			remaining := checksRegistrationDeadline.Sub(now())
 			if remaining < interval {
 				interval = remaining
 			}

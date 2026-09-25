@@ -361,7 +361,6 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 		checks = append(checks, scm.Check{
 			Name:        e.checkName(),
 			Bucket:      bucket,
-			AttemptID:   strings.TrimSpace(e.EvaluationID),
 			CompletedAt: parseAzTime(e.CompletedDate),
 		})
 	}

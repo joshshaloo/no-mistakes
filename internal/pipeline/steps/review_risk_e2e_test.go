@@ -272,6 +272,105 @@ func TestCIStep_ValidationEvidenceReadFailureBlocksReady(t *testing.T) {
 	t.Logf("RESTORED ready: notices=%d CIReady=true checks-passed=true", count)
 }
 
+func TestCIStep_StaleRiskWaitsForChecksWithinRegistrationWindow(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	review := seedLowReview(t, sctx)
+	if err := sctx.DB.SetStepFindings(review.ID, `{"findings":[],"risk_level":"stale","risk_rationale":"post-review change"}`); err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = 5 * time.Minute
+	bodyPath := filepath.Join(t.TempDir(), "notice.md")
+	sctx.Env = append(fakeCIGHSequenceMergeable(t, "OPEN", []string{
+		`[]`,
+		`[{"name":"test","bucket":"pass","link":"https://github.com/test/repo/actions/runs/123/job/456"}]`,
+	}, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath, "FAKE_CLI_ACTIONS_HEAD="+head)
+	current := time.Unix(1_700_000_000, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+	waits := 0
+	step := &CIStep{
+		now:                  func() time.Time { return current },
+		pollIntervalOverride: 2 * time.Minute,
+		waitForNextPoll: func(_ context.Context, interval time.Duration) error {
+			waits++
+			if waits == 1 {
+				if interval != defaultChecksGracePeriod {
+					t.Fatalf("registration wait=%s, want %s", interval, defaultChecksGracePeriod)
+				}
+				current = current.Add(interval)
+				return nil
+			}
+			cancel()
+			return ctx.Err()
+		},
+	}
+	if _, err := step.Execute(sctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("checks arriving at deadline did not establish readiness: %v", err)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.CIReadyAt == nil {
+		t.Fatal("checks arriving within registration window left readiness false")
+	}
+	body, err := os.ReadFile(bodyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(body), "## no-mistakes validation notice"); count != 1 {
+		t.Fatalf("registration notices=%d, want 1", count)
+	}
+	t.Logf("REGISTERED elapsed=%s deadline=%s notices=1 CIReady=true", defaultChecksGracePeriod, current.Format(time.RFC3339))
+}
+
+func TestCIStep_StaleRiskRegistrationDeadlineDoesNotRearm(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	review := seedLowReview(t, sctx)
+	if err := sctx.DB.SetStepFindings(review.ID, `{"findings":[],"risk_level":"stale","risk_rationale":"post-review change"}`); err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = 5 * time.Minute
+	bodyPath := filepath.Join(t.TempDir(), "notice.md")
+	sctx.Env = append(fakeCIGHSequenceMergeable(t, "OPEN", []string{`[]`, `[]`, `[]`, `[]`}, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
+	started := time.Unix(1_700_000_000, 0)
+	current := started
+	sctx.Ctx = context.Background()
+	step := &CIStep{
+		now:                  func() time.Time { return current },
+		pollIntervalOverride: 20 * time.Second,
+		waitForNextPoll: func(_ context.Context, interval time.Duration) error {
+			current = current.Add(interval)
+			return nil
+		},
+	}
+	_, err := step.Execute(sctx)
+	if !errors.Is(err, errPublishStaleRisk) || !strings.Contains(err.Error(), "no authoritative checks registered within 1m0s") {
+		t.Fatalf("registration expiry did not fail closed: %v", err)
+	}
+	if elapsed := current.Sub(started); elapsed != defaultChecksGracePeriod {
+		t.Fatalf("empty polls rearmed registration window: elapsed=%s", elapsed)
+	}
+	if _, statErr := os.Stat(bodyPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("ready notice published without checks: %v", statErr)
+	}
+	run, dbErr := sctx.DB.GetRun(sctx.Run.ID)
+	if dbErr != nil {
+		t.Fatal(dbErr)
+	}
+	if run.CIReadyAt != nil {
+		t.Fatalf("registration expiry retained readiness: %v", *run.CIReadyAt)
+	}
+	t.Logf("REGISTRATION-EXPIRED elapsed=%s deadline=%s notices=0 CIReady=false", current.Sub(started), started.Add(defaultChecksGracePeriod).Format(time.RFC3339))
+}
+
 func TestCIStep_SameHeadRerunBetweenPollsPublishesCurrentAttempt(t *testing.T) {
 	dir, base, head := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})

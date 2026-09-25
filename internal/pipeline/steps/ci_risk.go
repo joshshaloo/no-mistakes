@@ -107,14 +107,18 @@ func (s *CIStep) publishRiskNoticeBeforePush(sctx *pipeline.StepContext) error {
 }
 
 func currentCIAttemptIdentity(ctx context.Context, host scm.Host, pr *scm.PR, headSHA string, checks []scm.Check) (string, error) {
-	if reader, ok := host.(scm.CIAttemptIdentityReader); ok {
-		identity, err := reader.GetCIAttemptIdentity(ctx, pr, headSHA, checks)
-		if err != nil {
-			return "", err
-		}
-		return ciAttemptIdentity([]scm.Check{{Name: string(host.Provider()), AttemptID: identity}})
+	if host.Provider() != scm.ProviderGitHub {
+		return "", fmt.Errorf("provider %q has no verified CI attempt identity contract", host.Provider())
 	}
-	return ciAttemptIdentity(checks)
+	reader, ok := host.(scm.CIAttemptIdentityReader)
+	if !ok {
+		return "", errors.New("github host cannot establish the verified CI attempt identity contract")
+	}
+	identity, err := reader.GetCIAttemptIdentity(ctx, pr, headSHA, checks)
+	if err != nil {
+		return "", err
+	}
+	return ciAttemptIdentity([]scm.Check{{Name: string(host.Provider()), AttemptID: identity}})
 }
 
 func ciAttemptIdentity(checks []scm.Check) (string, error) {

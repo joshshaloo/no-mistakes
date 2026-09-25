@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +14,33 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+type apparentAttemptIdentityHost struct {
+	scm.Host
+	provider scm.Provider
+	identity string
+}
+
+func (h apparentAttemptIdentityHost) Provider() scm.Provider { return h.provider }
+func (h apparentAttemptIdentityHost) GetCIAttemptIdentity(context.Context, *scm.PR, string, []scm.Check) (string, error) {
+	return h.identity, nil
+}
+
+func TestCurrentCIAttemptIdentity_AllowsOnlyVerifiedProviderContracts(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	githubHost, reason := buildHost(sctx, scm.ProviderGitHub)
+	if githubHost == nil {
+		t.Fatal(reason)
+	}
+	checks := []scm.Check{{Name: "build", AttemptID: "convincing-id", DetailsURL: "https://example.test/run/1"}}
+	for _, provider := range []scm.Provider{scm.ProviderGitLab, scm.ProviderBitbucket, scm.ProviderAzureDevOps, scm.ProviderUnknown, scm.Provider("future-provider")} {
+		host := apparentAttemptIdentityHost{Host: githubHost, provider: provider, identity: "apparently-authoritative-attempt"}
+		if _, err := currentCIAttemptIdentity(context.Background(), host, &scm.PR{Number: "42"}, head, checks); err == nil || !strings.Contains(err.Error(), "verified CI attempt identity contract") {
+			t.Fatalf("provider %q was not refused by default: %v", provider, err)
+		}
+	}
+}
 
 func TestCIAttemptIdentity_RequiresProviderIdentityAndChangesAcrossReruns(t *testing.T) {
 	first, err := ciAttemptIdentity([]scm.Check{{Name: "build", AttemptID: "run-1"}})
