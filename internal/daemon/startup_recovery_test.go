@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -495,6 +496,92 @@ func TestReconcileTerminalPRRunsUsesCompletionCleanup(t *testing.T) {
 			gotCI, err := database.GetStepResult(ci.ID)
 			if err != nil || gotCI.Status != types.StepStatusCompleted {
 				t.Fatalf("CI finalization = %#v, %v", gotCI, err)
+			}
+		})
+	}
+}
+
+func TestReconcileTerminalPRRunsRequiresExactCustodyForAbsentWorktree(t *testing.T) {
+	for _, refState := range []string{"exact", "missing", "mismatched"} {
+		t.Run(refState, func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			repo, recorded := setupTestGitRepo(t, p, database, "absent-terminal-pr-"+refState)
+			run, err := database.InsertRun(repo.ID, "feature", recorded, recorded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.ObserveRunPRState(run.ID, "merged"); err != nil {
+				t.Fatal(err)
+			}
+			ci, err := database.InsertStepResult(run.ID, types.StepCI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.StartStep(ci.ID); err != nil {
+				t.Fatal(err)
+			}
+			gateDir := p.RepoDir(repo.ID)
+			worktree := p.WorktreeDir(repo.ID, run.ID)
+			if err := git.WorktreeAdd(context.Background(), gateDir, worktree, recorded); err != nil {
+				t.Fatal(err)
+			}
+
+			switch refState {
+			case "exact":
+				if err := git.PinRunHead(context.Background(), gateDir, run.ID, recorded); err != nil {
+					t.Fatal(err)
+				}
+			case "mismatched":
+				gitCmd(t, worktree, "config", "user.name", "test")
+				gitCmd(t, worktree, "config", "user.email", "test@example.com")
+				if err := os.WriteFile(filepath.Join(worktree, "candidate.txt"), []byte("candidate\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, worktree, "add", "candidate.txt")
+				gitCmd(t, worktree, "commit", "-m", "candidate")
+				candidate := gitOutput(t, worktree, "rev-parse", "HEAD")
+				if err := git.PinRunHead(context.Background(), gateDir, run.ID, candidate); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := git.WorktreeRemove(context.Background(), gateDir, worktree); err != nil {
+				t.Fatal(err)
+			}
+
+			mgr := NewRunManager(database, p, nil)
+			events, unsubscribe := mgr.Subscribe(run.ID)
+			defer unsubscribe()
+			count := reconcileTerminalPRRuns(database, p, mgr)
+			event := <-events
+			got, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.PRState == nil || *got.PRState != "merged" {
+				t.Fatalf("PR truth was not preserved: %#v", got.PRState)
+			}
+			if refState == "exact" {
+				if count != 1 || got.Status != types.RunCompleted || event.Status == nil || *event.Status != string(types.RunCompleted) {
+					t.Fatalf("exact custody reconciliation = count %d run %s event %#v", count, got.Status, event)
+				}
+				return
+			}
+			if count != 0 || got.Status != types.RunFailed || event.Status == nil || *event.Status != string(types.RunFailed) {
+				t.Fatalf("unverified custody reconciliation = count %d run %s event %#v", count, got.Status, event)
+			}
+			if got.Error == nil || !strings.Contains(*got.Error, db.RunCustodyDiagnosticMarker) || !strings.Contains(*got.Error, "exact recorded head custody cannot be verified") {
+				t.Fatalf("custody diagnostic = %v", got.Error)
 			}
 		})
 	}

@@ -63,6 +63,9 @@ func TestStartupTerminalPRCompletionReapsOwnedProcesses(t *testing.T) {
 			foreignPID := startForeignWorktreeProcess(t, workDir, filepath.Join(pidDir, "foreign.pid"))
 
 			if removeWorktreeFirst {
+				if err := git.PinRunHead(context.Background(), p.RepoDir(repo.ID), run.ID, run.HeadSHA); err != nil {
+					t.Fatal(err)
+				}
 				if err := git.WorktreeRemove(context.Background(), p.RepoDir(repo.ID), workDir); err != nil {
 					t.Fatal(err)
 				}
