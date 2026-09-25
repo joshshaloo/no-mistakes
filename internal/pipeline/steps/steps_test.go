@@ -419,6 +419,50 @@ func fakeCIGHHandler(args []string) {
 }
 
 func fakeCIGHSequenceHandler(args []string) {
+	if bodyPath := os.Getenv("FAKE_CLI_RISK_BODY"); bodyPath != "" {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "pr comment") {
+			body, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				os.Exit(1)
+			}
+			f, err := os.OpenFile(bodyPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if err != nil {
+				os.Exit(1)
+			}
+			if _, err := f.Write(append(body, '\n')); err != nil {
+				f.Close()
+				os.Exit(1)
+			}
+			f.Close()
+			notices, _ := os.OpenFile(bodyPath+".jsonl", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if notices == nil || json.NewEncoder(notices).Encode(map[string]string{"body": string(body)}) != nil {
+				os.Exit(1)
+			}
+			notices.Close()
+			os.Exit(0)
+		}
+		if len(args) >= 2 && args[0] == "api" {
+			data, err := os.ReadFile(bodyPath + ".jsonl")
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Println("[[]]")
+				os.Exit(0)
+			}
+			if err != nil {
+				os.Exit(1)
+			}
+			fmt.Print("[[")
+			lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+			for i, line := range lines {
+				if i > 0 {
+					fmt.Print(",")
+				}
+				fmt.Print(string(line))
+			}
+			fmt.Println("]]")
+			os.Exit(0)
+		}
+	}
 	state := os.Getenv("FAKE_CLI_STATE")
 	checksPath := os.Getenv("FAKE_CLI_CHECKS_PATH")
 	indexPath := os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH")

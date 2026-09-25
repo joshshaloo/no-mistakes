@@ -33,7 +33,7 @@ const (
 // CIStep monitors an open PR until it is merged, closed, or its configured idle
 // timeout elapses, auto-fixing CI failures.
 type CIStep struct {
-	buildValidationNotice func(*pipeline.StepContext, string) (string, error)
+	buildValidationNotice func(*pipeline.StepContext, string, string) (string, error)
 	lastFixedChecks       string               // sorted check names from last fix attempt, to avoid re-fixing
 	lastFixedCompletedAt  map[string]time.Time // failing check completion times seen before the last fix attempt
 	ciFixAttempts         int                  // number of CI auto-fix attempts made
@@ -303,6 +303,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		if err != nil {
 			clearCIMonitorReady(sctx)
 			lastMonitorLog = ""
+			stale, staleErr := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
+			if staleErr != nil {
+				return nil, fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, staleErr)
+			}
+			if stale {
+				return nil, fmt.Errorf("%w: read current CI attempt: %w", errPublishStaleRisk, err)
+			}
 			sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
 		} else {
 			pending := hasPendingChecks(checks)
@@ -327,7 +334,16 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			default:
 				noticePhase = "CI ready: checks passed"
 			}
-			if err := s.reconcileRiskNotice(sctx, host, pr, noticePhase); err != nil {
+			attemptID, err := ciAttemptIdentity(checks)
+			if err != nil {
+				stale, staleErr := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
+				if staleErr != nil {
+					return nil, fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, staleErr)
+				}
+				if stale {
+					return nil, fmt.Errorf("%w: establish current CI attempt: %w", errPublishStaleRisk, err)
+				}
+			} else if err := s.reconcileRiskNotice(sctx, host, pr, noticePhase, attemptID); err != nil {
 				return nil, err
 			}
 

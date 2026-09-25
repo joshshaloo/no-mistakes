@@ -150,6 +150,7 @@ const (
 type Check struct {
 	Name        string
 	Bucket      CheckBucket
+	AttemptID   string    // provider-owned identity for this execution of the check
 	CompletedAt time.Time // zero when unknown; used to detect CI re-runs between polls
 }
 

@@ -84,7 +84,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 	if existing != nil {
 		sctx.Log(fmt.Sprintf("pull request already exists: %s; preserving its title and description", describePR(existing)))
-		if err := publishValidationNotice(sctx, host, existing, "PR step"); err != nil {
+		if err := publishValidationNotice(sctx, host, existing, "PR step", "pr-step:"+sctx.Run.HeadSHA); err != nil {
 			return nil, err
 		}
 		if existing.URL != "" {
@@ -112,7 +112,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return &pipeline.StepOutcome{}, nil
 	}
 	sctx.Log(fmt.Sprintf("created pull request: %s", created.URL))
-	if err := publishValidationNotice(sctx, host, created, "PR created"); err != nil {
+	if err := publishValidationNotice(sctx, host, created, "PR created", "pr-created:"+sctx.Run.HeadSHA); err != nil {
 		return nil, err
 	}
 	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, created.URL); err != nil {

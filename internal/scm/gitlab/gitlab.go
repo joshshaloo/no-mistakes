@@ -538,9 +538,14 @@ func parseGitlabJobs(out []byte) ([]scm.Check, error) {
 func jobsToChecks(jobs []gitlabJob) []scm.Check {
 	checks := make([]scm.Check, 0, len(jobs))
 	for _, job := range jobs {
+		attemptID := ""
+		if job.ID > 0 {
+			attemptID = fmt.Sprintf("job:%d", job.ID)
+		}
 		checks = append(checks, scm.Check{
 			Name:        job.Name,
 			Bucket:      gitlabStatusBucket(job.Status),
+			AttemptID:   attemptID,
 			CompletedAt: job.completedAt(),
 		})
 	}

@@ -14,6 +14,23 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestCIAttemptIdentity_RequiresProviderIdentityAndChangesAcrossReruns(t *testing.T) {
+	first, err := ciAttemptIdentity([]scm.Check{{Name: "build", AttemptID: "run-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := ciAttemptIdentity([]scm.Check{{Name: "build", AttemptID: "run-2"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatalf("different provider attempts collapsed to %q", first)
+	}
+	if _, err := ciAttemptIdentity([]scm.Check{{Name: "build"}}); err == nil || !strings.Contains(err.Error(), "omitted attempt identity") {
+		t.Fatalf("ambiguous attempt identity did not fail closed: %v", err)
+	}
+}
+
 func TestPublishRiskNotice_ReadyBoundaryRepublishesMissingHeadNotice(t *testing.T) {
 	dir, base, head := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
@@ -36,7 +53,7 @@ func TestPublishRiskNotice_ReadyBoundaryRepublishesMissingHeadNotice(t *testing.
 	}
 	pr := &scm.PR{Number: "42", URL: "https://github.com/test/repo/pull/42"}
 	step := &CIStep{}
-	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed"); err != nil {
+	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed", "attempt-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(bodyPath); err != nil {
@@ -45,7 +62,7 @@ func TestPublishRiskNotice_ReadyBoundaryRepublishesMissingHeadNotice(t *testing.
 	if err := os.Remove(bodyPath + ".jsonl"); err != nil {
 		t.Fatal(err)
 	}
-	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed"); err != nil {
+	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed", "attempt-1"); err != nil {
 		t.Fatal(err)
 	}
 	body, err := os.ReadFile(bodyPath)
@@ -89,19 +106,19 @@ func TestReconcileRiskNotice_CurrentStateLifecycle(t *testing.T) {
 		}
 		return len(strings.Split(strings.TrimSpace(string(data)), "\n"))
 	}
-	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed"); err != nil {
+	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed", "attempt-1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := step.reconcileRiskNotice(sctx, host, pr, "CI checks pending"); err != nil {
+	if err := step.reconcileRiskNotice(sctx, host, pr, "CI checks pending", "attempt-2"); err != nil {
 		t.Fatal(err)
 	}
-	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed"); err != nil {
+	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed", "attempt-2"); err != nil {
 		t.Fatal(err)
 	}
 	if got := count(); got != 3 {
 		t.Fatalf("pending-to-green notices = %d, want 3", got)
 	}
-	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed"); err != nil {
+	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed", "attempt-2"); err != nil {
 		t.Fatal(err)
 	}
 	if got := count(); got != 3 {
@@ -120,7 +137,7 @@ func TestReconcileRiskNotice_CurrentStateLifecycle(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed"); err != nil {
+	if err := step.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed", "attempt-2"); err != nil {
 		t.Fatal(err)
 	}
 	if got := count(); got != 2 {
@@ -148,7 +165,7 @@ func TestReconcileRiskNotice_LookupFailureFailsClosed(t *testing.T) {
 	if host == nil {
 		t.Fatal(reason)
 	}
-	err = (&CIStep{}).reconcileRiskNotice(sctx, host, &scm.PR{Number: "42"}, "CI ready: checks passed")
+	err = (&CIStep{}).reconcileRiskNotice(sctx, host, &scm.PR{Number: "42"}, "CI ready: checks passed", "attempt-1")
 	if !errors.Is(err, errPublishStaleRisk) || !strings.Contains(err.Error(), "read PR validation notices") {
 		t.Fatalf("lookup error did not fail closed: %v", err)
 	}

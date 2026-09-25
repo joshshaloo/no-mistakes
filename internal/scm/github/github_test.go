@@ -98,8 +98,8 @@ func TestGetChecksPassesRepoFlag(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt": {
-			stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass"}]` + "\n",
+		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
+			stdout: `[{"name":"build","state":"SUCCESS","bucket":"pass","link":"https://github.com/test/repo/actions/runs/123/job/456"}]` + "\n",
 		},
 	}), nil, "", "test/repo")
 
@@ -107,8 +107,8 @@ func TestGetChecksPassesRepoFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetChecks() error = %v", err)
 	}
-	if len(checks) != 1 || checks[0].Name != "build" {
-		t.Fatalf("checks = %+v, want single build check", checks)
+	if len(checks) != 1 || checks[0].Name != "build" || checks[0].AttemptID != "https://github.com/test/repo/actions/runs/123/job/456" {
+		t.Fatalf("checks = %+v, want single build check with provider attempt identity", checks)
 	}
 }
 
@@ -223,7 +223,7 @@ func TestGetChecksFallsBackToStateWhenBucketMissing(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --json name,state,bucket,completedAt": {
+		"gh pr checks 123 --json name,state,bucket,completedAt,link": {
 			stdout: `[{"name":"build","state":"FAILURE","bucket":""},{"name":"tests","state":"PENDING","bucket":""}]` + "\n",
 		},
 	}), nil, "", "")
@@ -376,7 +376,7 @@ func TestGetChecksParsesCompletedAt(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr checks 123 --json name,state,bucket,completedAt": {
+		"gh pr checks 123 --json name,state,bucket,completedAt,link": {
 			stdout: `[{"name":"build","state":"FAILURE","bucket":"fail","completedAt":"2026-04-24T04:15:00Z"},{"name":"tests","state":"SUCCESS","bucket":"pass","completedAt":"not-a-time"}]` + "\n",
 		},
 	}), nil, "", "")

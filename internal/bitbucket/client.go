@@ -41,6 +41,8 @@ type CommitStatus struct {
 	State       string `json:"state"`
 	Description string `json:"description"`
 	URL         string `json:"url"`
+	UUID        string `json:"uuid"`
+	UpdatedOn   string `json:"updated_on"`
 }
 
 type Pipeline struct {

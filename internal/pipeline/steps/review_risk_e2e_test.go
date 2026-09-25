@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -64,7 +65,7 @@ func TestCIStep_RepairInvalidatesPublishedReviewRisk(t *testing.T) {
 			sctx.Run.PRURL = &prURL
 			sctx.Config.AutoFix.CI = 1
 			sctx.Config.CITimeout = time.Minute
-			sctx.Env = fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"fail"}]`, "MERGEABLE")
+			sctx.Env = fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"fail","link":"https://github.test/runs/attempt-1"}]`, "MERGEABLE")
 			bodyPath := filepath.Join(t.TempDir(), "pr-body.md")
 			sctx.Env = append(sctx.Env, "FAKE_CLI_RISK_BODY="+bodyPath)
 			if failPR {
@@ -155,9 +156,9 @@ func TestCIStep_ValidationEvidenceReadFailureFailsClosed(t *testing.T) {
 	sctx.Config.AutoFix.CI = 1
 	sctx.Config.CITimeout = time.Minute
 	bodyPath := filepath.Join(t.TempDir(), "notice.md")
-	sctx.Env = append(fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"fail"}]`, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
+	sctx.Env = append(fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"fail","link":"https://github.test/runs/attempt-1"}]`, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
 	step := &CIStep{
-		buildValidationNotice: func(*pipeline.StepContext, string) (string, error) {
+		buildValidationNotice: func(*pipeline.StepContext, string, string) (string, error) {
 			return "", errors.New("read validation notice evidence: injected step-round read failure")
 		},
 	}
@@ -210,9 +211,9 @@ func TestCIStep_ValidationEvidenceReadFailureBlocksReady(t *testing.T) {
 	sctx.Run.PRURL = &prURL
 	sctx.Config.CITimeout = time.Minute
 	bodyPath := filepath.Join(t.TempDir(), "notice.md")
-	sctx.Env = append(fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"pass"}]`, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
+	sctx.Env = append(fakeCIGHMergeable(t, "OPEN", `[{"name":"test","bucket":"pass","link":"https://github.test/runs/attempt-1"}]`, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
 	step := &CIStep{
-		buildValidationNotice: func(*pipeline.StepContext, string) (string, error) {
+		buildValidationNotice: func(*pipeline.StepContext, string, string) (string, error) {
 			return "", errors.New("read validation notice evidence: injected step-round read failure")
 		},
 	}
@@ -233,6 +234,12 @@ func TestCIStep_ValidationEvidenceReadFailureBlocksReady(t *testing.T) {
 	t.Log("FAIL-CLOSED ready: notices=0 CIReady=false checks-passed=false")
 
 	step.buildValidationNotice = nil
+	var restoredLogs []string
+	originalLog := sctx.Log
+	sctx.Log = func(message string) {
+		restoredLogs = append(restoredLogs, message)
+		originalLog(message)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	sctx.Ctx = ctx
 	step.waitForNextPoll = func(context.Context, time.Duration) error { cancel(); return ctx.Err() }
@@ -244,8 +251,13 @@ func TestCIStep_ValidationEvidenceReadFailureBlocksReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	count := strings.Count(string(body), "## no-mistakes validation notice")
-	if count != 2 {
-		t.Fatalf("restored ready notices = %d, want initial and ready-boundary notices", count)
+	if count != 1 {
+		t.Fatalf("restored ready notices = %d, want one current complete notice", count)
+	}
+	for _, want := range []string{"STALE", head, "CI ready: checks passed", "green CI does not make the previous rating current"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("restored ready notice missing %q: %s", want, body)
+		}
 	}
 	dbRun, err = sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
@@ -254,7 +266,73 @@ func TestCIStep_ValidationEvidenceReadFailureBlocksReady(t *testing.T) {
 	if dbRun.CIReadyAt == nil {
 		t.Fatal("restored evidence read did not permit checks-passed readiness")
 	}
+	if !strings.Contains(strings.Join(restoredLogs, "\n"), ciChecksPassedMsg) {
+		t.Fatalf("restored evidence read emitted no checks-passed signal: %v", restoredLogs)
+	}
 	t.Logf("RESTORED ready: notices=%d CIReady=true checks-passed=true", count)
+}
+
+func TestCIStep_SameHeadRerunBetweenPollsPublishesCurrentAttempt(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	review := seedLowReview(t, sctx)
+	staleFindings := `{"findings":[],"risk_level":"stale","risk_rationale":"post-review change"}`
+	if err := sctx.DB.SetStepFindings(review.ID, staleFindings); err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.Run.PRURL = &prURL
+	sctx.Config.CITimeout = time.Minute
+	firstLink := "https://github.test/runs/attempt-1"
+	secondLink := "https://github.test/runs/attempt-2"
+	firstID, err := ciAttemptIdentity([]scm.Check{{Name: "test", AttemptID: firstLink}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondID, err := ciAttemptIdentity([]scm.Check{{Name: "test", AttemptID: secondLink}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bodyPath := filepath.Join(t.TempDir(), "notice.md")
+	sctx.Env = append(fakeCIGHSequenceMergeable(t, "OPEN", []string{
+		fmt.Sprintf(`[{"name":"test","bucket":"pass","link":%q}]`, firstLink),
+		fmt.Sprintf(`[{"name":"test","bucket":"pass","link":%q}]`, secondLink),
+	}, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+	polls := 0
+	step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error {
+		polls++
+		if polls == 2 {
+			cancel()
+			return ctx.Err()
+		}
+		return nil
+	}}
+	if _, err := step.Execute(sctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation after second ready attempt, got %v", err)
+	}
+	body, err := os.ReadFile(bodyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := strings.Count(string(body), "## no-mistakes validation notice"); count != 2 {
+		t.Fatalf("between-poll rerun notices=%d, want 2: %s", count, body)
+	}
+	for _, attemptID := range []string{firstID, secondID} {
+		if !strings.Contains(string(body), "**CI attempt:** `"+attemptID+"`") {
+			t.Fatalf("missing exact attempt %s from notices: %s", attemptID, body)
+		}
+	}
+	dbRun, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dbRun.CIReadyAt == nil {
+		t.Fatal("current rerun did not restore readiness")
+	}
+	t.Logf("BETWEEN-POLLS/RECONCILED first_attempt=%s second_attempt=%s notices=2 CIReady=true", firstID, secondID)
 }
 
 func TestPRStep_AgentEditsInvalidateRiskBeforePRPublication(t *testing.T) {

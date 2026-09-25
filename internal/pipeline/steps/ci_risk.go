@@ -1,8 +1,10 @@
 package steps
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -11,7 +13,7 @@ import (
 
 var errPublishStaleRisk = errors.New("cannot publish stale review assessment")
 
-func validationNotice(sctx *pipeline.StepContext, phase string) (string, error) {
+func validationNotice(sctx *pipeline.StepContext, phase, attemptID string) (string, error) {
 	_, riskLine, _, err := (&PRStep{}).buildPipelineSectionStrict(sctx)
 	if err != nil {
 		return "", fmt.Errorf("read validation notice evidence: %w", err)
@@ -23,11 +25,11 @@ func validationNotice(sctx *pipeline.StepContext, phase string) (string, error) 
 	if strings.Contains(strings.ToUpper(riskLine), "STALE") {
 		supervisor = "\n\nChanges made after review are not covered by the previous assessment. Get a fresh review before relying on that rating to merge; green CI does not make the previous rating current."
 	}
-	return fmt.Sprintf("<!-- no-mistakes-validation run=%s head=%s -->\n## no-mistakes validation notice\n\n**Run:** `%s`  \n**Head:** `%s`  \n**Phase:** %s  \n**Review:** %s%s\n\nValidation notices are append-only entries in this PR conversation; the PR title, description, and human comments are not rewritten.", sctx.Run.ID, sctx.Run.HeadSHA, sctx.Run.ID, sctx.Run.HeadSHA, phase, riskLine, supervisor), nil
+	return fmt.Sprintf("<!-- no-mistakes-validation run=%s head=%s -->\n## no-mistakes validation notice\n\n**Run:** `%s`  \n**Head:** `%s`  \n**CI attempt:** `%s`  \n**Phase:** %s  \n**Review:** %s%s\n\nValidation notices are append-only entries in this PR conversation; the PR title, description, and human comments are not rewritten.", sctx.Run.ID, sctx.Run.HeadSHA, sctx.Run.ID, sctx.Run.HeadSHA, attemptID, phase, riskLine, supervisor), nil
 }
 
-func publishValidationNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, phase string) error {
-	body, err := validationNotice(sctx, phase)
+func publishValidationNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, phase, attemptID string) error {
+	body, err := validationNotice(sctx, phase, attemptID)
 	if err != nil {
 		return err
 	}
@@ -46,7 +48,7 @@ func publishValidationNoticeBody(sctx *pipeline.StepContext, host scm.Host, pr *
 	return nil
 }
 
-func (s *CIStep) reconcileRiskNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, phase string) error {
+func (s *CIStep) reconcileRiskNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, phase, attemptID string) error {
 	stale, err := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
 	if err != nil {
 		return fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, err)
@@ -58,7 +60,7 @@ func (s *CIStep) reconcileRiskNotice(sctx *pipeline.StepContext, host scm.Host, 
 	if s.buildValidationNotice != nil {
 		buildNotice = s.buildValidationNotice
 	}
-	body, err := buildNotice(sctx, phase)
+	body, err := buildNotice(sctx, phase, attemptID)
 	if err != nil {
 		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
 	}
@@ -100,5 +102,22 @@ func (s *CIStep) publishRiskNoticeBeforePush(sctx *pipeline.StepContext) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
 	}
-	return s.reconcileRiskNotice(sctx, host, &scm.PR{Number: number, URL: *sctx.Run.PRURL}, "CI repair push pending")
+	return s.reconcileRiskNotice(sctx, host, &scm.PR{Number: number, URL: *sctx.Run.PRURL}, "CI repair push pending", "pre-push:"+sctx.Run.HeadSHA)
+}
+
+func ciAttemptIdentity(checks []scm.Check) (string, error) {
+	if len(checks) == 0 {
+		return "", errors.New("provider reported no checks")
+	}
+	parts := make([]string, 0, len(checks))
+	for _, check := range checks {
+		id := strings.TrimSpace(check.AttemptID)
+		if id == "" {
+			return "", fmt.Errorf("provider omitted attempt identity for check %q", check.Name)
+		}
+		parts = append(parts, check.Name+"\x00"+id)
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
+	return fmt.Sprintf("%x", sum[:12]), nil
 }

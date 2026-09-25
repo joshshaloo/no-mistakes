@@ -113,11 +113,21 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	checks := make([]scm.Check, 0, len(statuses))
 	for _, status := range statuses {
 		checks = append(checks, scm.Check{
-			Name:   statusName(status),
-			Bucket: statusBucket(status.State),
+			Name:      statusName(status),
+			Bucket:    statusBucket(status.State),
+			AttemptID: statusAttemptID(status),
 		})
 	}
 	return checks, nil
+}
+
+func statusAttemptID(status CommitStatus) string {
+	for _, candidate := range []string{status.UUID, status.UpdatedOn, status.URL} {
+		if value := strings.TrimSpace(candidate); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (h *Host) GetMergeableState(_ context.Context, _ *scm.PR) (scm.MergeableState, error) {
