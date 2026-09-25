@@ -103,6 +103,11 @@ type PRNoticePublisher interface {
 	PublishPRNotice(context.Context, *PR, string) error
 }
 
+// PRNoticeReader returns PR conversation notices in chronological order.
+type PRNoticeReader interface {
+	ListPRNotices(context.Context, *PR) ([]string, error)
+}
+
 // PRState is the normalized lifecycle state of a PR.
 type PRState string
 

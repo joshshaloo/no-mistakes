@@ -292,6 +292,34 @@ func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) err
 	return nil
 }
 
+func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) {
+	if h.repo == "" {
+		return nil, errors.New("gh api PR comments: missing repository")
+	}
+	selector, err := prSelector(pr)
+	if err != nil {
+		return nil, err
+	}
+	cmd := h.cmd(ctx, "gh", "api", "--paginate", "--slurp", fmt.Sprintf("repos/%s/issues/%s/comments", h.repo, selector))
+	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("gh api PR comments: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	var pages [][]struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal(out, &pages); err != nil {
+		return nil, fmt.Errorf("parse gh PR comments: %w", err)
+	}
+	var bodies []string
+	for _, page := range pages {
+		for _, comment := range page {
+			bodies = append(bodies, comment.Body)
+		}
+	}
+	return bodies, nil
+}
+
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
 	selector, err := prSelector(pr)
 	if err != nil {

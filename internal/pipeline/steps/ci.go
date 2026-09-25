@@ -33,8 +33,6 @@ const (
 // CIStep monitors an open PR until it is merged, closed, or its configured idle
 // timeout elapses, auto-fixing CI failures.
 type CIStep struct {
-	riskNoticeHead        string // head for which the stale-risk notice reached the PR
-	riskReadyNoticeHead   string // head republished at the checks-ready boundary
 	buildValidationNotice func(*pipeline.StepContext, string) (string, error)
 	lastFixedChecks       string               // sorted check names from last fix attempt, to avoid re-fixing
 	lastFixedCompletedAt  map[string]time.Time // failing check completion times seen before the last fix attempt
@@ -253,10 +251,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return timeoutOutcome()
 		}
 
-		if err := s.publishRiskNotice(sctx, host, pr, false); err != nil {
-			return nil, err
-		}
-
 		// Check PR state (merged/closed -> exit)
 		prStateKnown := true
 		state, err := host.GetPRState(ctx, pr)
@@ -317,6 +311,25 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			hasFailures := len(failing) > 0
 			hasIssues := hasFailures || mergeConflict
 			timeoutFailingChecks = append(timeoutFailingChecks[:0], failing...)
+
+			noticePhase := "CI checks passed"
+			switch {
+			case hasIssues && pending:
+				noticePhase = "CI checks pending with failures"
+			case hasIssues:
+				noticePhase = "CI checks failing"
+			case pending:
+				noticePhase = "CI checks pending"
+			case len(checks) == 0 && elapsed < s.gracePeriod():
+				noticePhase = "CI checks registering"
+			case len(checks) == 0:
+				noticePhase = "CI ready: no checks reported"
+			default:
+				noticePhase = "CI ready: checks passed"
+			}
+			if err := s.reconcileRiskNotice(sctx, host, pr, noticePhase); err != nil {
+				return nil, err
+			}
 
 			// If a failing check completed after our last fix push, CI has
 			// already re-run since we pushed (possibly too fast to observe
@@ -417,20 +430,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
 				case len(checks) == 0:
-					if s.riskReadyNoticeHead != sctx.Run.HeadSHA {
-						if err := s.publishRiskNotice(sctx, host, pr, true); err != nil {
-							return nil, err
-						}
-						s.riskReadyNoticeHead = sctx.Run.HeadSHA
-					}
 					lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
 				default:
-					if s.riskReadyNoticeHead != sctx.Run.HeadSHA {
-						if err := s.publishRiskNotice(sctx, host, pr, true); err != nil {
-							return nil, err
-						}
-						s.riskReadyNoticeHead = sctx.Run.HeadSHA
-					}
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
 				}
 			}

@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -334,10 +336,40 @@ func fakeCIGHHandler(args []string) {
 			if err != nil {
 				os.Exit(1)
 			}
-			defer f.Close()
 			if _, err := f.Write(append(body, '\n')); err != nil {
+				f.Close()
 				os.Exit(1)
 			}
+			f.Close()
+			notices, _ := os.OpenFile(bodyPath+".jsonl", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if notices == nil || json.NewEncoder(notices).Encode(map[string]string{"body": string(body)}) != nil {
+				os.Exit(1)
+			}
+			notices.Close()
+			os.Exit(0)
+		}
+		if len(args) >= 2 && args[0] == "api" {
+			if os.Getenv("FAKE_CLI_RISK_LOOKUP_FAIL") == "1" {
+				fmt.Fprintln(os.Stderr, "injected notice lookup failure")
+				os.Exit(1)
+			}
+			data, err := os.ReadFile(bodyPath + ".jsonl")
+			if errors.Is(err, os.ErrNotExist) {
+				fmt.Println("[[]]")
+				os.Exit(0)
+			}
+			if err != nil {
+				os.Exit(1)
+			}
+			fmt.Print("[[")
+			lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+			for i, line := range lines {
+				if i > 0 {
+					fmt.Print(",")
+				}
+				fmt.Print(string(line))
+			}
+			fmt.Println("]]")
 			os.Exit(0)
 		}
 	}

@@ -174,6 +174,38 @@ func (c *Client) AddPRComment(ctx context.Context, repo RepoRef, prID int, body 
 	return c.doJSON(ctx, http.MethodPost, fmt.Sprintf("%s/%d/comments", repoPRPath(repo), prID), nil, requestBody, nil)
 }
 
+func (c *Client) ListPRComments(ctx context.Context, repo RepoRef, prID int) ([]string, error) {
+	query := url.Values{}
+	query.Set("sort", "created_on")
+	next := fmt.Sprintf("%s/%d/comments?%s", repoPRPath(repo), prID, query.Encode())
+	var bodies []string
+	for next != "" {
+		var response struct {
+			Values []struct {
+				Content struct {
+					Raw string `json:"raw"`
+				} `json:"content"`
+			} `json:"values"`
+			Next string `json:"next"`
+		}
+		if err := c.doJSONPathOrURL(ctx, http.MethodGet, next, nil, &response); err != nil {
+			return nil, err
+		}
+		for _, comment := range response.Values {
+			bodies = append(bodies, comment.Content.Raw)
+		}
+		if response.Next == "" {
+			break
+		}
+		validated, err := c.validatePaginationURL(response.Next)
+		if err != nil {
+			return nil, err
+		}
+		next = validated
+	}
+	return bodies, nil
+}
+
 func (c *Client) GetPR(ctx context.Context, repo RepoRef, prID int) (*PullRequest, error) {
 	var response bitbucketPullRequest
 	if err := c.doJSON(ctx, http.MethodGet, fmt.Sprintf("%s/%d", repoPRPath(repo), prID), nil, nil, &response); err != nil {

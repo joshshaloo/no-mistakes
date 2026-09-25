@@ -1,0 +1,35 @@
+=== RUN   TestPublishRiskNotice_ReadyBoundaryRepublishesMissingHeadNotice
+    ci_risk_test.go:60: DELETED/RECONCILED notices=1 head=273a1b729bc3d4e3b8d714e1b012122297bee66f
+--- PASS: TestPublishRiskNotice_ReadyBoundaryRepublishesMissingHeadNotice (0.08s)
+=== RUN   TestReconcileRiskNotice_CurrentStateLifecycle
+    ci_risk_test.go:110: PENDING/GREEN/RECONCILED notices=3 head=273a1b729bc3d4e3b8d714e1b012122297bee66f; unchanged-control=3
+--- PASS: TestReconcileRiskNotice_CurrentStateLifecycle (0.08s)
+=== RUN   TestReconcileRiskNotice_LookupFailureFailsClosed
+    ci_risk_test.go:158: LOOKUP-FAIL-CLOSED notices=0 head=273a1b729bc3d4e3b8d714e1b012122297bee66f CIReady=false
+--- PASS: TestReconcileRiskNotice_LookupFailureFailsClosed (0.02s)
+PASS
+ok  	github.com/kunchenguid/no-mistakes/internal/pipeline/steps	0.190s
+=== RUN   TestPublishPRNoticeTargetsExactPR
+--- PASS: TestPublishPRNoticeTargetsExactPR (0.01s)
+PASS
+ok  	github.com/kunchenguid/no-mistakes/internal/scm/github	0.011s
+=== RUN   TestPublishPRNoticeTargetsExactMR
+--- PASS: TestPublishPRNoticeTargetsExactMR (0.00s)
+PASS
+ok  	github.com/kunchenguid/no-mistakes/internal/scm/gitlab	0.010s
+=== RUN   TestPublishPRNoticeCreatesAppendOnlyThreadForExactPR
+--- PASS: TestPublishPRNoticeCreatesAppendOnlyThreadForExactPR (0.01s)
+=== RUN   TestPublishPRNoticeFailsClosed
+=== RUN   TestPublishPRNoticeFailsClosed/missing_identity
+=== RUN   TestPublishPRNoticeFailsClosed/provider_error
+=== RUN   TestPublishPRNoticeFailsClosed/missing_route_scope
+--- PASS: TestPublishPRNoticeFailsClosed (0.01s)
+    --- PASS: TestPublishPRNoticeFailsClosed/missing_identity (0.00s)
+    --- PASS: TestPublishPRNoticeFailsClosed/provider_error (0.00s)
+    --- PASS: TestPublishPRNoticeFailsClosed/missing_route_scope (0.00s)
+PASS
+ok  	github.com/kunchenguid/no-mistakes/internal/scm/azuredevops	0.016s
+=== RUN   TestPublishPRNoticeAppendsComment
+--- PASS: TestPublishPRNoticeAppendsComment (0.00s)
+PASS
+ok  	github.com/kunchenguid/no-mistakes/internal/bitbucket	0.007s

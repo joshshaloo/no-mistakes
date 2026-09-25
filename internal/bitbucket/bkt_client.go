@@ -348,6 +348,34 @@ func (c *BKTClient) AddPRComment(ctx context.Context, repo RepoRef, prID int, bo
 	return err
 }
 
+func (c *BKTClient) ListPRComments(ctx context.Context, repo RepoRef, prID int) ([]string, error) {
+	selectors, err := c.repoArgs(repo)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"pr", "comments", strconv.Itoa(prID)}
+	args = append(args, selectors...)
+	args = append(args, "--state", "all", "--json")
+	var comments []struct {
+		Text    string `json:"text"`
+		Content struct {
+			Raw string `json:"raw"`
+		} `json:"content"`
+	}
+	if err := c.runJSON(ctx, "PR comments", &comments, args...); err != nil {
+		return nil, err
+	}
+	bodies := make([]string, 0, len(comments))
+	for _, comment := range comments {
+		if comment.Content.Raw != "" {
+			bodies = append(bodies, comment.Content.Raw)
+		} else {
+			bodies = append(bodies, comment.Text)
+		}
+	}
+	return bodies, nil
+}
+
 func (c *BKTClient) GetPR(ctx context.Context, repo RepoRef, prID int) (*PullRequest, error) {
 	selectors, err := c.repoArgs(repo)
 	if err != nil {

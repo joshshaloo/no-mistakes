@@ -285,6 +285,47 @@ func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) err
 	return nil
 }
 
+func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) {
+	id := h.prID(pr)
+	if id == "" {
+		return nil, errors.New("az devops invoke pullRequestThreads: missing PR id")
+	}
+	if h.project == "" || h.repo == "" {
+		return nil, errors.New("az devops invoke pullRequestThreads: missing project or repository")
+	}
+	args := []string{
+		"devops", "invoke",
+		"--area", "git",
+		"--resource", "pullRequestThreads",
+		"--route-parameters", "project=" + h.project, "repositoryId=" + h.repo, "pullRequestId=" + id,
+		"--http-method", "GET",
+		"--api-version", "7.1",
+	}
+	args = append(args, h.orgArgs()...)
+	args = append(args, "--output", "json")
+	out, err := outputJSON(h.cmd(ctx, "az", args...))
+	if err != nil {
+		return nil, fmt.Errorf("az devops invoke pullRequestThreads: %w", err)
+	}
+	var response struct {
+		Value []struct {
+			Comments []struct {
+				Content string `json:"content"`
+			} `json:"comments"`
+		} `json:"value"`
+	}
+	if err := json.Unmarshal(out, &response); err != nil {
+		return nil, fmt.Errorf("parse Azure PR threads: %w", err)
+	}
+	var bodies []string
+	for _, thread := range response.Value {
+		for _, comment := range thread.Comments {
+			bodies = append(bodies, comment.Content)
+		}
+	}
+	return bodies, nil
+}
+
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
 	got, err := h.showPR(ctx, pr)
 	if err != nil {

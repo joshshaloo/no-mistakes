@@ -77,6 +77,14 @@ func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) err
 	return h.client.AddPRComment(ctx, h.repo, id, body)
 }
 
+func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) {
+	id, err := strconv.Atoi(pr.Number)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Bitbucket PR number %q: %w", pr.Number, err)
+	}
+	return h.client.ListPRComments(ctx, h.repo, id)
+}
+
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
 	id, err := strconv.Atoi(pr.Number)
 	if err != nil {

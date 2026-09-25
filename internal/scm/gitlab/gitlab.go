@@ -250,6 +250,44 @@ func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) err
 	return nil
 }
 
+func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) {
+	if h.projectPath == "" {
+		return nil, errors.New("glab API MR notes: missing project path")
+	}
+	id := pr.Number
+	if id == "" {
+		var err error
+		id, err = scm.ExtractPRNumber(pr.URL)
+		if err != nil {
+			return nil, err
+		}
+	}
+	segments := strings.Split(h.projectPath, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	endpoint := fmt.Sprintf("projects/%s/merge_requests/%s/notes?order_by=created_at&sort=asc", strings.Join(segments, "%2F"), id)
+	out, err := shellenv.CombinedOutputShellCommand(h.cmd(ctx, "glab", "api", "--paginate", endpoint))
+	if err != nil {
+		return nil, fmt.Errorf("glab API MR notes: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	dec := json.NewDecoder(bytes.NewReader(bytesTrimToJSON(out)))
+	var bodies []string
+	for {
+		var notes []struct {
+			Body string `json:"body"`
+		}
+		if err := dec.Decode(&notes); errors.Is(err, io.EOF) {
+			return bodies, nil
+		} else if err != nil {
+			return nil, fmt.Errorf("parse glab MR notes: %w", err)
+		}
+		for _, note := range notes {
+			bodies = append(bodies, note.Body)
+		}
+	}
+}
+
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
 	mr, err := h.viewMR(ctx, pr.Number)
 	if err != nil {
