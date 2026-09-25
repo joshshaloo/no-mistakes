@@ -628,6 +628,9 @@ func (c *BKTClient) run(ctx context.Context, timeout time.Duration, label string
 		}
 		return fmt.Errorf("bkt %s failed: executable is unavailable", label)
 	}
+	if stderr.overflow {
+		return fmt.Errorf("bkt %s: %w: diagnostic output exceeds %d bytes", label, notices.ErrCapacity, maxBKTStderrBytes)
+	}
 	return nil
 }
 
