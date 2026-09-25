@@ -320,43 +320,18 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			hasIssues := hasFailures || mergeConflict
 			timeoutFailingChecks = append(timeoutFailingChecks[:0], failing...)
 
-			noticePhase := "CI checks passed"
-			switch {
-			case hasIssues && pending:
-				noticePhase = "CI checks pending with failures"
-			case hasIssues:
-				noticePhase = "CI checks failing"
-			case pending:
-				noticePhase = "CI checks pending"
-			case len(checks) == 0 && now().Before(checksRegistrationDeadline):
-				noticePhase = "CI checks registering"
-			case len(checks) == 0:
-				noticePhase = "CI ready: no checks reported"
-			default:
-				noticePhase = "CI ready: checks passed"
-			}
-			stale, staleErr := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
-			if staleErr != nil {
-				clearCIMonitorReady(sctx)
-				return nil, fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, staleErr)
-			}
-			if stale {
-				if len(checks) == 0 {
+			if len(checks) == 0 {
+				stale, staleErr := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
+				if staleErr != nil {
+					clearCIMonitorReady(sctx)
+					return nil, fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, staleErr)
+				}
+				if stale {
 					clearCIMonitorReady(sctx)
 					if !now().Before(checksRegistrationDeadline) {
 						return nil, fmt.Errorf("%w: establish current CI attempt: no authoritative checks registered within %s", errPublishStaleRisk, s.gracePeriod())
 					}
 					registrationWaiting = true
-				} else {
-					attemptID, identityErr := currentCIAttemptIdentity(ctx, host, pr, sctx.Run.HeadSHA, checks)
-					if identityErr != nil {
-						clearCIMonitorReady(sctx)
-						return nil, fmt.Errorf("%w: establish current CI attempt: %w", errPublishStaleRisk, identityErr)
-					}
-					if err := s.reconcileRiskNotice(sctx, host, pr, noticePhase, attemptID); err != nil {
-						clearCIMonitorReady(sctx)
-						return nil, err
-					}
 				}
 			}
 
@@ -463,6 +438,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				case len(checks) == 0:
 					lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
 				default:
+					if err := s.reconcileReadyRiskNotice(sctx, host, pr, checks); err != nil {
+						clearCIMonitorReady(sctx)
+						return nil, err
+					}
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
 				}
 			}

@@ -26,7 +26,11 @@ func validationNotice(sctx *pipeline.StepContext, phase, attemptID string) (stri
 	if strings.Contains(strings.ToUpper(riskLine), "STALE") {
 		supervisor = "\n\nChanges made after review are not covered by the previous assessment. Get a fresh review before relying on that rating to merge; green CI does not make the previous rating current."
 	}
-	return fmt.Sprintf("<!-- no-mistakes-validation run=%s head=%s -->\n## no-mistakes validation notice\n\n**Run:** `%s`  \n**Head:** `%s`  \n**CI attempt:** `%s`  \n**Phase:** %s  \n**Review:** %s%s\n\nValidation notices are append-only entries in this PR conversation; the PR title, description, and human comments are not rewritten.", sctx.Run.ID, sctx.Run.HeadSHA, sctx.Run.ID, sctx.Run.HeadSHA, attemptID, phase, riskLine, supervisor), nil
+	attemptLine := ""
+	if strings.TrimSpace(attemptID) != "" {
+		attemptLine = fmt.Sprintf("**CI attempt:** `%s`  \n", attemptID)
+	}
+	return fmt.Sprintf("<!-- no-mistakes-validation run=%s head=%s -->\n## no-mistakes validation notice\n\n**Run:** `%s`  \n**Head:** `%s`  \n%s**Phase:** %s  \n**Review:** %s%s\n\nValidation notices are append-only entries in this PR conversation; the PR title, description, and human comments are not rewritten.", sctx.Run.ID, sctx.Run.HeadSHA, sctx.Run.ID, sctx.Run.HeadSHA, attemptLine, phase, riskLine, supervisor), nil
 }
 
 func publishValidationNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, phase, attemptID string) error {
@@ -103,7 +107,22 @@ func (s *CIStep) publishRiskNoticeBeforePush(sctx *pipeline.StepContext) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", errPublishStaleRisk, err)
 	}
-	return s.reconcileRiskNotice(sctx, host, &scm.PR{Number: number, URL: *sctx.Run.PRURL}, "CI repair push pending", "pre-push:"+sctx.Run.HeadSHA)
+	return s.reconcileRiskNotice(sctx, host, &scm.PR{Number: number, URL: *sctx.Run.PRURL}, "CI repair push pending", "")
+}
+
+func (s *CIStep) reconcileReadyRiskNotice(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, checks []scm.Check) error {
+	stale, err := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
+	if err != nil {
+		return fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, err)
+	}
+	if !stale {
+		return nil
+	}
+	attemptID, err := currentCIAttemptIdentity(sctx.Ctx, host, pr, sctx.Run.HeadSHA, checks)
+	if err != nil {
+		return fmt.Errorf("%w: establish current CI attempt: %w", errPublishStaleRisk, err)
+	}
+	return s.reconcileRiskNotice(sctx, host, pr, "CI ready: checks passed", attemptID)
 }
 
 func currentCIAttemptIdentity(ctx context.Context, host scm.Host, pr *scm.PR, headSHA string, checks []scm.Check) (string, error) {

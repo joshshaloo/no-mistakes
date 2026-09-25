@@ -136,6 +136,86 @@ func TestCIStep_RepairInvalidatesPublishedReviewRisk(t *testing.T) {
 	}
 }
 
+func TestCIStep_StaleRiskAllowsRepairButRefusesUnverifiedReadyClaim(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main", "feature")
+	agentRan := false
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		agentRan = true
+		if err := os.WriteFile(filepath.Join(dir, "repair.go"), []byte("package repair\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return &agent.Result{}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	review := seedLowReview(t, sctx)
+	if err := sctx.DB.SetStepFindings(review.ID, `{"findings":[],"risk_level":"stale","risk_rationale":"post-review change"}`); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Repo.UpstreamURL = upstream
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.Run.PRURL = &prURL
+	sctx.Config.AutoFix.CI = 1
+	sctx.Config.CITimeout = time.Minute
+	if err := sctx.DB.SetRunCIReady(sctx.Run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	bodyPath := filepath.Join(t.TempDir(), "notice.md")
+	genericCheck := "https://checks.example.test/reusable/status"
+	sctx.Env = append(fakeCIGHSequenceMergeable(t, "OPEN", []string{
+		fmt.Sprintf(`[{"name":"third-party","bucket":"fail","link":%q}]`, genericCheck),
+		fmt.Sprintf(`[{"name":"third-party","bucket":"pass","link":%q}]`, genericCheck),
+	}, "MERGEABLE"), "FAKE_CLI_RISK_BODY="+bodyPath)
+	var logs []string
+	originalLog := sctx.Log
+	sctx.Log = func(message string) {
+		logs = append(logs, message)
+		originalLog(message)
+	}
+	step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }}
+
+	_, err := step.Execute(sctx)
+	if !errors.Is(err, errPublishStaleRisk) || !strings.Contains(err.Error(), "not an authoritative GitHub Actions job") {
+		t.Fatalf("unverified green observation did not refuse readiness: %v", err)
+	}
+	if !agentRan {
+		t.Fatal("failing unverified check was refused before repair work")
+	}
+	remote := gitCmd(t, upstream, "rev-parse", "feature")
+	if remote == head {
+		t.Fatal("repair work did not reach remote")
+	}
+	body, readErr := os.ReadFile(bodyPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, want := range []string{"STALE", remote, "CI repair push pending", "green CI does not make the previous rating current"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("pre-push notice missing %q: %s", want, body)
+		}
+	}
+	if count := strings.Count(string(body), "## no-mistakes validation notice"); count != 1 {
+		t.Fatalf("notice count=%d, want 1", count)
+	}
+	if strings.Contains(string(body), "**CI attempt:**") {
+		t.Fatalf("pre-push notice claimed an external CI attempt: %s", body)
+	}
+	dbRun, dbErr := sctx.DB.GetRun(sctx.Run.ID)
+	if dbErr != nil {
+		t.Fatal(dbErr)
+	}
+	if dbRun.CIReadyAt != nil {
+		t.Fatalf("unverified green observation retained readiness: %v", *dbRun.CIReadyAt)
+	}
+	if strings.Contains(strings.Join(logs, "\n"), ciChecksPassedMsg) {
+		t.Fatalf("unverified green observation emitted checks-passed: %v", logs)
+	}
+	t.Logf("WORK-ALLOWED pushed_head=%s notices=1; CLAIM-REFUSED provider=github-generic CIReady=false checks-passed=false", remote)
+}
+
 func TestCIStep_ValidationEvidenceReadFailureFailsClosed(t *testing.T) {
 	dir, base, head := setupGitRepo(t)
 	upstream := t.TempDir()
