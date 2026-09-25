@@ -40,6 +40,7 @@ type CIStep struct {
 	checksGracePeriod     time.Duration        // minimum wait before trusting empty CI checks (0 = default 60s)
 	pollIntervalOverride  time.Duration        // if set, overrides computed poll interval (for testing)
 	waitForNextPoll       func(context.Context, time.Duration) error
+	setRunCIReady         func(string, bool) error
 	now                   func() time.Time
 	// baseBranchTip resolves the current tip SHA of the upstream default
 	// branch. The bool is false when the SHA is a fallback/unknown value and
@@ -302,7 +303,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		ciFixLimit := sctx.Config.AutoFix.CI
 		checks, err := host.GetChecks(ctx, pr)
 		if err != nil {
-			clearCIMonitorReady(sctx)
+			if clearErr := s.clearCIMonitorReady(sctx); clearErr != nil {
+				return nil, errors.Join(fmt.Errorf("read CI checks: %w", err), clearErr)
+			}
 			lastMonitorLog = ""
 			stale, staleErr := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
 			if staleErr != nil {
@@ -323,11 +326,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if len(checks) == 0 {
 				stale, staleErr := pipeline.StoredReviewRiskStale(sctx.DB, sctx.Run.ID)
 				if staleErr != nil {
-					clearCIMonitorReady(sctx)
-					return nil, fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, staleErr)
+					cause := fmt.Errorf("%w: read stored review risk: %w", errPublishStaleRisk, staleErr)
+					return nil, errors.Join(cause, s.clearCIMonitorReady(sctx))
 				}
 				if stale {
-					clearCIMonitorReady(sctx)
+					if clearErr := s.clearCIMonitorReady(sctx); clearErr != nil {
+						return nil, clearErr
+					}
 					if !now().Before(checksRegistrationDeadline) {
 						return nil, fmt.Errorf("%w: establish current CI attempt: no authoritative checks registered within %s", errPublishStaleRisk, s.gracePeriod())
 					}
@@ -346,7 +351,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			}
 
 			if hasIssues {
-				if err := sctx.DB.SetRunCIReady(sctx.Run.ID, false); err != nil {
+				if err := s.clearCIMonitorReady(sctx); err != nil {
 					return nil, err
 				}
 			}
@@ -423,26 +428,41 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				s.lastFixedCompletedAt = nil
 				switch {
 				case !prStateKnown || !mergeabilityKnown:
-					clearCIMonitorReady(sctx)
+					if err := s.clearCIMonitorReady(sctx); err != nil {
+						return nil, err
+					}
 					lastMonitorLog = ""
 				case pending:
 					// Checks are (re-)running with no failures yet. Surface this
 					// so a PR that passed checks and starts re-running clears the
 					// previous passed-checks signal instead of looking stale.
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+					var statusErr error
+					lastMonitorLog, statusErr = s.logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+					if statusErr != nil {
+						return nil, statusErr
+					}
 				case len(checks) == 0 && now().Before(checksRegistrationDeadline):
-					clearCIMonitorReady(sctx)
+					if err := s.clearCIMonitorReady(sctx); err != nil {
+						return nil, err
+					}
 					// CI checks may not be registered yet, keep polling.
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
 				case len(checks) == 0:
-					lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
+					var statusErr error
+					lastMonitorLog, statusErr = s.logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
+					if statusErr != nil {
+						return nil, statusErr
+					}
 				default:
 					if err := s.reconcileReadyRiskNotice(sctx, host, pr, checks); err != nil {
-						clearCIMonitorReady(sctx)
-						return nil, err
+						return nil, errors.Join(err, s.clearCIMonitorReady(sctx))
 					}
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+					var statusErr error
+					lastMonitorLog, statusErr = s.logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+					if statusErr != nil {
+						return nil, statusErr
+					}
 				}
 			}
 		}
@@ -481,19 +501,28 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 }
 
-func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {
+func (s *CIStep) logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) (string, error) {
 	if message != previous {
 		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
-		if err := sctx.DB.SetRunCIReady(sctx.Run.ID, ready); err != nil {
-			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
+		setReady := s.setRunCIReady
+		if setReady == nil {
+			setReady = sctx.DB.SetRunCIReady
+		}
+		if err := setReady(sctx.Run.ID, ready); err != nil {
+			return previous, fmt.Errorf("persist CI readiness %t: %w", ready, err)
 		}
 		sctx.Log(message)
 	}
-	return message
+	return message, nil
 }
 
-func clearCIMonitorReady(sctx *pipeline.StepContext) {
-	if err := sctx.DB.SetRunCIReady(sctx.Run.ID, false); err != nil {
-		sctx.Log(fmt.Sprintf("warning: could not clear CI readiness: %v", err))
+func (s *CIStep) clearCIMonitorReady(sctx *pipeline.StepContext) error {
+	setReady := s.setRunCIReady
+	if setReady == nil {
+		setReady = sctx.DB.SetRunCIReady
 	}
+	if err := setReady(sctx.Run.ID, false); err != nil {
+		return fmt.Errorf("clear durable CI readiness: %w", err)
+	}
+	return nil
 }

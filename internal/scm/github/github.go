@@ -304,30 +304,40 @@ func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) 
 	if err != nil {
 		return nil, err
 	}
-	cmd := h.cmd(ctx, "gh", "api", "--paginate", "--slurp", fmt.Sprintf("repos/%s/issues/%s/comments", h.repo, selector))
-	out, err := notices.RunCommand(cmd, "read GitHub PR notices")
-	if err != nil {
-		return nil, err
-	}
-	var pages [][]struct {
-		Body string `json:"body"`
-	}
-	if err := json.Unmarshal(out, &pages); err != nil {
-		return nil, fmt.Errorf("parse gh PR comments: %w", err)
-	}
-	if err := notices.ValidateCounts(len(pages), 0); err != nil {
-		return nil, fmt.Errorf("read GitHub PR notices: %w", err)
-	}
+	endpoint := fmt.Sprintf("repos/%s/issues/%s/comments", h.repo, selector)
 	var bodies []string
-	for _, page := range pages {
-		if err := notices.ValidateCounts(len(pages), len(bodies)+len(page)); err != nil {
+	totalBytes := 0
+	for page := 1; ; page++ {
+		if err := notices.ValidateAggregate(page-1, len(bodies), totalBytes, true); err != nil {
 			return nil, fmt.Errorf("read GitHub PR notices: %w", err)
 		}
-		for _, comment := range page {
+		cmd := h.cmd(ctx, "gh", "api", "--include", "--method", "GET", endpoint, "-f", "per_page=100", "-f", fmt.Sprintf("page=%d", page))
+		out, err := notices.RunCommandLimit(cmd, "read GitHub PR notices", notices.MaxResponseBytes-totalBytes)
+		if err != nil {
+			return nil, err
+		}
+		totalBytes += len(out)
+		headers, payload, err := notices.SplitIncludedResponse(out)
+		if err != nil {
+			return nil, fmt.Errorf("parse gh PR comments response: %w", err)
+		}
+		var comments []struct {
+			Body string `json:"body"`
+		}
+		if err := json.Unmarshal(payload, &comments); err != nil {
+			return nil, fmt.Errorf("parse gh PR comments: %w", err)
+		}
+		hasNext := strings.Contains(headers["link"], `rel="next"`)
+		if err := notices.ValidateAggregate(page, len(bodies)+len(comments), totalBytes, hasNext); err != nil {
+			return nil, fmt.Errorf("read GitHub PR notices: %w", err)
+		}
+		for _, comment := range comments {
 			bodies = append(bodies, comment.Body)
 		}
+		if !hasNext {
+			return bodies, nil
+		}
 	}
-	return bodies, nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

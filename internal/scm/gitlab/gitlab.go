@@ -267,29 +267,38 @@ func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) 
 	for i, segment := range segments {
 		segments[i] = url.PathEscape(segment)
 	}
-	endpoint := fmt.Sprintf("projects/%s/merge_requests/%s/notes?order_by=created_at&sort=asc", strings.Join(segments, "%2F"), id)
-	out, err := notices.RunCommand(h.cmd(ctx, "glab", "api", "--paginate", endpoint), "read GitLab MR notices")
-	if err != nil {
-		return nil, err
-	}
-	dec := json.NewDecoder(bytes.NewReader(bytesTrimToJSON(out)))
+	baseEndpoint := fmt.Sprintf("projects/%s/merge_requests/%s/notes?order_by=created_at&sort=asc&per_page=100", strings.Join(segments, "%2F"), id)
 	var bodies []string
-	pages := 0
-	for {
+	totalBytes := 0
+	for page := 1; ; page++ {
+		if err := notices.ValidateAggregate(page-1, len(bodies), totalBytes, true); err != nil {
+			return nil, fmt.Errorf("read GitLab MR notices: %w", err)
+		}
+		endpoint := fmt.Sprintf("%s&page=%d", baseEndpoint, page)
+		out, err := notices.RunCommandLimit(h.cmd(ctx, "glab", "api", "--include", endpoint), "read GitLab MR notices", notices.MaxResponseBytes-totalBytes)
+		if err != nil {
+			return nil, err
+		}
+		totalBytes += len(out)
+		headers, payload, err := notices.SplitIncludedResponse(out)
+		if err != nil {
+			return nil, fmt.Errorf("parse glab MR notes response: %w", err)
+		}
 		var notes []struct {
 			Body string `json:"body"`
 		}
-		if err := dec.Decode(&notes); errors.Is(err, io.EOF) {
-			return bodies, nil
-		} else if err != nil {
+		if err := json.Unmarshal(payload, &notes); err != nil {
 			return nil, fmt.Errorf("parse glab MR notes: %w", err)
 		}
-		pages++
-		if err := notices.ValidateCounts(pages, len(bodies)+len(notes)); err != nil {
+		hasNext := strings.TrimSpace(headers["x-next-page"]) != ""
+		if err := notices.ValidateAggregate(page, len(bodies)+len(notes), totalBytes, hasNext); err != nil {
 			return nil, fmt.Errorf("read GitLab MR notices: %w", err)
 		}
 		for _, note := range notes {
 			bodies = append(bodies, note.Body)
+		}
+		if !hasNext {
+			return bodies, nil
 		}
 	}
 }

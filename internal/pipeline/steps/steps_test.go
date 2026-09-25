@@ -352,6 +352,26 @@ func fakeGitHubActionsAPI(args []string) bool {
 	return true
 }
 
+func writeFakeIncludedNotices(bodyPath string) {
+	fmt.Print("HTTP/2.0 200 OK\n\n[")
+	data, err := os.ReadFile(bodyPath + ".jsonl")
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		os.Exit(1)
+	}
+	lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
+	for i, line := range lines {
+		if len(line) == 0 {
+			continue
+		}
+		if i > 0 {
+			fmt.Print(",")
+		}
+		fmt.Print(string(line))
+	}
+	fmt.Println("]")
+	os.Exit(0)
+}
+
 func fakeCIGHHandler(args []string) {
 	if fakeGitHubActionsAPI(args) {
 		return
@@ -387,24 +407,7 @@ func fakeCIGHHandler(args []string) {
 				fmt.Fprintln(os.Stderr, "injected notice lookup failure")
 				os.Exit(1)
 			}
-			data, err := os.ReadFile(bodyPath + ".jsonl")
-			if errors.Is(err, os.ErrNotExist) {
-				fmt.Println("[[]]")
-				os.Exit(0)
-			}
-			if err != nil {
-				os.Exit(1)
-			}
-			fmt.Print("[[")
-			lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
-			for i, line := range lines {
-				if i > 0 {
-					fmt.Print(",")
-				}
-				fmt.Print(string(line))
-			}
-			fmt.Println("]]")
-			os.Exit(0)
+			writeFakeIncludedNotices(bodyPath)
 		}
 	}
 	state := os.Getenv("FAKE_CLI_STATE")
@@ -480,24 +483,7 @@ func fakeCIGHSequenceHandler(args []string) {
 			os.Exit(0)
 		}
 		if len(args) >= 2 && args[0] == "api" {
-			data, err := os.ReadFile(bodyPath + ".jsonl")
-			if errors.Is(err, os.ErrNotExist) {
-				fmt.Println("[[]]")
-				os.Exit(0)
-			}
-			if err != nil {
-				os.Exit(1)
-			}
-			fmt.Print("[[")
-			lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
-			for i, line := range lines {
-				if i > 0 {
-					fmt.Print(",")
-				}
-				fmt.Print(string(line))
-			}
-			fmt.Println("]]")
-			os.Exit(0)
+			writeFakeIncludedNotices(bodyPath)
 		}
 	}
 	state := os.Getenv("FAKE_CLI_STATE")

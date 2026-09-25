@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
@@ -44,13 +45,20 @@ func (c *Capture) Bytes() []byte    { return append([]byte(nil), c.data...) }
 func (c *Capture) Overflowed() bool { return c.overflow }
 
 func RunCommand(cmd *exec.Cmd, label string) ([]byte, error) {
-	stdout := NewCapture(MaxResponseBytes)
+	return RunCommandLimit(cmd, label, MaxResponseBytes)
+}
+
+func RunCommandLimit(cmd *exec.Cmd, label string, responseLimit int) ([]byte, error) {
+	if responseLimit <= 0 || responseLimit > MaxResponseBytes {
+		return nil, fmt.Errorf("%s: %w: invalid remaining response budget %d", label, ErrCapacity, responseLimit)
+	}
+	stdout := NewCapture(responseLimit)
 	stderr := NewCapture(MaxDiagnosticBytes)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	err := shellenv.RunShellCommand(cmd)
 	if stdout.Overflowed() {
-		return nil, fmt.Errorf("%s: %w: response exceeds %d bytes", label, ErrCapacity, MaxResponseBytes)
+		return nil, fmt.Errorf("%s: %w: response exceeds remaining %d-byte budget", label, ErrCapacity, responseLimit)
 	}
 	if stderr.Overflowed() {
 		return nil, fmt.Errorf("%s: %w: diagnostic output exceeds %d bytes", label, ErrCapacity, MaxDiagnosticBytes)
@@ -74,6 +82,37 @@ func ReadAllLimit(r io.Reader, label string, limit int) ([]byte, error) {
 		return nil, fmt.Errorf("%s: %w: response exceeds %d bytes", label, ErrCapacity, limit)
 	}
 	return data, nil
+}
+
+func SplitIncludedResponse(data []byte) (map[string]string, []byte, error) {
+	normalized := strings.ReplaceAll(string(data), "\r\n", "\n")
+	parts := strings.SplitN(normalized, "\n\n", 2)
+	if len(parts) != 2 || !strings.HasPrefix(parts[0], "HTTP/") {
+		return nil, nil, errors.New("response is missing included HTTP headers")
+	}
+	headers := make(map[string]string)
+	lines := strings.Split(parts[0], "\n")
+	for _, line := range lines[1:] {
+		name, value, ok := strings.Cut(line, ":")
+		if !ok {
+			return nil, nil, fmt.Errorf("malformed response header %q", line)
+		}
+		headers[strings.ToLower(strings.TrimSpace(name))] = strings.TrimSpace(value)
+	}
+	return headers, []byte(parts[1]), nil
+}
+
+func ValidateAggregate(pages, comments, responseBytes int, hasContinuation bool) error {
+	if err := ValidateCounts(pages, comments); err != nil {
+		return err
+	}
+	if responseBytes > MaxResponseBytes {
+		return fmt.Errorf("%w: aggregate responses exceed %d bytes", ErrCapacity, MaxResponseBytes)
+	}
+	if hasContinuation && (pages == MaxPages || comments == MaxComments || responseBytes == MaxResponseBytes) {
+		return fmt.Errorf("%w: unread continuation exceeds notice read limits", ErrCapacity)
+	}
+	return nil
 }
 
 func ValidateCounts(pages, comments int) error {
