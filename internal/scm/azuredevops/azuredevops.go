@@ -308,25 +308,54 @@ func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) 
 	if err != nil {
 		return nil, err
 	}
-	var response struct {
-		Value []struct {
-			Comments []struct {
-				Content string `json:"content"`
-			} `json:"comments"`
-		} `json:"value"`
-	}
-	if err := json.Unmarshal(out, &response); err != nil {
+	// The 7.1 pull-request-threads List contract returns all threads in one
+	// response and documents no pagination parameters or continuation token:
+	// https://learn.microsoft.com/rest/api/azure/devops/git/pull-request-threads/list?view=azure-devops-rest-7.1
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(out, &envelope); err != nil {
 		return nil, fmt.Errorf("parse Azure PR threads: %w", err)
+	}
+	for field := range envelope {
+		if field != "count" && field != "value" {
+			return nil, fmt.Errorf("parse Azure PR threads: unexpected field %q; response completeness is unknown", field)
+		}
+	}
+	countRaw, hasCount := envelope["count"]
+	valueRaw, hasValue := envelope["value"]
+	if !hasCount || !hasValue {
+		missing := "count"
+		if hasCount {
+			missing = "value"
+		}
+		return nil, fmt.Errorf("parse Azure PR threads: missing %s field; response completeness is unknown", missing)
+	}
+	var count int
+	if err := json.Unmarshal(countRaw, &count); err != nil || count < 0 {
+		return nil, fmt.Errorf("parse Azure PR threads: invalid count field")
+	}
+	var threads []struct {
+		Comments *[]struct {
+			Content string `json:"content"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal(valueRaw, &threads); err != nil || threads == nil {
+		return nil, fmt.Errorf("parse Azure PR threads: invalid value field")
+	}
+	if count != len(threads) {
+		return nil, fmt.Errorf("parse Azure PR threads: thread count %d does not match %d returned threads", count, len(threads))
 	}
 	if err := notices.ValidateCounts(1, 0); err != nil {
 		return nil, fmt.Errorf("read Azure PR notices: %w", err)
 	}
-	var bodies []string
-	for _, thread := range response.Value {
-		if err := notices.ValidateCounts(1, len(bodies)+len(thread.Comments)); err != nil {
+	bodies := make([]string, 0)
+	for i, thread := range threads {
+		if thread.Comments == nil {
+			return nil, fmt.Errorf("parse Azure PR threads: thread %d is missing comments; response completeness is unknown", i)
+		}
+		if err := notices.ValidateCounts(1, len(bodies)+len(*thread.Comments)); err != nil {
 			return nil, fmt.Errorf("read Azure PR notices: %w", err)
 		}
-		for _, comment := range thread.Comments {
+		for _, comment := range *thread.Comments {
 			bodies = append(bodies, comment.Content)
 		}
 	}

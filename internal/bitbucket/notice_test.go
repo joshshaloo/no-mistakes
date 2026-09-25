@@ -55,6 +55,97 @@ func TestPublishPRNoticeAppendsComment(t *testing.T) {
 	}
 }
 
+func TestListPRCommentsStopsBeforePaginationCapacity(t *testing.T) {
+	repo := RepoRef{Workspace: "w", RepoSlug: "r"}
+
+	t.Run("page cap continuation", func(t *testing.T) {
+		requests := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			page := requests
+			fmt.Fprintf(w, `{"values":[{"content":{"raw":"page-%d"}}],"next":%q}`, page, fmt.Sprintf("http://%s?page=%d", r.Host, page+1))
+		}))
+		defer server.Close()
+		client := &Client{baseURL: server.URL, email: "test", token: "token", httpClient: server.Client()}
+		_, err := client.ListPRComments(context.Background(), repo, 1)
+		if !errors.Is(err, notices.ErrCapacity) {
+			t.Fatalf("error = %v, want capacity refusal", err)
+		}
+		if requests != notices.MaxPages {
+			t.Fatalf("requests = %d, want %d (no cap+1 request)", requests, notices.MaxPages)
+		}
+	})
+
+	t.Run("exact page cap EOF", func(t *testing.T) {
+		requests := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			next := ""
+			if requests < notices.MaxPages {
+				next = fmt.Sprintf("http://%s?page=%d", r.Host, requests+1)
+			}
+			fmt.Fprintf(w, `{"values":[{"content":{"raw":"x"}}],"next":%q}`, next)
+		}))
+		defer server.Close()
+		client := &Client{baseURL: server.URL, email: "test", token: "token", httpClient: server.Client()}
+		bodies, err := client.ListPRComments(context.Background(), repo, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if requests != notices.MaxPages || len(bodies) != notices.MaxPages {
+			t.Fatalf("requests/bodies = %d/%d, want %d/%d", requests, len(bodies), notices.MaxPages, notices.MaxPages)
+		}
+	})
+
+	t.Run("comment cap continuation", func(t *testing.T) {
+		requests := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			requests++
+			fmt.Fprint(w, `{"values":[`)
+			for i := 0; i < notices.MaxComments; i++ {
+				if i > 0 {
+					fmt.Fprint(w, ",")
+				}
+				fmt.Fprint(w, `{"content":{"raw":"x"}}`)
+			}
+			fmt.Fprintf(w, `],"next":%q}`, fmt.Sprintf("http://%s?page=2", r.Host))
+		}))
+		defer server.Close()
+		client := &Client{baseURL: server.URL, email: "test", token: "token", httpClient: server.Client()}
+		_, err := client.ListPRComments(context.Background(), repo, 1)
+		if !errors.Is(err, notices.ErrCapacity) {
+			t.Fatalf("error = %v, want capacity refusal", err)
+		}
+		if requests != 1 {
+			t.Fatalf("requests = %d, want 1 (no request after comment cap)", requests)
+		}
+	})
+
+	t.Run("exact comment cap EOF", func(t *testing.T) {
+		requests := 0
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			requests++
+			fmt.Fprint(w, `{"values":[`)
+			for i := 0; i < notices.MaxComments; i++ {
+				if i > 0 {
+					fmt.Fprint(w, ",")
+				}
+				fmt.Fprint(w, `{"content":{"raw":"x"}}`)
+			}
+			fmt.Fprint(w, `]}`)
+		}))
+		defer server.Close()
+		client := &Client{baseURL: server.URL, email: "test", token: "token", httpClient: server.Client()}
+		bodies, err := client.ListPRComments(context.Background(), repo, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if requests != 1 || len(bodies) != notices.MaxComments {
+			t.Fatalf("requests/bodies = %d/%d, want 1/%d", requests, len(bodies), notices.MaxComments)
+		}
+	})
+}
+
 func TestListPRCommentsBoundsExternalConversation(t *testing.T) {
 	t.Run("large single body", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

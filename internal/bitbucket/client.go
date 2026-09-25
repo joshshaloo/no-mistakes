@@ -186,6 +186,9 @@ func (c *Client) ListPRComments(ctx context.Context, repo RepoRef, prID int) ([]
 	pages := 0
 	totalBytes := 0
 	for next != "" {
+		if err := notices.ValidateAggregate(pages, len(bodies), totalBytes, true); err != nil {
+			return nil, fmt.Errorf("read Bitbucket PR notices before next request: %w", err)
+		}
 		var response struct {
 			Values []struct {
 				Content struct {
@@ -203,7 +206,8 @@ func (c *Client) ListPRComments(ctx context.Context, repo RepoRef, prID int) ([]
 			return nil, fmt.Errorf("read Bitbucket PR notices: %w: aggregate response exceeds %d bytes", notices.ErrCapacity, notices.MaxResponseBytes)
 		}
 		pages++
-		if err := notices.ValidateCounts(pages, len(bodies)+len(response.Values)); err != nil {
+		commentCount := len(bodies) + len(response.Values)
+		if err := notices.ValidateAggregate(pages, commentCount, totalBytes, response.Next != ""); err != nil {
 			return nil, fmt.Errorf("read Bitbucket PR notices: %w", err)
 		}
 		for _, comment := range response.Values {
