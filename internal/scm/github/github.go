@@ -488,7 +488,7 @@ func (h *Host) getAPIJSON(ctx context.Context, endpoint string, dst any) error {
 		args = append(args, "--hostname", host)
 	}
 	args = append(args, endpoint)
-	out, err := shellenv.OutputShellCommand(h.cmd(ctx, "gh", args...))
+	out, err := notices.RunCommand(h.cmd(ctx, "gh", args...), "read GitHub API "+endpoint)
 	if err != nil {
 		return err
 	}
