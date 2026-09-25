@@ -356,12 +356,12 @@ func TestRecoverOnStartup_FinalizesLegacyTerminalPRRun(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			repo, err := database.InsertRepoWithID("terminal-pr-"+state, t.TempDir(), "https://github.com/test/repo", "main")
+			repo, head := setupTestGitRepo(t, p, database, "terminal-pr-"+state)
+			run, err := database.InsertRun(repo.ID, "feature", head, head)
 			if err != nil {
 				t.Fatal(err)
 			}
-			run, err := database.InsertRun(repo.ID, "feature", "abc123", "def456")
-			if err != nil {
+			if err := gitpkg.PinRunHead(context.Background(), p.RepoDir(repo.ID), run.ID, head); err != nil {
 				t.Fatal(err)
 			}
 			if err := database.UpdateRunPRState(run.ID, state); err != nil {
