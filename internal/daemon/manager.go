@@ -284,6 +284,8 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	supervisor := shellenv.NewRunSupervisor(plan.run.ID, plan.workDir)
 	runCtx, cancel := context.WithCancelCause(shellenv.WithRunSupervisor(context.Background(), supervisor))
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	cleanup := m.completionCleanup(plan.agent, plan.gateDir, plan.workDir, plan.run.ID, supervisor)
+	executor.SetBeforeComplete(cleanup)
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[plan.run.ID] = executor
@@ -306,11 +308,10 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				}
 			}
 			cancel(nil)
-			_ = plan.agent.Close()
-			m.closeSubscribers(plan.run.ID)
-			if err := cleanupRunWorktreeWithSupervisor(context.Background(), m.db, plan.gateDir, plan.workDir, plan.run.ID, supervisor); err != nil {
+			if err := cleanup(); err != nil {
 				slog.Warn("failed to safely remove recovered worktree", "path", plan.workDir, "error", err)
 			}
+			m.closeSubscribers(plan.run.ID)
 			m.mu.Lock()
 			delete(m.executors, plan.run.ID)
 			delete(m.cancels, plan.run.ID)
@@ -870,6 +871,8 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 	runCtx, cancel := context.WithCancelCause(shellenv.WithRunSupervisor(context.Background(), supervisor))
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
 	executor.SetSkippedSteps(skipSteps)
+	cleanup := m.completionCleanup(ag, gateDir, wtDir, run.ID, supervisor)
+	executor.SetBeforeComplete(cleanup)
 
 	// Track executor.
 	done := make(chan struct{})
@@ -914,14 +917,12 @@ func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSH
 				}
 			}
 			cancel(nil)
-			ag.Close()
-			// Close subscriber channels for this run.
-			m.closeSubscribers(run.ID)
-			// Clean up only after the exact recorded head is pinned. A mismatch
-			// retains the worktree and a separately named crash candidate.
-			if rmErr := cleanupRunWorktreeWithSupervisor(context.Background(), m.db, gateDir, wtDir, run.ID, supervisor); rmErr != nil {
+			// Failure/panic fallback; success already crossed this same barrier
+			// before the executor published completion.
+			if rmErr := cleanup(); rmErr != nil {
 				slog.Warn("failed to safely remove worktree", "path", wtDir, "error", rmErr)
 			}
+			m.closeSubscribers(run.ID)
 			// Remove tracking.
 			m.mu.Lock()
 			delete(m.executors, run.ID)

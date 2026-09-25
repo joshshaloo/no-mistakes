@@ -354,8 +354,20 @@ func (d *DB) SetRunPushActive(id string, active bool) error {
 // A merged or closed PR is also the terminal outcome of the final CI monitor
 // step, so the PR observation and active-run finalization are committed in one
 // transaction. This makes the database authoritative even if execution stops
-// before the executor's ordinary follow-up completion write.
+// before the executor's ordinary follow-up completion write. Managed executions
+// use ObserveRunPRState instead so their cleanup barrier owns completion.
 func (d *DB) UpdateRunPRState(id, state string) error {
+	return d.updateRunPRState(id, state, true)
+}
+
+// ObserveRunPRState records PR truth without completing an executing run. Its
+// owner must finish step bookkeeping and remove the worktree before publishing
+// completion. ReconcileTerminalPRRuns recovers the observation after a crash.
+func (d *DB) ObserveRunPRState(id, state string) error {
+	return d.updateRunPRState(id, state, false)
+}
+
+func (d *DB) updateRunPRState(id, state string, finalize bool) error {
 	state = strings.ToLower(strings.TrimSpace(state))
 	ts := now()
 	tx, err := d.sql.Begin()
@@ -375,7 +387,7 @@ func (d *DB) UpdateRunPRState(id, state string) error {
 	if _, err := tx.Exec(`UPDATE runs SET pr_state = ?, pr_state_observed_at = ?, updated_at = ? WHERE id = ?`, state, ts, ts, id); err != nil {
 		return fmt.Errorf("update run PR state: %w", err)
 	}
-	if terminalPRState(state) {
+	if finalize && terminalPRState(state) {
 		if err := finalizeTerminalPRRun(tx, id, ts); err != nil {
 			return fmt.Errorf("update run PR state: %w", err)
 		}

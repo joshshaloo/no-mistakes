@@ -86,6 +86,7 @@ When a push arrives via the post-receive hook:
 3. Streams events to any connected TUI clients and serves request/response state to AXI clients
 4. When the run finishes (success or failure), terminates that run's own process groups first - `SIGTERM`, a bounded grace period, then `SIGKILL` for survivors, or a forced process-tree kill on Windows - so nothing it started is still holding the worktree or a port. This happens even when the head check below retains the worktree
 5. Removes the worktree, but only after byte-verifying that the run's exact recorded head is pinned under its own gate reference
+6. Publishes successful run completion only after that cleanup finishes, including for resumed runs and merged/closed PR observations. If cleanup cannot safely remove the worktree, the run fails with a cleanup diagnostic instead of reporting success
 
 Pipeline agents are prompted to keep intentional writes inside that detached worktree and avoid changing system state outside it, such as Homebrew packages, apps under `/Applications`, or global tool configuration.
 That reduces surprising machine-level side effects and macOS App Management prompts, but it is prompt steering rather than a true sandbox.

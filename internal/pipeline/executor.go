@@ -52,6 +52,10 @@ type Executor struct {
 
 	onEvent EventFunc
 
+	// beforeComplete is the owner's synchronous resource-cleanup barrier.
+	// A completed DB row/event must never get ahead of worktree removal.
+	beforeComplete func() error
+
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
 	sessions *RunSessions
@@ -104,6 +108,14 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		e.convergence = convergence.New(cfg.ConvergenceSettings())
 	}
 	return e
+}
+
+// SetBeforeComplete installs the run owner's cleanup barrier before execution.
+// It runs after all steps, before publishing successful completion; an error
+// fails the run instead. The owner must make it idempotent for deferred cleanup
+// on failure/panic paths, which do not pass through successful completion.
+func (e *Executor) SetBeforeComplete(cleanup func() error) {
+	e.beforeComplete = cleanup
 }
 
 // SetConvergenceDetector overrides the non-convergence detector. Tests use it
@@ -220,8 +232,19 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		}
 	}
 
-	// Mark run as completed. A failure here must emit a terminal failure rather
-	// than leaving a silent running row after every step has finished.
+	return e.completeRun(run, repo)
+}
+
+// completeRun is shared by Execute and both recovered completion paths. The
+// manager used to remove the worktree only in its defer, after Execute/Resume
+// had persisted and emitted completion, letting readers win that race under
+// contention. Cleanup must precede BOTH publications, not just the IPC event.
+func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
+	if e.beforeComplete != nil {
+		if err := e.beforeComplete(); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("complete run cleanup: %w", err))
+		}
+	}
 	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
 		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
 	}
@@ -320,8 +343,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		Log: func(message string) {
 			slog.Info("recovered approval gate reconciliation", "run_id", run.ID, "step", gate.step.Name(), "message", message)
 		},
-		LogChunk: func(string) {},
-		LogFile:  func(string) {},
+		LogChunk:           func(string) {},
+		LogFile:            func(string) {},
+		deferRunCompletion: e.beforeComplete != nil,
 	}
 	if reconciled, reconcileErr := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx); reconciled {
 		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
@@ -527,12 +551,7 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 			return e.skipRecoveredRemainder(run, repo, index+1)
 		}
 	}
-	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err), ctx)
-	}
-	run.Status = types.RunCompleted
-	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
-	return nil
+	return e.completeRun(run, repo)
 }
 
 func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int) error {
@@ -549,12 +568,7 @@ func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int)
 		}
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", "", nil)
 	}
-	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err))
-	}
-	run.Status = types.RunCompleted
-	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
-	return nil
+	return e.completeRun(run, repo)
 }
 
 func recoveredStepDuration(step *db.StepResult) int64 {
@@ -719,6 +733,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
 		},
+		deferRunCompletion: e.beforeComplete != nil,
 	}
 
 	nextTrigger := "initial"

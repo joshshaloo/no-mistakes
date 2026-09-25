@@ -48,6 +48,21 @@ type StepContext struct {
 	// Shared carries in-memory run-scoped results one step hands to a later
 	// step in the same run (e.g. the combined document+lint pass).
 	Shared *RunShared
+
+	// Managed runs must leave completion to the executor's cleanup barrier,
+	// even when a step observes terminal PR truth before returning.
+	deferRunCompletion bool
+}
+
+// UpdateRunPRState records monotonic PR truth. For a managed execution it must
+// not publish a completed run from inside a step: the executor still has step
+// bookkeeping and resource cleanup to finish. Startup can reconcile the durable
+// PR observation if the process dies before that final completion write.
+func (sctx *StepContext) UpdateRunPRState(state string) error {
+	if sctx.deferRunCompletion {
+		return sctx.DB.ObserveRunPRState(sctx.Run.ID, state)
+	}
+	return sctx.DB.UpdateRunPRState(sctx.Run.ID, state)
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,
