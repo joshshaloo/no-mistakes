@@ -100,6 +100,8 @@ Later code, test, configuration, or executable changes invalidate the completed 
 
 The deliberate mechanical exemption is content-only changes to non-executable plain prose (`.md`, `.txt`, `.rst`) under `docs/`, or root `README.md`, `CONTRIBUTING.md`, and `CHANGELOG.md`. Empty commits also retain the rating. Scripts, tests, configuration, MDX, symlinks, executable-mode changes, and `AGENTS.md`/`CLAUDE.md`/`SKILL.md` anywhere do not qualify. The comparison uses the exact completed review head, not the preceding pipeline commit; missing or unreadable review evidence is stale, never implicitly low risk.
 
+Freshness is checked synchronously after each post-review agent or configured command returns and before a pipeline-created commit is published. It is not deferred to skipped-step completion or repeated during read-only CI polling.
+
 CI repairs remain enabled. Before pushing a repair with stale risk, CI appends the notice to the PR conversation without changing the PR title, description, or any human comment; it publishes again at the CI-ready boundary so green checks cannot rely on a removed pre-push notice. Failure to publish stops the run before the push or ready signal. New PR descriptions permanently point supervisors to these head-bound conversation notices, and ordinary reruns never rewrite an existing PR's title or description.
 
 ### Post-review HEAD continuity
@@ -204,7 +206,7 @@ Document, lint, and push-stage fix rounds can commit after the Test step ran. Im
 
 ## PR
 
-Creates or updates a pull request.
+Creates a pull request or reuses an existing one without rewriting it.
 
 **Skipped when:**
 - The branch is the default branch
@@ -248,7 +250,7 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 - Continues its normal monitoring loop until the PR is merged, closed, declined, or the configured `ci_timeout` idle window elapses, then parks at an approval gate instead of ending the run
 - The [`ci_timeout` reference](/no-mistakes/reference/global-config/#ci_timeout) owns idle re-arming, unlimited monitoring, and fail-closed reconciliation while that gate is parked
 - On GitHub, GitLab, and Azure DevOps, polls provider mergeability alongside CI checks while the PR remains open
-- While the PR stays open, the TUI and terminal title show `Checks passed` once checks are green and known mergeability is clear, and `no-mistakes axi` returns `outcome: checks-passed` with successful-output reporting instructions so agents can summarize the run, ask the user to review and merge, and list any pipeline fixes instead of waiting
+- While the PR stays open, the TUI and terminal title show `Checks passed` once checks are green and known mergeability is clear, and `no-mistakes axi` returns `outcome: checks-passed` with successful-output reporting instructions instead of waiting. For a current risk assessment, agents summarize the run, ask the user to review and merge, and list pipeline fixes; for `risk: stale`, they instead report that a fresh review is required before the previous rating can authorize merging
 - Each ready stale-risk notice names a verified provider-owned CI attempt identity. At the readiness boundary, no-mistakes reconciles the current complete notice for that exact attempt and appends a replacement when it is absent or incomplete; it fails closed when attempt identity or notice state cannot be established.
 - GitHub Actions is the only currently verified attempt-identity contract: jobs are checked against the repository, exact head, workflow run ID, and run-attempt number; generic check links are not identities. These validation notices and currentness checks are verified and supported only on `github.com`. GitHub Enterprise is explicitly refused before notice operations or related PR mutation because this path was not verified against a real Enterprise host; an unknown effective GitHub host is refused as well. GitLab, Azure DevOps policy evaluations, Bitbucket Cloud's currently supported commit-status path, and unknown providers cannot authorize readiness because those paths do not establish a non-reusable attempt identity. This restriction fails closed on the readiness claim, not on repair work: failing checks from those providers can still be diagnosed and repaired, and a complete exact-head stale-review notice must be published before any repair push. That pre-push notice reports review applicability without claiming an external CI attempt.
 - External conversation reads allow at most 100 pages, 5,000 comments, and 2 MiB of aggregate response data; subprocess diagnostics are capped at 32 KiB. GitHub and GitLab fetch explicit pages and refuse continuation at a cap without a cap-plus-one request. Bitbucket direct REST follows validated provider pagination under the same limits, while the selected `bkt` transport bounds its complete CLI response. Azure DevOps bounds one complete response because Microsoft's [pull-request threads List contract](https://learn.microsoft.com/en-us/rest/api/azure/devops/git/pull-request-threads/list?view=azure-devops-rest-7.1) retrieves all threads and documents no pagination parameter or continuation token. Oversized, malformed, incomplete, or unreadable results cannot establish currentness.

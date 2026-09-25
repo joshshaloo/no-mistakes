@@ -43,7 +43,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 | 5 | **Document** | Update docs when needed and report unresolved gaps | initial pass |
 | 6 | **Lint** | Run lint/static analysis; shares the document step's initial housekeeping pass when no lint command is configured | `3` |
 | 7 | **Push** | Safely push the validated branch to the configured target | n/a |
-| 8 | **PR** | Create or update the pull request | n/a |
+| 8 | **PR** | Create the pull request or reuse it with a validation notice | n/a |
 | 9 | **CI** | Watch CI + mergeability, auto-fix failures | `3` |
 
 ## Why these steps, in this order

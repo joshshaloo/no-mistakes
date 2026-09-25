@@ -129,7 +129,8 @@ While the CI step is active, the TUI shows a dedicated CI panel instead of the g
 It shows the PR label, the latest CI activity, and a log tail.
 When a real CI auto-fix attempt starts, the panel increments `CI auto-fixes: N`.
 Once checks are green and known mergeability is clear, the panel shows `✓ Checks passed` with `still monitoring until merged or closed`, and the terminal title switches to `Checks passed`.
-That text means the CI monitor is still active; it can still pause later if the configured idle timeout elapses with no base-branch movement.
+The review view separately replaces an invalidated rating with `STALE`; green checks do not renew it or make the previous rating merge authority. See [Risk assessment freshness](/no-mistakes/reference/pipeline-steps/#risk-assessment-freshness).
+The checks-passed text means the CI monitor is still active; it can still pause later if the configured idle timeout elapses with no base-branch movement.
 That ready signal clears if checks start running again, new failures appear, provider state becomes uncertain, or the PR is merged or closed.
 The ready signal is persisted, so a fresh attach shows `Checks passed` without depending on delivery of an earlier log line.
 

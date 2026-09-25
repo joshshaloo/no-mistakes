@@ -27,7 +27,7 @@ What you do not get is PR automation and CI monitoring.
 
 | Step | GitHub | GitLab | Bitbucket Cloud | Azure DevOps |
 |---|---|---|---|---|
-| **PR** (create/update) | `gh` CLI, authenticated | `glab` CLI, authenticated | authenticated `bkt` CLI or `NO_MISTAKES_BITBUCKET_EMAIL` + `NO_MISTAKES_BITBUCKET_API_TOKEN` | `az` CLI + `azure-devops` extension, authenticated |
+| **PR** (create/reuse + notices) | `gh` CLI, authenticated | `glab` CLI, authenticated | authenticated `bkt` CLI or `NO_MISTAKES_BITBUCKET_EMAIL` + `NO_MISTAKES_BITBUCKET_API_TOKEN` | `az` CLI + `azure-devops` extension, authenticated |
 | **CI** (polling, auto-fix) | `gh` CLI | `glab` CLI | same `bkt` or env credential path | `az` CLI |
 | **Merge conflict auto-fix** | `gh` CLI | `glab` CLI | not supported | `az` CLI |
 | **Mergeability polling** | `gh` CLI | `glab` CLI | not supported | `az` CLI |
@@ -38,7 +38,7 @@ What you do not get is PR automation and CI monitoring.
 Once the host is wired up, `no-mistakes` can keep owning the branch after it
 pushes to the configured target:
 
-- create or update the PR automatically
+- create the PR automatically or reuse an existing PR while publishing status as conversation notices
 - keep polling hosted CI until the PR is merged, closed, declined, or the configured `ci_timeout` idle window elapses
 - fetch failing job logs for the CI auto-fix loop
 - on GitHub, GitLab, and Azure DevOps, watch mergeability and fix merge conflicts when possible
@@ -197,17 +197,13 @@ well as their SSH forms (`git@ssh.dev.azure.com:v3/...`).
 
 ## Self-hosted GitHub/GitLab
 
-Self-hosted GitHub Enterprise and self-hosted GitLab instances work through the same `gh` and `glab` CLIs. Authenticate the CLI against your instance (`gh auth login --hostname your-ghe.example.com`, `glab auth login --hostname gitlab.example.com`) and `no-mistakes` will route through the CLI as usual.
+Self-hosted GitLab works through `glab`. GitHub Enterprise can still be detected through `gh`, but PR notice publication and related PR mutation are currently refused because that validation path has only been verified on `github.com`.
 
 ### Self-hosted GitHub Enterprise
 
-GitHub Enterprise Server is detected the same way `github.com` is, as long as the host is one `gh` is authenticated against.
-When the upstream hostname is not `github.com`, `no-mistakes` consults gh's configured hosts (`hosts.yml`, honoring `GH_CONFIG_DIR` then `XDG_CONFIG_HOME/gh`, then `~/.config/gh`) and treats the upstream as GitHub if its host appears there.
-Running `gh auth login --hostname your-ghe.example.com` is enough to make detection succeed; if `gh` is not configured for the host, detection fails closed and the upstream is treated as unsupported.
+GitHub Enterprise Server is detected when the host is one `gh` is authenticated against. For a non-`github.com` upstream, `no-mistakes` consults gh's configured hosts (`hosts.yml`, honoring `GH_CONFIG_DIR` then `XDG_CONFIG_HOME/gh`, then `~/.config/gh`). If the host is absent, detection fails closed and the upstream is treated as unsupported.
 
-On GHE, `gh --repo` expects a host-prefixed slug in the form `host/owner/name`.
-`no-mistakes` builds that automatically from the recorded upstream remote or PR URL, so daemon-run `gh` commands resolve the right repository regardless of the daemon's working directory.
-The fork owner extracted from the fork URL keeps the plain `owner/name` form because that side only feeds `--head owner:branch`.
+Detection does not currently authorize the PR path: no-mistakes refuses before publishing validation notices or making related PR mutations on GitHub Enterprise. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the verified-host restriction.
 
 ### Self-hosted GitLab
 
