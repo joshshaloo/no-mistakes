@@ -78,6 +78,12 @@ func TestPRStep_PreservesExistingPRAndPublishesNotice(t *testing.T) {
 	if !strings.Contains(ghLog, "pr comment") {
 		t.Fatalf("head-bound validation notice was not published:\n%s", ghLog)
 	}
+	if strings.Contains(ghLog, "**CI attempt:**") || strings.Contains(ghLog, "pr-step:") {
+		t.Fatalf("PR lifecycle notice claimed a provider CI attempt:\n%s", ghLog)
+	}
+	if !strings.Contains(ghLog, "**Run:** `"+sctx.Run.ID+"`") || !strings.Contains(ghLog, "**Head:** `"+headSHA+"`") {
+		t.Fatalf("PR lifecycle notice omitted run/head binding:\n%s", ghLog)
+	}
 
 	// Verify PR URL was stored
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
@@ -287,6 +293,12 @@ func TestPRStep_CreatesNewPR(t *testing.T) {
 	}
 	if !strings.Contains(ghLog, "add feature\n\n## Risk Assessment") || !strings.Contains(ghLog, "⚠️ Medium: touches critical error handling") {
 		t.Fatalf("expected fallback PR body to append risk note under Risk Assessment heading, got:\n%s", ghLog)
+	}
+	if strings.Contains(ghLog, "**CI attempt:**") || strings.Contains(ghLog, "pr-created:") {
+		t.Fatalf("created-PR lifecycle notice claimed a provider CI attempt:\n%s", ghLog)
+	}
+	if !strings.Contains(ghLog, "**Run:** `"+sctx.Run.ID+"`") || !strings.Contains(ghLog, "**Head:** `"+headSHA+"`") {
+		t.Fatalf("created-PR lifecycle notice omitted run/head binding:\n%s", ghLog)
 	}
 
 	// Verify PR URL was stored

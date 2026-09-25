@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/notices"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
@@ -304,9 +305,9 @@ func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) 
 		return nil, err
 	}
 	cmd := h.cmd(ctx, "gh", "api", "--paginate", "--slurp", fmt.Sprintf("repos/%s/issues/%s/comments", h.repo, selector))
-	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	out, err := notices.RunCommand(cmd, "read GitHub PR notices")
 	if err != nil {
-		return nil, fmt.Errorf("gh api PR comments: %s: %w", strings.TrimSpace(string(out)), err)
+		return nil, err
 	}
 	var pages [][]struct {
 		Body string `json:"body"`
@@ -314,8 +315,14 @@ func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) 
 	if err := json.Unmarshal(out, &pages); err != nil {
 		return nil, fmt.Errorf("parse gh PR comments: %w", err)
 	}
+	if err := notices.ValidateCounts(len(pages), 0); err != nil {
+		return nil, fmt.Errorf("read GitHub PR notices: %w", err)
+	}
 	var bodies []string
 	for _, page := range pages {
+		if err := notices.ValidateCounts(len(pages), len(bodies)+len(page)); err != nil {
+			return nil, fmt.Errorf("read GitHub PR notices: %w", err)
+		}
 		for _, comment := range page {
 			bodies = append(bodies, comment.Body)
 		}

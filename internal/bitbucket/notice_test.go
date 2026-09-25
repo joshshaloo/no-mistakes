@@ -2,9 +2,14 @@ package bitbucket
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/notices"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
@@ -48,4 +53,37 @@ func TestPublishPRNoticeAppendsComment(t *testing.T) {
 	if api.id != 123 || api.body != "head-bound notice" {
 		t.Fatalf("comment = (%d, %q)", api.id, api.body)
 	}
+}
+
+func TestListPRCommentsBoundsExternalConversation(t *testing.T) {
+	t.Run("large single body", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprintf(w, `{"values":[{"content":{"raw":%q}}]}`, strings.Repeat("x", notices.MaxResponseBytes))
+		}))
+		defer server.Close()
+		client := &Client{baseURL: server.URL, email: "test", token: "token", httpClient: server.Client()}
+		_, err := client.ListPRComments(context.Background(), RepoRef{Workspace: "w", RepoSlug: "r"}, 1)
+		if !errors.Is(err, notices.ErrCapacity) {
+			t.Fatalf("error = %v, want capacity refusal", err)
+		}
+	})
+
+	t.Run("many comments", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			fmt.Fprint(w, `{"values":[`)
+			for i := 0; i <= notices.MaxComments; i++ {
+				if i > 0 {
+					fmt.Fprint(w, ",")
+				}
+				fmt.Fprint(w, `{"content":{"raw":"x"}}`)
+			}
+			fmt.Fprint(w, `]}`)
+		}))
+		defer server.Close()
+		client := &Client{baseURL: server.URL, email: "test", token: "token", httpClient: server.Client()}
+		_, err := client.ListPRComments(context.Background(), RepoRef{Workspace: "w", RepoSlug: "r"}, 1)
+		if !errors.Is(err, notices.ErrCapacity) {
+			t.Fatalf("error = %v, want comment-count refusal", err)
+		}
+	})
 }

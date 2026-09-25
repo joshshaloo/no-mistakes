@@ -14,14 +14,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/notices"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 const (
 	minimumBKTVersion  = "0.30.0"
-	maxBKTJSONBytes    = 2 * 1024 * 1024
-	maxBKTStderrBytes  = 32 * 1024
+	maxBKTJSONBytes    = notices.MaxResponseBytes
+	maxBKTStderrBytes  = notices.MaxDiagnosticBytes
 	maxBKTVersionBytes = 4 * 1024
 	bktCommandTimeout  = 30 * time.Second
 	bktProbeTimeout    = 10 * time.Second
@@ -364,6 +365,9 @@ func (c *BKTClient) ListPRComments(ctx context.Context, repo RepoRef, prID int) 
 	}
 	if err := c.runJSON(ctx, "PR comments", &comments, args...); err != nil {
 		return nil, err
+	}
+	if err := notices.ValidateCounts(1, len(comments)); err != nil {
+		return nil, fmt.Errorf("read bkt PR notices: %w", err)
 	}
 	bodies := make([]string, 0, len(comments))
 	for _, comment := range comments {

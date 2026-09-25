@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/notices"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
@@ -303,9 +304,9 @@ func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) 
 	}
 	args = append(args, h.orgArgs()...)
 	args = append(args, "--output", "json")
-	out, err := outputJSON(h.cmd(ctx, "az", args...))
+	out, err := notices.RunCommand(h.cmd(ctx, "az", args...), "read Azure PR notices")
 	if err != nil {
-		return nil, fmt.Errorf("az devops invoke pullRequestThreads: %w", err)
+		return nil, err
 	}
 	var response struct {
 		Value []struct {
@@ -317,8 +318,14 @@ func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) 
 	if err := json.Unmarshal(out, &response); err != nil {
 		return nil, fmt.Errorf("parse Azure PR threads: %w", err)
 	}
+	if err := notices.ValidateCounts(1, 0); err != nil {
+		return nil, fmt.Errorf("read Azure PR notices: %w", err)
+	}
 	var bodies []string
 	for _, thread := range response.Value {
+		if err := notices.ValidateCounts(1, len(bodies)+len(thread.Comments)); err != nil {
+			return nil, fmt.Errorf("read Azure PR notices: %w", err)
+		}
 		for _, comment := range thread.Comments {
 			bodies = append(bodies, comment.Content)
 		}

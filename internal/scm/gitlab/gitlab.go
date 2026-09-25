@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/notices"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
@@ -267,12 +268,13 @@ func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) 
 		segments[i] = url.PathEscape(segment)
 	}
 	endpoint := fmt.Sprintf("projects/%s/merge_requests/%s/notes?order_by=created_at&sort=asc", strings.Join(segments, "%2F"), id)
-	out, err := shellenv.CombinedOutputShellCommand(h.cmd(ctx, "glab", "api", "--paginate", endpoint))
+	out, err := notices.RunCommand(h.cmd(ctx, "glab", "api", "--paginate", endpoint), "read GitLab MR notices")
 	if err != nil {
-		return nil, fmt.Errorf("glab API MR notes: %s: %w", strings.TrimSpace(string(out)), err)
+		return nil, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(bytesTrimToJSON(out)))
 	var bodies []string
+	pages := 0
 	for {
 		var notes []struct {
 			Body string `json:"body"`
@@ -281,6 +283,10 @@ func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) 
 			return bodies, nil
 		} else if err != nil {
 			return nil, fmt.Errorf("parse glab MR notes: %w", err)
+		}
+		pages++
+		if err := notices.ValidateCounts(pages, len(bodies)+len(notes)); err != nil {
+			return nil, fmt.Errorf("read GitLab MR notices: %w", err)
 		}
 		for _, note := range notes {
 			bodies = append(bodies, note.Body)
