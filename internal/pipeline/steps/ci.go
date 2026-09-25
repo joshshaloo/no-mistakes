@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -32,6 +33,7 @@ const (
 // CIStep monitors an open PR until it is merged, closed, or its configured idle
 // timeout elapses, auto-fixing CI failures.
 type CIStep struct {
+	riskNoticeHead       string               // head for which the stale-risk notice reached the PR
 	lastFixedChecks      string               // sorted check names from last fix attempt, to avoid re-fixing
 	lastFixedCompletedAt map[string]time.Time // failing check completion times seen before the last fix attempt
 	ciFixAttempts        int                  // number of CI auto-fix attempts made
@@ -249,6 +251,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return timeoutOutcome()
 		}
 
+		if err := s.publishRiskNotice(sctx, host, pr); err != nil {
+			return nil, err
+		}
+
 		// Check PR state (merged/closed -> exit)
 		prStateKnown := true
 		state, err := host.GetPRState(ctx, pr)
@@ -351,6 +357,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					previousHeadSHA := sctx.Run.HeadSHA
 					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
 					if err != nil {
+						if errors.Is(err, errPublishStaleRisk) || errors.Is(err, pipeline.ErrReviewRisk) {
+							return nil, err
+						}
 						sctx.Log(fmt.Sprintf("warning: CI manual fix failed: %v", err))
 					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
 						s.lastFixedChecks = fixKey
@@ -375,6 +384,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					previousHeadSHA := sctx.Run.HeadSHA
 					pushed, err := s.autoFixCI(sctx, host, pr, failing, mergeConflict)
 					if err != nil {
+						if errors.Is(err, errPublishStaleRisk) || errors.Is(err, pipeline.ErrReviewRisk) {
+							return nil, err
+						}
 						sctx.Log(fmt.Sprintf("warning: CI auto-fix failed: %v", err))
 					} else if pushed || sctx.Run.HeadSHA != previousHeadSHA {
 						s.lastFixedChecks = fixKey

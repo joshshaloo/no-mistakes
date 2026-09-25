@@ -688,7 +688,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 	stepAgent := e.agent
 	if stepAgent != nil {
-		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
+		boundaryAgent := &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
+		if stepName.Order() > types.StepReview.Order() {
+			boundaryAgent.afterRun = func(ctx context.Context) error {
+				_, err := RefreshReviewRisk(ctx, e.db, run.ID, workDir, "")
+				return err
+			}
+		}
+		stepAgent = boundaryAgent
 		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
 		stepAgent = &perfRecordingAgent{
 			inner:    stepAgent,
@@ -1030,13 +1037,21 @@ func roundInsertID(_ string, inserted *db.StepRound, err error) string {
 type gateStepBoundaryAgent struct {
 	inner agent.Agent
 	phase types.StepName
+	// Resolve freshness synchronously at the mutation boundary, including
+	// failed turns. Never add Git work after a step has published a terminal
+	// outcome, or on skipped/read-only steps on the way to cleanup.
+	afterRun func(context.Context) error
 }
 
 func (a *gateStepBoundaryAgent) Name() string { return a.inner.Name() }
 
 func (a *gateStepBoundaryAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	opts.Prompt = gateguidance.PromptBoundary(string(a.phase)) + opts.Prompt
-	return a.inner.Run(ctx, opts)
+	result, err := a.inner.Run(ctx, opts)
+	if a.afterRun != nil {
+		err = errors.Join(err, a.afterRun(ctx))
+	}
+	return result, err
 }
 
 func (a *gateStepBoundaryAgent) Close() error { return a.inner.Close() }

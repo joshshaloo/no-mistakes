@@ -249,6 +249,7 @@ func TestPRStep_CreatesNewPR(t *testing.T) {
 	findings := `{"findings":[],"summary":"clean","risk_level":"medium","risk_rationale":"touches critical error handling"}`
 	ag := &mockAgent{name: "test"}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	recordReviewApproval(t, sctx, headSHA)
 	sctx.Env = env
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
 	if err != nil {
@@ -534,6 +535,7 @@ func TestPRStep_UsesAgentGeneratedTitleAndBody(t *testing.T) {
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	recordReviewApproval(t, sctx, headSHA)
 	sctx.Env = env
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
 	if err != nil {
@@ -591,6 +593,7 @@ func TestPRStep_AppendsTestingSectionFromTestStep(t *testing.T) {
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
+	recordReviewApproval(t, sctx, headSHA)
 
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
 	if err != nil {
@@ -1160,6 +1163,7 @@ func TestPRStep_CreateKeepsGeneratedSectionsAfterOversizedIntent(t *testing.T) {
 	sctx.Env = env
 	sctx.UserIntent = "Keep generated sections visible.\n" + strings.Repeat("oversized intent context line\n", 2500)
 
+	recordReviewApproval(t, sctx, headSHA)
 	reviewFindings := `{"findings":[],"summary":"clean","risk_level":"medium","risk_rationale":"validates generated PR body length handling"}`
 	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
 	if err != nil {

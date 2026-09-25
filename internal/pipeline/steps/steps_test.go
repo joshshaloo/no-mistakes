@@ -317,6 +317,26 @@ func fakeCIGHReconcileHandler(args []string) {
 }
 
 func fakeCIGHHandler(args []string) {
+	if bodyPath := os.Getenv("FAKE_CLI_RISK_BODY"); bodyPath != "" {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json title,body") {
+			fmt.Println(`{"title":"fix: original title","body":"## What Changed\n\nhuman-authored summary\n\n## Risk Assessment\n\nLow: Test-only change without production changes"}`)
+			os.Exit(0)
+		}
+		if strings.Contains(joined, "pr edit") {
+			if os.Getenv("FAKE_CLI_RISK_EDIT_FAIL") == "1" {
+				os.Exit(1)
+			}
+			body, err := io.ReadAll(os.Stdin)
+			if err != nil {
+				os.Exit(1)
+			}
+			if err := os.WriteFile(bodyPath, body, 0o644); err != nil {
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
+	}
 	state := os.Getenv("FAKE_CLI_STATE")
 	stateErr := os.Getenv("FAKE_CLI_STATE_ERR")
 	checksJSON := os.Getenv("FAKE_CLI_CHECKS")

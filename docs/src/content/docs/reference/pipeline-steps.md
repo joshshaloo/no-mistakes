@@ -94,6 +94,14 @@ It is off by default, it changes nothing about the review step - no finding, no 
 You read it in `no-mistakes axi status` and decide what to do about it.
 Configuration and the fail-silent contract are owned by [`nonconvergence`](/no-mistakes/reference/global-config/#nonconvergence).
 
+### Risk assessment freshness
+
+Later code, test, configuration, or executable changes invalidate the completed review's risk assessment, including files added by a CI repair. AXI reports `risk: stale` with a warning not to use the previous rating as merge authority; the PR shows **Risk assessment: STALE** rather than the old low/medium/high rating. Green CI (`checks-passed`) or a completed run does **not** renew that assessment. A supervisor must obtain a fresh review before relying on a rating to authorize merging. Original review rounds remain historical evidence; review, documentation, and lint are not automatically repeated.
+
+The deliberate mechanical exemption is content-only changes to non-executable plain prose (`.md`, `.txt`, `.rst`) under `docs/`, or root `README.md`, `CONTRIBUTING.md`, and `CHANGELOG.md`. Empty commits also retain the rating. Scripts, tests, configuration, MDX, symlinks, executable-mode changes, and `AGENTS.md`/`CLAUDE.md`/`SKILL.md` anywhere do not qualify. The comparison uses the exact completed review head, not the preceding pipeline commit; missing or unreadable review evidence is stale, never implicitly low risk.
+
+CI repairs remain enabled. Before pushing a repair with stale risk, CI replaces the PR's generated assessment and pipeline sections, preserving its title and human-authored summary. Failure to publish that warning stops the run before the push rather than leaving an old rating attached to new code. Recovered monitors repeat the notice before reporting checks green.
+
 ### Post-review HEAD continuity
 
 At entry to every remaining step in the fixed pipeline order - Test, Document, Lint, Push, PR, and CI - no-mistakes compares the live worktree `HEAD` with the pipeline-recorded head. An equal head or a pipeline-descendant commit continues. A backward reset, divergent sibling, or unverifiable relationship fails the run before that step performs work, including for steps that would not create a commit.

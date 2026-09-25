@@ -215,9 +215,11 @@ func (c *BKTClient) repoArgs(repo RepoRef) ([]string, error) {
 }
 
 type bktPullRequest struct {
-	ID     int    `json:"id"`
-	State  string `json:"state"`
-	Source struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	ID          int    `json:"id"`
+	State       string `json:"state"`
+	Source      struct {
 		Branch struct {
 			Name string `json:"name"`
 		} `json:"branch"`
@@ -379,6 +381,8 @@ func bktPRToPullRequest(repo RepoRef, pr bktPullRequest) (*PullRequest, error) {
 		}
 	}
 	return &PullRequest{
+		Title:            pr.Title,
+		Description:      pr.Description,
 		ID:               pr.ID,
 		URL:              prURL(repo, pr.ID, rawURL),
 		State:            strings.TrimSpace(pr.State),

@@ -91,6 +91,13 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		sctx.Log(fmt.Sprintf("pull request already exists: %s, updating...", describePR(existing)))
 		updated, err := host.UpdatePR(ctx, existing, scm.PRContent(content))
 		if err != nil {
+			stale, riskErr := pipeline.RefreshReviewRisk(ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, "")
+			if riskErr != nil {
+				return nil, riskErr
+			}
+			if stale {
+				return nil, fmt.Errorf("%w: %w", errPublishStaleRisk, err)
+			}
 			sctx.Log(fmt.Sprintf("warning: failed to update PR: %v", err))
 			updated = existing
 		}
@@ -178,6 +185,12 @@ Diff stat:
 		JSONSchema: prContentSchema,
 		OnChunk:    sctx.LogChunk,
 	})
+	// Even the drafting agent can edit tracked files. Re-read deterministic
+	// evidence after it returns, before advertising risk on the remote PR.
+	if _, riskErr := pipeline.RefreshReviewRisk(ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, ""); riskErr != nil {
+		return prContent{}, riskErr
+	}
+	pipelineMD, riskLine, testingMD = s.buildPipelineSection(sctx)
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
 		return fallbackPRContent(sctx, branch, commitLog, riskLine, testingMD, pipelineMD, bodyLimit), nil

@@ -140,6 +140,8 @@ func (h *Host) Available(ctx context.Context) error {
 }
 
 type mrPayload struct {
+	Title               string `json:"title"`
+	Description         string `json:"description"`
 	IID                 int    `json:"iid"`
 	WebURL              string `json:"web_url"`
 	URL                 string `json:"url"`
@@ -230,6 +232,22 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		return nil, fmt.Errorf("glab mr update: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return pr, nil
+}
+
+func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, error) {
+	id := pr.Number
+	if id == "" {
+		var err error
+		id, err = scm.ExtractPRNumber(pr.URL)
+		if err != nil {
+			return scm.PRContent{}, err
+		}
+	}
+	mr, err := h.viewMR(ctx, id)
+	if err != nil {
+		return scm.PRContent{}, err
+	}
+	return scm.PRContent{Title: mr.Title, Body: mr.Description}, nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
