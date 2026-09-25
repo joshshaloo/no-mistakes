@@ -356,12 +356,12 @@ func TestRecoverOnStartup_FinalizesLegacyTerminalPRRun(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			repo, err := database.InsertRepoWithID("terminal-pr-"+state, t.TempDir(), "https://github.com/test/repo", "main")
+			repo, head := setupTestGitRepo(t, p, database, "terminal-pr-"+state)
+			run, err := database.InsertRun(repo.ID, "feature", head, head)
 			if err != nil {
 				t.Fatal(err)
 			}
-			run, err := database.InsertRun(repo.ID, "feature", "abc123", "def456")
-			if err != nil {
+			if err := gitpkg.PinRunHead(context.Background(), p.RepoDir(repo.ID), run.ID, head); err != nil {
 				t.Fatal(err)
 			}
 			if err := database.UpdateRunPRState(run.ID, state); err != nil {
@@ -541,20 +541,8 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	if completed.ReviewApprovedHeadSHA == nil || *completed.ReviewApprovedHeadSHA != headSHA {
 		t.Fatalf("recovered review approval = %#v, want %s", completed.ReviewApprovedHeadSHA, headSHA)
 	}
-	// The executor marks the run terminal before its owner goroutine performs
-	// worktree cleanup. Wait for that cleanup rather than assuming it completed
-	// in the same scheduling slice, which is especially unreliable on Windows.
-	cleanupDeadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(worktree); os.IsNotExist(err) {
-			break
-		} else if err != nil {
-			t.Fatalf("stat recovered worktree: %v", err)
-		}
-		if time.Now().After(cleanupDeadline) {
-			t.Fatalf("recovered worktree still exists after cleanup: %s", worktree)
-		}
-		time.Sleep(20 * time.Millisecond)
+	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+		t.Fatalf("completed recovered run still has its worktree: %v", err)
 	}
 }
 
@@ -639,6 +627,9 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 			completed := waitForRunTerminalState(t, d, run.ID)
 			if completed.Status != types.RunCompleted || completed.AwaitingAgentSince != nil {
 				t.Fatalf("historical CI gate after %s reconciliation = status %s awaiting %v", state, completed.Status, completed.AwaitingAgentSince)
+			}
+			if _, err := os.Stat(worktree); !os.IsNotExist(err) {
+				t.Fatalf("completed reconciled run still has its worktree: %v", err)
 			}
 			active, err := lifecycle.ActiveRuns(p)
 			if err != nil {

@@ -23,6 +23,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/logstore"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/runcompletion"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -351,6 +352,33 @@ func writeDaemonPIDFile(path string, record daemonPIDFile) error {
 // best-effort migrates gate bare repos in place so older installs pick up
 // the per-worktree hookspath isolation introduced for issue #122 when Git
 // supports config --worktree.
+func reconcileTerminalPRRuns(d *db.DB, p *paths.Paths, mgr *RunManager) int {
+	candidates, err := d.TerminalPRCompletionCandidates()
+	if err != nil {
+		slog.Error("failed to list terminal PR runs", "error", err)
+		return 0
+	}
+	completed := 0
+	for _, run := range candidates {
+		workDir := p.WorktreeDir(run.RepoID, run.ID)
+		cleanup := func() error {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			supervisor := shellenv.NewRunSupervisor(run.ID, workDir)
+			return cleanupRunWorktreeWithSupervisor(ctx, d, p.RepoDir(run.RepoID), workDir, run.ID, supervisor)
+		}
+		finalizer := runcompletion.Finalizer{
+			DB: d, Cleanup: cleanup, OnEvent: mgr.broadcast, CompleteTerminalPRStep: true,
+		}
+		if err := finalizer.Finalize(context.Background(), run, nil); err != nil {
+			slog.Error("failed to reconcile terminal PR run", "run_id", run.ID, "error", err)
+			continue
+		}
+		completed++
+	}
+	return completed
+}
+
 func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	orphanStarted := time.Now()
 	reapOrphanedServers(p)
@@ -367,16 +395,11 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager) {
 	)
 
 	terminalPRStarted := time.Now()
-	terminalPRCount, err := d.ReconcileTerminalPRRuns()
-	if err != nil {
-		slog.Error("failed to reconcile terminal PR runs", "error", err)
-		logStartupPhase("terminal_pr_runs", terminalPRStarted, "failed", true)
-	} else {
-		if terminalPRCount > 0 {
-			slog.Info("reconciled terminal PR runs", "count", terminalPRCount)
-		}
-		logStartupPhase("terminal_pr_runs", terminalPRStarted, "reconciled", terminalPRCount)
+	terminalPRCount := reconcileTerminalPRRuns(d, p, mgr)
+	if terminalPRCount > 0 {
+		slog.Info("reconciled terminal PR runs", "count", terminalPRCount)
 	}
+	logStartupPhase("terminal_pr_runs", terminalPRStarted, "reconciled", terminalPRCount)
 
 	parkedStarted := time.Now()
 	plans := mgr.recoverableParkedRuns(context.Background())

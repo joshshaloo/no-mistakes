@@ -21,6 +21,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/runcompletion"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -51,6 +52,8 @@ type Executor struct {
 	skips  map[types.StepName]bool
 
 	onEvent EventFunc
+
+	completionFinalizer runcompletion.Finalizer
 
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
@@ -98,12 +101,21 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		approvalCh:            make(chan approvalResponse, 1),
 		gateReconcileInterval: defaultGateReconcileInterval,
 		gateReconcileTimeout:  defaultGateReconcileTimeout,
+		completionFinalizer:   runcompletion.Finalizer{DB: database, OnEvent: onEvent},
 	}
 	if cfg != nil {
 		// nil unless the host explicitly opted in AND a key resolves.
 		e.convergence = convergence.New(cfg.ConvergenceSettings())
 	}
 	return e
+}
+
+// SetBeforeComplete installs the run owner's cleanup barrier before execution.
+// It runs after all steps, before publishing successful completion; an error
+// fails the run instead. The owner must make it idempotent for deferred cleanup
+// on failure/panic paths, which do not pass through successful completion.
+func (e *Executor) SetBeforeComplete(cleanup func() error) {
+	e.completionFinalizer.Cleanup = cleanup
 }
 
 // SetConvergenceDetector overrides the non-convergence detector. Tests use it
@@ -220,14 +232,16 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		}
 	}
 
-	// Mark run as completed. A failure here must emit a terminal failure rather
-	// than leaving a silent running row after every step has finished.
-	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
-	}
-	run.Status = types.RunCompleted
-	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
-	return nil
+	return e.completeRun(ctx, run, repo)
+}
+
+// completeRun is shared by Execute and both recovered completion paths. The
+// manager used to remove the worktree only in its defer, after Execute/Resume
+// had persisted and emitted completion, letting readers win that race under
+// contention. Cleanup must precede BOTH publications, not just the IPC event.
+func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) error {
+	e.completionFinalizer.OnEvent = e.onEvent
+	return e.completionFinalizer.Finalize(ctx, run, repo)
 }
 
 func (e *Executor) initializeRunScopes(runID string) {
@@ -320,8 +334,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		Log: func(message string) {
 			slog.Info("recovered approval gate reconciliation", "run_id", run.ID, "step", gate.step.Name(), "message", message)
 		},
-		LogChunk: func(string) {},
-		LogFile:  func(string) {},
+		LogChunk:           func(string) {},
+		LogFile:            func(string) {},
+		deferRunCompletion: e.completionFinalizer.Cleanup != nil,
 	}
 	if reconciled, reconcileErr := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx); reconciled {
 		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
@@ -437,7 +452,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			return e.failRun(run, repo, err, ctx)
 		}
 		if skipRemaining {
-			return e.skipRecoveredRemainder(run, repo, gate.index+1)
+			return e.skipRecoveredRemainder(ctx, run, repo, gate.index+1)
 		}
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
 	default:
@@ -524,18 +539,13 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 			return e.failRun(run, repo, err, ctx)
 		}
 		if skipRemaining {
-			return e.skipRecoveredRemainder(run, repo, index+1)
+			return e.skipRecoveredRemainder(ctx, run, repo, index+1)
 		}
 	}
-	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err), ctx)
-	}
-	run.Status = types.RunCompleted
-	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
-	return nil
+	return e.completeRun(ctx, run, repo)
 }
 
-func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int) error {
+func (e *Executor) skipRecoveredRemainder(ctx context.Context, run *db.Run, repo *db.Repo, start int) error {
 	results, err := e.db.GetStepsByRun(run.ID)
 	if err != nil {
 		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err))
@@ -549,12 +559,7 @@ func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int)
 		}
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", "", nil)
 	}
-	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err))
-	}
-	run.Status = types.RunCompleted
-	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
-	return nil
+	return e.completeRun(ctx, run, repo)
 }
 
 func recoveredStepDuration(step *db.StepResult) int64 {
@@ -719,6 +724,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
 		},
+		deferRunCompletion: e.completionFinalizer.Cleanup != nil,
 	}
 
 	nextTrigger := "initial"
@@ -1235,14 +1241,19 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
 	errMsg := err.Error()
+	cancelReason := ""
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
-			errMsg = cause.Error()
+			cancelReason = cause.Error()
+			if !errors.Is(err, cause) {
+				errMsg = cancelReason
+			}
 			break
 		}
 	}
 	runStatus := types.RunFailed
-	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {
+	if cancelReason == types.RunCancelReasonAbortedByUser || cancelReason == types.RunCancelReasonSuperseded ||
+		(cancelReason == "" && (errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded)) {
 		runStatus = types.RunCancelled
 	}
 	if dbErr := e.db.UpdateRunErrorStatus(run.ID, errMsg, runStatus); dbErr != nil {

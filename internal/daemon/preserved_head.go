@@ -98,20 +98,36 @@ func cleanupRunWorktreeWithSupervisor(ctx context.Context, d *db.DB, gateDir, wo
 	if err := supervisor.Terminate(ctx); err != nil {
 		return err
 	}
+	if _, err := os.Stat(workDir); err != nil {
+		if os.IsNotExist(err) {
+			if run == nil {
+				return nil
+			}
+			if verifyErr := git.VerifyExactRef(ctx, gateDir, git.RunHeadRef(run.ID), strings.TrimSpace(run.HeadSHA)); verifyErr != nil {
+				return recordCustodyFailure(d, run.ID, fmt.Errorf("worktree is absent and exact recorded head custody cannot be verified: %w", verifyErr))
+			}
+			return nil
+		}
+		return fmt.Errorf("inspect worktree before cleanup: %w", err)
+	}
 	if run != nil {
 		if preserveErr := preserveWorktreeHead(ctx, gateDir, workDir, run); preserveErr != nil {
-			retained := fmt.Errorf("%w: %w", errWorktreeRetainedForCustody, preserveErr)
-			msg := fmt.Sprintf("%s %v", db.RunCustodyDiagnosticMarker, preserveErr)
-			if dbErr := d.RecordRunCustodyDiagnostic(run.ID, msg); dbErr != nil {
-				return errors.Join(retained, fmt.Errorf("record cleanup preservation failure: %w", dbErr))
-			}
-			return retained
+			return recordCustodyFailure(d, run.ID, preserveErr)
 		}
 	}
 	if err := git.WorktreeRemove(ctx, gateDir, workDir); err != nil {
 		return err
 	}
 	return nil
+}
+
+func recordCustodyFailure(d *db.DB, runID string, cause error) error {
+	retained := fmt.Errorf("%w: %w", errWorktreeRetainedForCustody, cause)
+	msg := fmt.Sprintf("%s %v", db.RunCustodyDiagnosticMarker, cause)
+	if err := d.RecordRunCustodyDiagnostic(runID, msg); err != nil {
+		return errors.Join(retained, fmt.Errorf("record cleanup preservation failure: %w", err))
+	}
+	return retained
 }
 
 // staleHeadPreservation counts what a startup preservation pass actually did,
