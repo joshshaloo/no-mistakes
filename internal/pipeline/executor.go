@@ -232,18 +232,27 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		}
 	}
 
-	return e.completeRun(run, repo)
+	return e.completeRun(ctx, run, repo)
 }
 
 // completeRun is shared by Execute and both recovered completion paths. The
 // manager used to remove the worktree only in its defer, after Execute/Resume
 // had persisted and emitted completion, letting readers win that race under
 // contention. Cleanup must precede BOTH publications, not just the IPC event.
-func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
+func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) error {
+	var cleanupErr error
 	if e.beforeComplete != nil {
-		if err := e.beforeComplete(); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("complete run cleanup: %w", err))
+		cleanupErr = e.beforeComplete()
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		err := cause
+		if cleanupErr != nil {
+			err = errors.Join(cause, fmt.Errorf("complete run cleanup: %w", cleanupErr))
 		}
+		return e.failRun(run, repo, err, ctx)
+	}
+	if cleanupErr != nil {
+		return e.failRun(run, repo, fmt.Errorf("complete run cleanup: %w", cleanupErr))
 	}
 	if err := e.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
 		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
@@ -461,7 +470,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			return e.failRun(run, repo, err, ctx)
 		}
 		if skipRemaining {
-			return e.skipRecoveredRemainder(run, repo, gate.index+1)
+			return e.skipRecoveredRemainder(ctx, run, repo, gate.index+1)
 		}
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1)
 	default:
@@ -548,13 +557,13 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 			return e.failRun(run, repo, err, ctx)
 		}
 		if skipRemaining {
-			return e.skipRecoveredRemainder(run, repo, index+1)
+			return e.skipRecoveredRemainder(ctx, run, repo, index+1)
 		}
 	}
-	return e.completeRun(run, repo)
+	return e.completeRun(ctx, run, repo)
 }
 
-func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int) error {
+func (e *Executor) skipRecoveredRemainder(ctx context.Context, run *db.Run, repo *db.Repo, start int) error {
 	results, err := e.db.GetStepsByRun(run.ID)
 	if err != nil {
 		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err))
@@ -568,7 +577,7 @@ func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int)
 		}
 		e.emitStepEventWithFindingsDiffAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", "", nil)
 	}
-	return e.completeRun(run, repo)
+	return e.completeRun(ctx, run, repo)
 }
 
 func recoveredStepDuration(step *db.StepResult) int64 {
@@ -1250,14 +1259,19 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
 	errMsg := err.Error()
+	cancelReason := ""
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
-			errMsg = cause.Error()
+			cancelReason = cause.Error()
+			if !errors.Is(err, cause) {
+				errMsg = cancelReason
+			}
 			break
 		}
 	}
 	runStatus := types.RunFailed
-	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {
+	if cancelReason == types.RunCancelReasonAbortedByUser || cancelReason == types.RunCancelReasonSuperseded ||
+		(cancelReason == "" && (errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded)) {
 		runStatus = types.RunCancelled
 	}
 	if dbErr := e.db.UpdateRunErrorStatus(run.ID, errMsg, runStatus); dbErr != nil {

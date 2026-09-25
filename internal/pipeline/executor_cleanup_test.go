@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,87 @@ import (
 
 // A blocked cleanup is a deterministic scheduling gap: neither the durable
 // status nor the completion event may get ahead of worktree removal.
+func TestExecutor_CancellationDuringCompletionCleanup(t *testing.T) {
+	for _, cleanupFails := range []bool{false, true} {
+		name := "cleanup-succeeds"
+		if cleanupFails {
+			name = "cleanup-fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			exec := NewExecutor(database, p, nil, nil, nil, nil)
+			cleanupReached := make(chan struct{})
+			releaseCleanup := make(chan struct{})
+			cleanupErr := errors.New("cleanup refused")
+			exec.SetBeforeComplete(func() error {
+				close(cleanupReached)
+				<-releaseCleanup
+				if cleanupFails {
+					return cleanupErr
+				}
+				return nil
+			})
+			var terminalEvents []ipc.Event
+			exec.onEvent = func(event ipc.Event) {
+				if event.Type == ipc.EventRunCompleted {
+					terminalEvents = append(terminalEvents, event)
+				}
+			}
+			ctx, cancel := context.WithCancelCause(context.Background())
+			done := make(chan error, 1)
+			go func() {
+				done <- exec.Execute(ctx, run, repo, t.TempDir())
+			}()
+			select {
+			case <-cleanupReached:
+			case <-time.After(10 * time.Second):
+				t.Fatal("cleanup barrier was never reached")
+			}
+			cause := errors.New(types.RunCancelReasonAbortedByUser)
+			cancel(cause)
+			close(releaseCleanup)
+			var runErr error
+			select {
+			case runErr = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("executor did not finish after cleanup")
+			}
+			if runErr == nil || !strings.Contains(runErr.Error(), cause.Error()) {
+				t.Fatalf("Execute error = %v, want cancellation cause", runErr)
+			}
+			if cleanupFails && !strings.Contains(runErr.Error(), cleanupErr.Error()) {
+				t.Errorf("Execute error = %v, want cleanup diagnostic", runErr)
+			}
+			persisted, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Status != types.RunCancelled {
+				t.Errorf("final status = %s, want %s", persisted.Status, types.RunCancelled)
+			}
+			if persisted.Error == nil || !strings.Contains(*persisted.Error, cause.Error()) {
+				t.Errorf("durable error = %v, want cancellation cause", persisted.Error)
+			}
+			if cleanupFails && (persisted.Error == nil || !strings.Contains(*persisted.Error, cleanupErr.Error())) {
+				t.Errorf("durable error = %v, want cleanup diagnostic", persisted.Error)
+			}
+			if len(terminalEvents) != 1 {
+				t.Fatalf("terminal event count = %d, want 1", len(terminalEvents))
+			}
+			event := terminalEvents[0]
+			if event.Status == nil || *event.Status != string(types.RunCancelled) {
+				t.Errorf("terminal event = %+v, want cancelled", event)
+			}
+			if event.Error == nil || !strings.Contains(*event.Error, cause.Error()) {
+				t.Errorf("terminal event error = %v, want cancellation cause", event.Error)
+			}
+			if cleanupFails && (event.Error == nil || !strings.Contains(*event.Error, cleanupErr.Error())) {
+				t.Errorf("terminal event error = %v, want cleanup diagnostic", event.Error)
+			}
+		})
+	}
+}
+
 func TestExecutor_CompletionWaitsForCleanup(t *testing.T) {
 	for _, mode := range []string{"execute", "execute-skip", "resume", "resume-skip", "terminal-pr", "cleanup-error"} {
 		t.Run(mode, func(t *testing.T) {
