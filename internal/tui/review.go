@@ -45,7 +45,7 @@ func riskLevelStyle(level string) lipgloss.Style {
 	switch strings.ToLower(level) {
 	case "low":
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(ansiGreen))
-	case "medium":
+	case "medium", nmtypes.RiskStale:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(ansiYellow))
 	case "high":
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(ansiRed))

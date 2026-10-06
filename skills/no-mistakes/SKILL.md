@@ -198,6 +198,12 @@ Run the pipeline and decide on its findings as they come up:
      never mid-run to circumvent a gate. Do not leave the user at a `failed`
      outcome without either retrying or explaining what blocks it.
 
+If the run reports `risk: stale`, later changes invalidated the review
+assessment. Even with green CI, do not use the previous rating as merge
+authority. Obtain a fresh review before relying on a rating to authorize
+merging; the PR's STALE notice is not a low/medium rating. CI repairs remain
+allowed, and the original review rounds are historical evidence only.
+
 Before any post-pipeline local commit or fresh run, read the structured `branch_sync` object returned by AXI home, status, or a drive result.
 Only when its `next_action.code` is `sync`, run `no-mistakes axi sync` first.
 That guarded sync may be a strict fast-forward or a content-equivalent diverged advance that anchors the pre-sync head before moving the branch with reset semantics; genuine divergence stays blocked.

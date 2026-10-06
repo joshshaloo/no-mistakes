@@ -12,6 +12,25 @@ import (
 	"github.com/muesli/termenv"
 )
 
+func TestApplyEvent_LiveReviewRiskInvalidationReplacesLowRating(t *testing.T) {
+	run := testRunWithCI()
+	m := NewModel("", nil, run)
+	stepName := types.StepReview
+	status := string(types.StepStatusCompleted)
+	low := `{"findings":[],"risk_level":"low","risk_rationale":"reviewed"}`
+	m.applyEvent(ipc.Event{Type: ipc.EventStepCompleted, StepName: &stepName, Status: &status, Findings: &low})
+	if got := stripANSI(renderFindings(m.stepFindings[types.StepReview], 80)); !strings.Contains(got, "Risk: LOW") {
+		t.Fatalf("live view did not start with LOW: %s", got)
+	}
+
+	stale := `{"findings":[],"risk_level":"stale","risk_rationale":"The reviewed risk assessment predates later tracked changes and is not merge authority."}`
+	m.applyEvent(ipc.Event{Type: ipc.EventStepCompleted, StepName: &stepName, Status: &status, Findings: &stale})
+	got := stripANSI(renderFindings(m.stepFindings[types.StepReview], 80))
+	if !strings.Contains(got, "Risk: STALE") || strings.Contains(got, "Risk: LOW") {
+		t.Fatalf("live view retained the superseded rating: %s", got)
+	}
+}
+
 func TestStaleShowDiff_ResetWhenNewFindingsArrive(t *testing.T) {
 	// Bug: if user was viewing diff for step A, then step B arrives with
 	// findings but no diff data, showDiff stays true from step A.

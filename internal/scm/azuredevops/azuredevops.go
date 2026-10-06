@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/notices"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
@@ -224,6 +225,141 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		return nil, fmt.Errorf("az repos pr update: %w", err)
 	}
 	return pr, nil
+}
+
+type azureThreadCreate struct {
+	Comments []azureThreadComment `json:"comments"`
+	Status   int                  `json:"status"`
+}
+
+type azureThreadComment struct {
+	ParentCommentID int    `json:"parentCommentId"`
+	Content         string `json:"content"`
+	CommentType     int    `json:"commentType"`
+}
+
+func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) error {
+	id := h.prID(pr)
+	if id == "" {
+		return errors.New("az devops invoke pullRequestThreads: missing PR id")
+	}
+	if h.project == "" || h.repo == "" {
+		return errors.New("az devops invoke pullRequestThreads: missing project or repository")
+	}
+
+	f, err := os.CreateTemp("", "nm-pr-notice-*.json")
+	if err != nil {
+		return fmt.Errorf("create PR notice temp file: %w", err)
+	}
+	path := f.Name()
+	defer os.Remove(path)
+	payload := azureThreadCreate{
+		Comments: []azureThreadComment{{
+			ParentCommentID: 0,
+			Content:         body,
+			CommentType:     1,
+		}},
+		Status: 1,
+	}
+	if err := json.NewEncoder(f).Encode(payload); err != nil {
+		f.Close()
+		return fmt.Errorf("write PR notice temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close PR notice temp file: %w", err)
+	}
+
+	args := []string{
+		"devops", "invoke",
+		"--area", "git",
+		"--resource", "pullRequestThreads",
+		"--route-parameters", "project=" + h.project, "repositoryId=" + h.repo, "pullRequestId=" + id,
+		"--http-method", "POST",
+		"--api-version", "7.1",
+		"--in-file", path,
+	}
+	args = append(args, h.orgArgs()...)
+	args = append(args, "--output", "none")
+	if out, err := shellenv.CombinedOutputShellCommand(h.cmd(ctx, "az", args...)); err != nil {
+		return fmt.Errorf("az devops invoke pullRequestThreads: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) {
+	id := h.prID(pr)
+	if id == "" {
+		return nil, errors.New("az devops invoke pullRequestThreads: missing PR id")
+	}
+	if h.project == "" || h.repo == "" {
+		return nil, errors.New("az devops invoke pullRequestThreads: missing project or repository")
+	}
+	args := []string{
+		"devops", "invoke",
+		"--area", "git",
+		"--resource", "pullRequestThreads",
+		"--route-parameters", "project=" + h.project, "repositoryId=" + h.repo, "pullRequestId=" + id,
+		"--http-method", "GET",
+		"--api-version", "7.1",
+	}
+	args = append(args, h.orgArgs()...)
+	args = append(args, "--output", "json")
+	out, err := notices.RunCommand(h.cmd(ctx, "az", args...), "read Azure PR notices")
+	if err != nil {
+		return nil, err
+	}
+	// The 7.1 pull-request-threads List contract returns all threads in one
+	// response and documents no pagination parameters or continuation token:
+	// https://learn.microsoft.com/rest/api/azure/devops/git/pull-request-threads/list?view=azure-devops-rest-7.1
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(out, &envelope); err != nil {
+		return nil, fmt.Errorf("parse Azure PR threads: %w", err)
+	}
+	for field := range envelope {
+		if field != "count" && field != "value" {
+			return nil, fmt.Errorf("parse Azure PR threads: unexpected field %q; response completeness is unknown", field)
+		}
+	}
+	countRaw, hasCount := envelope["count"]
+	valueRaw, hasValue := envelope["value"]
+	if !hasCount || !hasValue {
+		missing := "count"
+		if hasCount {
+			missing = "value"
+		}
+		return nil, fmt.Errorf("parse Azure PR threads: missing %s field; response completeness is unknown", missing)
+	}
+	var count int
+	if err := json.Unmarshal(countRaw, &count); err != nil || count < 0 {
+		return nil, fmt.Errorf("parse Azure PR threads: invalid count field")
+	}
+	var threads []struct {
+		Comments *[]struct {
+			Content string `json:"content"`
+		} `json:"comments"`
+	}
+	if err := json.Unmarshal(valueRaw, &threads); err != nil || threads == nil {
+		return nil, fmt.Errorf("parse Azure PR threads: invalid value field")
+	}
+	if count != len(threads) {
+		return nil, fmt.Errorf("parse Azure PR threads: thread count %d does not match %d returned threads", count, len(threads))
+	}
+	if err := notices.ValidateCounts(1, 0); err != nil {
+		return nil, fmt.Errorf("read Azure PR notices: %w", err)
+	}
+	bodies := make([]string, 0)
+	for i, thread := range threads {
+		if thread.Comments == nil {
+			return nil, fmt.Errorf("parse Azure PR threads: thread %d is missing comments; response completeness is unknown", i)
+		}
+		if err := notices.ValidateCounts(1, len(bodies)+len(*thread.Comments)); err != nil {
+			return nil, fmt.Errorf("read Azure PR notices: %w", err)
+		}
+		for _, comment := range *thread.Comments {
+			bodies = append(bodies, comment.Content)
+		}
+	}
+	return bodies, nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {

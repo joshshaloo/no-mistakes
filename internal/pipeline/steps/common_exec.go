@@ -3,6 +3,7 @@ package steps
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -284,6 +285,15 @@ func runConfiguredStepShellCommandWithExtraEnv(sctx *pipeline.StepContext, comma
 		env = append(append([]string{}, sctx.Env...), extraEnv...)
 	}
 	output, exitCode, err := runShellCommandWithEnv(sctx.Ctx, sctx.WorkDir, env, cmdStr)
+	// Configured tools can edit files too, even when they fail. Finish the
+	// freshness check before returning control to the step, not after its
+	// outcome or the run's terminal status has been published.
+	// Standalone configured-command users (for example tool resolution probes)
+	// have no owning run and therefore no assessment to invalidate.
+	if sctx.Run != nil {
+		_, riskErr := pipeline.RefreshReviewRisk(sctx.Ctx, sctx.DB, sctx.Run.ID, sctx.WorkDir, "", sctx.ReviewRiskInvalidated)
+		err = errors.Join(err, riskErr)
+	}
 	if err != nil {
 		return output, exitCode, err
 	}

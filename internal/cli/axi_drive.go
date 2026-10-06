@@ -610,6 +610,9 @@ func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error
 		if rv.PRURL != "" {
 			merge = fmt.Sprintf("CI checks passed - the PR is ready. Ask the user to review and merge it: %s", rv.PRURL)
 		}
+		if rv.reviewRiskStale() {
+			merge = "CI checks passed, but the risk assessment is STALE. " + types.StaleRiskRationale
+		}
 		fixes := rv.fixRows()
 		fields = appendFixesField(fields, fixes)
 		help := append([]string{merge}, successReportHelp(fixes)...)

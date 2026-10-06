@@ -14,14 +14,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/notices"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 const (
 	minimumBKTVersion  = "0.30.0"
-	maxBKTJSONBytes    = 2 * 1024 * 1024
-	maxBKTStderrBytes  = 32 * 1024
+	maxBKTJSONBytes    = notices.MaxResponseBytes
+	maxBKTStderrBytes  = notices.MaxDiagnosticBytes
 	maxBKTVersionBytes = 4 * 1024
 	bktCommandTimeout  = 30 * time.Second
 	bktProbeTimeout    = 10 * time.Second
@@ -215,9 +216,11 @@ func (c *BKTClient) repoArgs(repo RepoRef) ([]string, error) {
 }
 
 type bktPullRequest struct {
-	ID     int    `json:"id"`
-	State  string `json:"state"`
-	Source struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	ID          int    `json:"id"`
+	State       string `json:"state"`
+	Source      struct {
 		Branch struct {
 			Name string `json:"name"`
 		} `json:"branch"`
@@ -334,6 +337,49 @@ func (c *BKTClient) UpdatePR(ctx context.Context, repo RepoRef, prID int, title,
 	return c.GetPR(ctx, repo, prID)
 }
 
+func (c *BKTClient) AddPRComment(ctx context.Context, repo RepoRef, prID int, body string) error {
+	selectors, err := c.repoArgs(repo)
+	if err != nil {
+		return err
+	}
+	args := []string{"pr", "comment", strconv.Itoa(prID)}
+	args = append(args, selectors...)
+	args = append(args, "--text", body)
+	_, err = c.runPrefix(ctx, bktCommandTimeout, "PR comment", maxBKTJSONBytes, args...)
+	return err
+}
+
+func (c *BKTClient) ListPRComments(ctx context.Context, repo RepoRef, prID int) ([]string, error) {
+	selectors, err := c.repoArgs(repo)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{"pr", "comments", strconv.Itoa(prID)}
+	args = append(args, selectors...)
+	args = append(args, "--state", "all", "--json")
+	var comments []struct {
+		Text    string `json:"text"`
+		Content struct {
+			Raw string `json:"raw"`
+		} `json:"content"`
+	}
+	if err := c.runJSON(ctx, "PR comments", &comments, args...); err != nil {
+		return nil, err
+	}
+	if err := notices.ValidateCounts(1, len(comments)); err != nil {
+		return nil, fmt.Errorf("read bkt PR notices: %w", err)
+	}
+	bodies := make([]string, 0, len(comments))
+	for _, comment := range comments {
+		if comment.Content.Raw != "" {
+			bodies = append(bodies, comment.Content.Raw)
+		} else {
+			bodies = append(bodies, comment.Text)
+		}
+	}
+	return bodies, nil
+}
+
 func (c *BKTClient) GetPR(ctx context.Context, repo RepoRef, prID int) (*PullRequest, error) {
 	selectors, err := c.repoArgs(repo)
 	if err != nil {
@@ -379,6 +425,8 @@ func bktPRToPullRequest(repo RepoRef, pr bktPullRequest) (*PullRequest, error) {
 		}
 	}
 	return &PullRequest{
+		Title:            pr.Title,
+		Description:      pr.Description,
 		ID:               pr.ID,
 		URL:              prURL(repo, pr.ID, rawURL),
 		State:            strings.TrimSpace(pr.State),
@@ -579,6 +627,9 @@ func (c *BKTClient) run(ctx context.Context, timeout time.Duration, label string
 			return fmt.Errorf("bkt %s failed (exit code %d)", label, exitErr.ExitCode())
 		}
 		return fmt.Errorf("bkt %s failed: executable is unavailable", label)
+	}
+	if stderr.overflow {
+		return fmt.Errorf("bkt %s: %w: diagnostic output exceeds %d bytes", label, notices.ErrCapacity, maxBKTStderrBytes)
 	}
 	return nil
 }

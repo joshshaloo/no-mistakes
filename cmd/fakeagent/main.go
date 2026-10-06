@@ -14,6 +14,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,19 @@ func runGhForkPRStub(args []string) int {
 			repo = "parent/repo"
 		}
 		fmt.Printf("https://github.com/%s/pull/99\n", strings.TrimSuffix(repo, ".git"))
+		return 0
+	}
+	if len(args) >= 2 && args[0] == "pr" && args[1] == "comment" {
+		if len(args) < 3 || strings.HasPrefix(args[2], "-") || argAfter(args, "--repo") == "" || argAfter(args, "--body-file") != "-" {
+			fmt.Fprintln(os.Stderr, "fakeagent gh: notice requires explicit PR/repository and stdin body")
+			return 1
+		}
+		// Consume the entire notice just as gh does; returning before the
+		// caller finishes writing a large body can create a broken pipe.
+		if _, err := io.Copy(io.Discard, os.Stdin); err != nil {
+			fmt.Fprintf(os.Stderr, "fakeagent gh: read notice: %v\n", err)
+			return 1
+		}
 		return 0
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {

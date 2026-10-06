@@ -47,7 +47,8 @@ type StepContext struct {
 	Sessions *RunSessions
 	// Shared carries in-memory run-scoped results one step hands to a later
 	// step in the same run (e.g. the combined document+lint pass).
-	Shared *RunShared
+	Shared                *RunShared
+	ReviewRiskInvalidated func(string, *int64)
 
 	// Managed runs must leave completion to the executor's cleanup barrier,
 	// even when a step observes terminal PR truth before returning.

@@ -870,6 +870,10 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound) (statusLine, deta
 		return buildDetail(fmt.Sprintf("⚠️ **%s** - findings unavailable", name))
 	}
 
+	if sr.StepName == types.StepReview && riskLevel == types.RiskStale {
+		return buildDetail("⚠️ **Review** - STALE assessment; review required for post-review changes")
+	}
+
 	if sr.StepName == types.StepReview && (riskLevel == "medium" || riskLevel == "high") && !hadAnyFindings {
 		return buildDetail(fmt.Sprintf("%s **%s** - %s risk", riskEmoji(riskLevel), name, riskLevel))
 	}
@@ -935,6 +939,9 @@ func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) 
 			return ""
 		}
 
+		if src.RiskLevel == types.RiskStale {
+			return "⚠️ STALE: " + types.StaleRiskRationale
+		}
 		emoji := riskEmoji(src.RiskLevel)
 		label := capitalizeRisk(src.RiskLevel)
 		if src.RiskRationale != "" {
@@ -956,7 +963,7 @@ func riskEmoji(level string) string {
 	switch level {
 	case "low":
 		return "✅"
-	case "medium":
+	case "medium", types.RiskStale:
 		return "⚠️"
 	case "high":
 		return "🚨"

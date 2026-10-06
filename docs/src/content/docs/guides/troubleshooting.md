@@ -228,7 +228,7 @@ Check the [Provider Integration](/no-mistakes/guides/provider-integration/) requ
 - Only one direct Bitbucket credential variable is set; complete the pair or unset both to select `bkt`
 - `bkt auth status` reports no Keychain-backed Cloud context, a Data Center/mismatched host, or an ambient token source; re-authenticate `bkt` to `bitbucket.org` through Keychain
 - Upstream is on a host that isn't supported (GitHub, GitLab, `bitbucket.org`, or Azure DevOps)
-- Self-hosted GitHub Enterprise on a hostname that is not `github.com` isn't detected because `gh` isn't configured for the host; run `gh auth login --hostname your-ghe.example.com` so detection finds it. Once detection succeeds, the availability check is host-scoped (`gh auth status --hostname your-ghe.example.com`), so a stale token on `github.com` or any other configured gh host can no longer falsely mark the GHE repo as unauthenticated.
+- GitHub Enterprise is currently refused before PR notice publication or related PR mutation because the validation-notice path has only been verified on `github.com`; see the [CI provider contract](/no-mistakes/reference/pipeline-steps/#ci).
 - Self-hosted GitLab on a hostname with no `gitlab` marker isn't detected because `glab` isn't configured for the host; run `glab auth login --hostname your-gitlab.example.com` so detection finds it. Once detection succeeds, the availability check is host-scoped (`glab auth status --hostname your-gitlab.example.com`), so a stale token on `gitlab.com` or any other configured glab host can no longer falsely mark the self-hosted repo as unauthenticated.
 - A GitLab, Bitbucket, or Azure DevOps repo record has a fork URL set; fork MR/PR routing is currently GitHub-only
 - You pushed the default branch (PR step always skips on the default branch)
@@ -238,7 +238,7 @@ Check the [Provider Integration](/no-mistakes/guides/provider-integration/) requ
 Symptom: CI step keeps monitoring an open PR longer than expected, or pauses after the idle timeout.
 
 Monitoring while the PR remains open - even after checks are currently healthy - is intended behavior, because a later default-branch update can make the PR conflict or rerun CI.
-Once checks are green and the PR is mergeable, the CI panel shows `✓ Checks passed` and the terminal title switches to `Checks passed`, so you can tell when to go merge the PR; the signal clears automatically if checks start re-running or a new failure appears.
+Once checks are green and the PR is mergeable, the CI panel shows `✓ Checks passed` and the terminal title switches to `Checks passed`; the signal clears automatically if checks start re-running or a new failure appears. If the review rating is `STALE`, green checks are not merge authority; follow the [risk freshness guidance](/no-mistakes/reference/pipeline-steps/#risk-assessment-freshness).
 
 How long the monitor runs is controlled by `ci_timeout` in `~/.no-mistakes/config.yaml`, an idle timeout that re-arms whenever the upstream default branch advances; the [`ci_timeout` field reference](/no-mistakes/reference/global-config/#ci_timeout) owns the default, the `unlimited` keyword and its aliases, and the exact re-arm semantics.
 Older config files may still contain an explicit `ci_timeout: "4h"` value; update it if you want the newer default behavior.

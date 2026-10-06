@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/kunchenguid/no-mistakes/internal/notices"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
@@ -499,6 +500,66 @@ func TestBKTClientMalformedJSONTimeoutCancellationAndBoundedOutput(t *testing.T)
 		}
 		if strings.Contains(fmt.Sprint(fake.snapshotCalls()), fakeSecret) {
 			t.Fatalf("command arguments leaked fixture secret: %q", fake.snapshotCalls())
+		}
+	})
+}
+
+func TestBKTClientSuccessfulCommandStderrCapacityIsEnforced(t *testing.T) {
+	t.Run("overflow refuses valid JSON before decode", func(t *testing.T) {
+		client, _ := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
+			return fakeBKTResult{
+				stdout: `{"value":"provider-data"}`,
+				stderr: strings.Repeat("x", maxBKTStderrBytes+1),
+			}
+		})
+		if err := client.Available(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		destination := struct {
+			Value string `json:"value"`
+		}{Value: "unchanged"}
+		err := client.runJSON(context.Background(), "bounded response", &destination, "fixture")
+		if !errors.Is(err, notices.ErrCapacity) || !strings.Contains(err.Error(), "diagnostic output") {
+			t.Fatalf("error = %v, want named diagnostic capacity error", err)
+		}
+		if destination.Value != "unchanged" {
+			t.Fatalf("destination was decoded after stderr overflow: %q", destination.Value)
+		}
+	})
+
+	t.Run("exact limit and normal diagnostics succeed", func(t *testing.T) {
+		for _, stderr := range []string{"diagnostic", strings.Repeat("x", maxBKTStderrBytes)} {
+			client, _ := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
+				return fakeBKTResult{stdout: `{"value":"provider-data"}`, stderr: stderr}
+			})
+			if err := client.Available(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			var destination struct {
+				Value string `json:"value"`
+			}
+			if err := client.runJSON(context.Background(), "bounded response", &destination, "fixture"); err != nil {
+				t.Fatalf("stderr length %d: %v", len(stderr), err)
+			}
+			if destination.Value != "provider-data" {
+				t.Fatalf("decoded value = %q", destination.Value)
+			}
+		}
+	})
+
+	t.Run("notice read propagates diagnostic overflow", func(t *testing.T) {
+		client, _ := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
+			return fakeBKTResult{stdout: `[]`, stderr: strings.Repeat("x", maxBKTStderrBytes+1)}
+		})
+		if err := client.Available(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		comments, err := client.ListPRComments(context.Background(), RepoRef{Workspace: "envy-forge", RepoSlug: "app"}, 42)
+		if !errors.Is(err, notices.ErrCapacity) || !strings.Contains(err.Error(), "PR comments") {
+			t.Fatalf("error = %v, want PR comments capacity error", err)
+		}
+		if comments != nil {
+			t.Fatalf("comments = %#v, want nil after overflow", comments)
 		}
 	})
 }
