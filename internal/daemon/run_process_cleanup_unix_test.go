@@ -81,10 +81,18 @@ func TestRunCleanupKillsBackgroundChildBeforeRemovingWorktree(t *testing.T) {
 		t.Fatalf("background child %d not running before cleanup (ok=%v err=%v)", pid, ok, err)
 	}
 
+	t.Cleanup(func() { waitForRunDone(t, mgr, runID) })
 	close(step.release)
-	waitForRunDone(t, mgr, runID)
-	waitForWorktreeRemoved(t, p.WorktreeDir(repo.ID, runID))
-	waitForTestProcessExit(t, pid)
+	run := waitForRunTerminalState(t, database, runID)
+	if run.Status != types.RunCompleted {
+		t.Fatalf("run status = %s, want completed: %v", run.Status, run.Error)
+	}
+	if _, err := os.Stat(p.WorktreeDir(repo.ID, runID)); !os.IsNotExist(err) {
+		t.Fatalf("completed run still has its worktree: %v", err)
+	}
+	if alive, err := processRunning(pid); err != nil || alive {
+		t.Fatalf("completed run still has live child %d: alive=%v err=%v", pid, alive, err)
+	}
 }
 
 func TestRunCleanupDoesNotKillDaemonOrSiblingRun(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -137,11 +138,11 @@ func TestGetCIAttemptIdentityBoundsAuthoritativeAPIReads(t *testing.T) {
 	checks := []scm.Check{{Name: "build", DetailsURL: "https://github.com/test/repo/actions/runs/123/job/456"}}
 
 	tests := []struct {
-		name        string
-		job         githubTestResponse
-		attempt     githubTestResponse
-		cancelAfter time.Duration
-		want        string
+		name           string
+		job            githubTestResponse
+		attempt        githubTestResponse
+		cancelEndpoint string
+		want           string
 	}{
 		{name: "job stdout overflow", job: githubTestResponse{stdoutBytes: notices.MaxResponseBytes + 1}, want: "response exceeds"},
 		{name: "job diagnostic overflow", job: githubTestResponse{stdout: validJob, stderrBytes: notices.MaxDiagnosticBytes + 1}, want: "diagnostic output exceeds"},
@@ -149,20 +150,55 @@ func TestGetCIAttemptIdentityBoundsAuthoritativeAPIReads(t *testing.T) {
 		{name: "attempt diagnostic overflow", job: githubTestResponse{stdout: validJob}, attempt: githubTestResponse{stdout: validAttempt, stderrBytes: notices.MaxDiagnosticBytes + 1}, want: "diagnostic output exceeds"},
 		{name: "job malformed", job: githubTestResponse{stdout: `{"id":`}, want: "parse response"},
 		{name: "attempt malformed", job: githubTestResponse{stdout: validJob}, attempt: githubTestResponse{stdout: `{"id":`}, want: "parse response"},
-		{name: "job cancellation", job: githubTestResponse{delay: 10 * time.Second}, cancelAfter: 50 * time.Millisecond, want: "read GitHub API repos/test/repo/actions/jobs/456"},
-		{name: "attempt cancellation", job: githubTestResponse{stdout: validJob}, attempt: githubTestResponse{delay: 10 * time.Second}, cancelAfter: 50 * time.Millisecond, want: "read GitHub API repos/test/repo/actions/runs/123/attempts/2"},
+		{name: "job cancellation", job: githubTestResponse{delay: 10 * time.Second}, cancelEndpoint: jobEndpoint, want: "read GitHub API repos/test/repo/actions/jobs/456"},
+		{name: "attempt cancellation", job: githubTestResponse{stdout: validJob}, attempt: githubTestResponse{delay: 10 * time.Second}, cancelEndpoint: attemptEndpoint, want: "read GitHub API repos/test/repo/actions/runs/123/attempts/2"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			responses := map[string]githubTestResponse{jobEndpoint: tc.job, attemptEndpoint: tc.attempt}
-			host := New(githubTestCmdFactory(responses), nil, "github.com", "test/repo")
 			ctx := context.Background()
-			if tc.cancelAfter > 0 {
+			var cancelledAtEndpoint chan error
+			if tc.cancelEndpoint != "" {
 				var cancel context.CancelFunc
-				ctx, cancel = context.WithTimeout(ctx, tc.cancelAfter)
+				ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
 				defer cancel()
+				readyFile := filepath.Join(t.TempDir(), "request-started")
+				response := responses[tc.cancelEndpoint]
+				response.readyFile = readyFile
+				responses[tc.cancelEndpoint] = response
+				cancelledAtEndpoint = make(chan error, 1)
+				// The full race suite can take longer than 50ms merely to start
+				// the preceding job lookup. Cancel the intended running request,
+				// not whichever lookup happened to be active at a wall-clock deadline.
+				go func() {
+					ticker := time.NewTicker(time.Millisecond)
+					defer ticker.Stop()
+					for {
+						if _, err := os.Stat(readyFile); err == nil {
+							cancel()
+							cancelledAtEndpoint <- nil
+							return
+						} else if !os.IsNotExist(err) {
+							cancel()
+							cancelledAtEndpoint <- err
+							return
+						}
+						select {
+						case <-ctx.Done():
+							cancelledAtEndpoint <- ctx.Err()
+							return
+						case <-ticker.C:
+						}
+					}
+				}()
 			}
+			host := New(githubTestCmdFactory(responses), nil, "github.com", "test/repo")
 			identity, err := host.GetCIAttemptIdentity(ctx, &scm.PR{Number: "123"}, "abc123", checks)
+			if cancelledAtEndpoint != nil {
+				if startErr := <-cancelledAtEndpoint; startErr != nil {
+					t.Fatalf("did not reach intended cancellation endpoint: %v", startErr)
+				}
+			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("identity = %q, error = %v, want named refusal containing %q", identity, err, tc.want)
 			}
@@ -608,6 +644,7 @@ type githubTestResponse struct {
 	wantStdin   string
 	stdoutBytes int
 	stderrBytes int
+	readyFile   string
 	delay       time.Duration
 	code        int
 }
@@ -625,6 +662,7 @@ func githubTestCmdFactory(responses map[string]githubTestResponse) CmdFactory {
 			"GITHUB_TEST_STDOUT="+response.stdout,
 			"GITHUB_TEST_STDERR="+response.stderr,
 			"GITHUB_TEST_WANT_STDIN="+response.wantStdin,
+			"GITHUB_TEST_READY_FILE="+response.readyFile,
 			fmt.Sprintf("GITHUB_TEST_STDOUT_BYTES=%d", response.stdoutBytes),
 			fmt.Sprintf("GITHUB_TEST_STDERR_BYTES=%d", response.stderrBytes),
 			fmt.Sprintf("GITHUB_TEST_DELAY=%s", response.delay),
@@ -647,6 +685,12 @@ func TestGitHubHelperProcess(t *testing.T) {
 		}
 		if string(got) != want {
 			fmt.Fprintf(os.Stderr, "stdin = %q, want %q", string(got), want)
+			os.Exit(1)
+		}
+	}
+	if readyFile := os.Getenv("GITHUB_TEST_READY_FILE"); readyFile != "" {
+		if err := os.WriteFile(readyFile, []byte("started"), 0o600); err != nil {
+			fmt.Fprintf(os.Stderr, "signal request start: %v", err)
 			os.Exit(1)
 		}
 	}

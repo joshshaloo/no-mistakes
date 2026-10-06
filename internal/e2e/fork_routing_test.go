@@ -75,10 +75,19 @@ func TestForkRouting(t *testing.T) {
 	}
 
 	invocations := readGHStubInvocations(t, ghLog)
-	var sawParentCreate bool
+	var sawParentCreate, sawParentNotice bool
 	for _, inv := range invocations {
 		if len(inv.Args) >= 2 && inv.Args[0] == "pr" && inv.Args[1] == "list" && strings.Contains(inv.Head, ":") {
 			t.Fatalf("gh pr list used unsupported owner-qualified head: %+v", inv)
+		}
+		if len(inv.Args) >= 2 && inv.Args[0] == "pr" && inv.Args[1] == "edit" {
+			t.Fatalf("pipeline rewrote a PR instead of appending a notice: %+v", inv)
+		}
+		if len(inv.Args) >= 2 && inv.Args[0] == "pr" && inv.Args[1] == "comment" {
+			if len(inv.Args) < 3 || inv.Args[2] != "99" || inv.Repo != "parent-owner/no-mistakes" {
+				t.Fatalf("validation notice did not target the exact parent PR: %+v", inv)
+			}
+			sawParentNotice = true
 		}
 		if len(inv.Args) >= 2 && inv.Args[0] == "pr" && inv.Args[1] == "create" {
 			if inv.Repo == "fork-owner/no-mistakes" {
@@ -91,6 +100,9 @@ func TestForkRouting(t *testing.T) {
 	}
 	if !sawParentCreate {
 		t.Fatalf("did not see parent PR create with fork owner head in gh log: %+v", invocations)
+	}
+	if !sawParentNotice {
+		t.Fatalf("did not see append-only parent PR notice in gh log: %+v", invocations)
 	}
 }
 

@@ -86,6 +86,7 @@ When a push arrives via the post-receive hook:
 3. Streams events to any connected TUI clients and serves request/response state to AXI clients
 4. When the run finishes (success or failure), terminates that run's own process groups first - `SIGTERM`, a bounded grace period, then `SIGKILL` for survivors, or a forced process-tree kill on Windows - so nothing it started is still holding the worktree or a port. This happens even when the head check below retains the worktree
 5. Removes the worktree, but only after byte-verifying that the run's exact recorded head is pinned under its own gate reference
+6. Publishes successful run completion only after that cleanup finishes, including for resumed runs and merged/closed PR observations. If cleanup cannot safely remove the worktree, the run fails with a cleanup diagnostic instead of reporting success
 
 Pipeline agents are prompted to keep intentional writes inside that detached worktree and avoid changing system state outside it, such as Homebrew packages, apps under `/Applications`, or global tool configuration.
 That reduces surprising machine-level side effects and macOS App Management prompts, but it is prompt steering rather than a true sandbox.
@@ -118,7 +119,7 @@ reason about in one long-lived process than inside independent hook invocations.
 
 On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
 
-- Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
+- Reconciles legacy active rows whose persisted PR state is already `merged` or `closed` before active-run recovery and parked-run planning. The same successful-completion barrier removes the worktree before marking the run and CI step completed; cleanup refusal fails the run and retains its custody evidence
 - Inspects every stale run's worktree and pins its exact head before marking the run terminal, so no cleanup path can ever be the last reference to pipeline commits
 - Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked
