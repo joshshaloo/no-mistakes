@@ -354,8 +354,20 @@ func (d *DB) SetRunPushActive(id string, active bool) error {
 // A merged or closed PR is also the terminal outcome of the final CI monitor
 // step, so the PR observation and active-run finalization are committed in one
 // transaction. This makes the database authoritative even if execution stops
-// before the executor's ordinary follow-up completion write.
+// before the executor's ordinary follow-up completion write. Managed executions
+// use ObserveRunPRState instead so their cleanup barrier owns completion.
 func (d *DB) UpdateRunPRState(id, state string) error {
+	return d.updateRunPRState(id, state, true)
+}
+
+// ObserveRunPRState records PR truth without completing an executing run. Its
+// owner must finish step bookkeeping and remove the worktree before publishing
+// completion. Startup recovers the observation through the same finalizer.
+func (d *DB) ObserveRunPRState(id, state string) error {
+	return d.updateRunPRState(id, state, false)
+}
+
+func (d *DB) updateRunPRState(id, state string, finalize bool) error {
 	state = strings.ToLower(strings.TrimSpace(state))
 	ts := now()
 	tx, err := d.sql.Begin()
@@ -375,8 +387,8 @@ func (d *DB) UpdateRunPRState(id, state string) error {
 	if _, err := tx.Exec(`UPDATE runs SET pr_state = ?, pr_state_observed_at = ?, updated_at = ? WHERE id = ?`, state, ts, ts, id); err != nil {
 		return fmt.Errorf("update run PR state: %w", err)
 	}
-	if terminalPRState(state) {
-		if err := finalizeTerminalPRRun(tx, id, ts); err != nil {
+	if finalize && terminalPRState(state) {
+		if err := completeTerminalPRRun(tx, id, ts); err != nil {
 			return fmt.Errorf("update run PR state: %w", err)
 		}
 	}
@@ -386,47 +398,44 @@ func (d *DB) UpdateRunPRState(id, state string) error {
 	return nil
 }
 
-// ReconcileTerminalPRRuns repairs active rows written by an older or
-// interrupted daemon after terminal PR truth became durable but before the
-// separate run completion write. It is called during exclusive daemon startup
-// before parked-run planning and generic crash recovery.
-func (d *DB) ReconcileTerminalPRRuns() (int, error) {
+func (d *DB) TerminalPRCompletionCandidates() ([]*Run, error) {
+	rows, err := d.sql.Query(`SELECT `+runColumns+` FROM runs WHERE status IN (?, ?) AND pr_state IN ('merged', 'closed')`, types.RunPending, types.RunRunning)
+	if err != nil {
+		return nil, fmt.Errorf("list terminal PR completion candidates: %w", err)
+	}
+	defer rows.Close()
+	var runs []*Run
+	for rows.Next() {
+		run := &Run{}
+		if err := scanRun(rows, run); err != nil {
+			return nil, fmt.Errorf("scan terminal PR completion candidate: %w", err)
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list terminal PR completion candidates: %w", err)
+	}
+	return runs, nil
+}
+
+func (d *DB) CompleteSuccessfulRun(id string, completeTerminalPRStep bool) error {
 	ts := now()
 	tx, err := d.sql.Begin()
 	if err != nil {
-		return 0, fmt.Errorf("reconcile terminal PR runs: begin transaction: %w", err)
+		return fmt.Errorf("complete successful run: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
-
-	rows, err := tx.Query(`SELECT id FROM runs WHERE status IN (?, ?) AND pr_state IN ('merged', 'closed')`, types.RunPending, types.RunRunning)
-	if err != nil {
-		return 0, fmt.Errorf("reconcile terminal PR runs: list runs: %w", err)
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return 0, fmt.Errorf("reconcile terminal PR runs: scan run: %w", err)
+	if completeTerminalPRStep {
+		if err := completeTerminalPRRun(tx, id, ts); err != nil {
+			return fmt.Errorf("complete successful run: %w", err)
 		}
-		ids = append(ids, id)
-	}
-	if err := rows.Close(); err != nil {
-		return 0, fmt.Errorf("reconcile terminal PR runs: close rows: %w", err)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("reconcile terminal PR runs: list runs: %w", err)
-	}
-
-	for _, id := range ids {
-		if err := finalizeTerminalPRRun(tx, id, ts); err != nil {
-			return 0, fmt.Errorf("reconcile terminal PR runs: %w", err)
-		}
+	} else if _, err := tx.Exec(`UPDATE runs SET status = ?, push_active = 0, updated_at = ? WHERE id = ?`, types.RunCompleted, ts, id); err != nil {
+		return fmt.Errorf("complete successful run: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("reconcile terminal PR runs: commit: %w", err)
+		return fmt.Errorf("complete successful run: commit: %w", err)
 	}
-	return len(ids), nil
+	return nil
 }
 
 func monotonicPRState(current, observed string) string {
@@ -448,7 +457,7 @@ func terminalPRState(state string) bool {
 	return state == "merged" || state == "closed"
 }
 
-func finalizeTerminalPRRun(tx *sql.Tx, id string, ts int64) error {
+func completeTerminalPRRun(tx *sql.Tx, id string, ts int64) error {
 	if _, err := tx.Exec(
 		`UPDATE step_results SET status = ?, exit_code = COALESCE(exit_code, 0), completed_at = COALESCE(completed_at, ?),
 			last_activity_at = ?, last_activity = ?, agent_pid = NULL

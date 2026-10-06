@@ -89,7 +89,7 @@ First inspect each listed run with `no-mistakes axi status --run <id>`.
 A parked CI gate can clear itself after its PR becomes terminal, including after a daemon restart.
 The [`ci_timeout` reference](/no-mistakes/reference/global-config/#ci_timeout) owns the exact fail-closed reconciliation rules, and [Daemon & Worktrees](/no-mistakes/concepts/daemon/#crash-recovery) owns restart behavior.
 
-After upgrading from an older release, starting the daemon automatically completes stale active rows that already have a persisted merged or closed PR state.
+After upgrading from an older release, starting the daemon reconciles stale active rows that already have a persisted merged or closed PR state through the documented crash-recovery cleanup barrier.
 Do not edit `state.sqlite` directly.
 
 Only when you have confirmed it is acceptable for every remaining listed active run to fail, force the lifecycle operation:

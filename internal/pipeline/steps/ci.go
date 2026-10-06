@@ -89,7 +89,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	}
 	switch state {
 	case scm.PRStateMerged:
-		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
+		if err := sctx.UpdateRunPRState("merged"); err != nil {
 			return false, err
 		}
 		if sctx.Log != nil {
@@ -97,7 +97,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		}
 		return true, nil
 	case scm.PRStateClosed:
-		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
+		if err := sctx.UpdateRunPRState("closed"); err != nil {
 			return false, err
 		}
 		if sctx.Log != nil {
@@ -105,7 +105,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		}
 		return true, nil
 	case scm.PRStateOpen:
-		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
+		if err := sctx.UpdateRunPRState("open"); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -256,19 +256,19 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			sctx.Log(fmt.Sprintf("warning: could not check PR state: %v", err))
 			prStateKnown = false
 		} else if state == scm.PRStateMerged {
-			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
+			if err := sctx.UpdateRunPRState("merged"); err != nil {
 				return nil, err
 			}
 			sctx.Log("PR has been merged!")
 			return &pipeline.StepOutcome{}, nil
 		} else if state == scm.PRStateClosed {
-			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
+			if err := sctx.UpdateRunPRState("closed"); err != nil {
 				return nil, err
 			}
 			sctx.Log("PR has been closed")
 			return &pipeline.StepOutcome{}, nil
 		} else if state == scm.PRStateOpen {
-			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
+			if err := sctx.UpdateRunPRState("open"); err != nil {
 				return nil, err
 			}
 		}
