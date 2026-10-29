@@ -11,11 +11,12 @@ commands:
   lint: "make lint"
   format: "gofmt -w ."
 
-# Pin review auto-fix to the product default so this repo does not inherit an
-# operator's global override. Review findings park for a human decision; other
-# steps keep their configured behavior.
+# Review and CI findings park for a decision instead of inheriting an
+# operator's global repair override. In particular, an unscoped CI repair must
+# not undo reviewed upstream release metadata to satisfy a failing check.
 auto_fix:
   review: 0
+  ci: 0
 
 # Documentation ownership map for the document step's placement policy.
 document:

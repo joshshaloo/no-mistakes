@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -27,6 +28,33 @@ func TestGuardGeneratedFilesWorkflowCoversReleasePleaseArtifacts(t *testing.T) {
 		if _, err := os.Stat(path); err != nil {
 			t.Errorf("guarded path %q not present in repo: %v", path, err)
 		}
+	}
+}
+
+// Keep the import policy's tag in one place, separate from release-please's
+// own version lifecycle. The workflow must resolve it from the immutable head.
+func TestGuardGeneratedFilesWorkflowUsesSingleUpstreamPin(t *testing.T) {
+	pin, err := os.ReadFile(".github/upstream-release-tag")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tag := strings.TrimSpace(string(pin))
+	if !regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(tag) {
+		t.Fatalf("invalid upstream release pin %q", tag)
+	}
+	data, err := os.ReadFile(".github/workflows/guard-generated-files.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, `git show "${HEAD_SHA}:.github/upstream-release-tag"`) {
+		t.Fatal("guard must read the release pin from the PR head")
+	}
+	if strings.Contains(content, tag) {
+		t.Fatal("workflow must not duplicate the tag pin")
+	}
+	if !strings.Contains(content, "https://github.com/kunchenguid/no-mistakes.git") {
+		t.Fatal("guard must fetch the canonical upstream, not trust a fork's same-named tag")
 	}
 }
 
