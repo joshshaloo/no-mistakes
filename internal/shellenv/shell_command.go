@@ -23,6 +23,13 @@ type shellOutputPipe struct {
 // ConfigureCooperativeShellCommand so clean exits and ordinary errors get the
 // same process-tree cleanup as context cancellation.
 func RunShellCommand(cmd *exec.Cmd) error {
+	// Even commands that deliberately remain in the caller's process group need
+	// a pipe backstop. After context cancellation, a helper process can inherit
+	// stdout or stderr from the direct child and otherwise keep cmd.Wait blocked
+	// forever (notably git's transport helpers on Windows).
+	if cmd.WaitDelay == 0 {
+		cmd.WaitDelay = 5 * time.Second
+	}
 	pipes, err := prepareShellOutputPipes(cmd)
 	if err != nil {
 		return err

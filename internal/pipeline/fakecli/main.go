@@ -42,8 +42,8 @@ func handleFakeCLI(mode string) {
 		}
 	}
 	logFakeCLIStdinBody(args, logFile)
-	fakeNoticeCommands(args)
-	fakeActionsAttemptCommands(args)
+	fakeNoticeCommands(mode, args)
+	fakeActionsAttemptCommands(mode, args)
 
 	switch mode {
 	case "gh":

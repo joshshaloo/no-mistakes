@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -12,9 +11,13 @@ import (
 // Explicitly opted-in fixtures supply the two REST proofs used by stale-risk
 // readiness. Do not turn arbitrary Actions endpoints into successful evidence:
 // the repository, job, run, attempt, check name and head must all agree.
-func fakeActionsAttemptCommands(args []string) {
+func fakeGitHubMode(mode string) bool {
+	return mode == "gh" || strings.HasPrefix(mode, "ci-gh")
+}
+
+func fakeActionsAttemptCommands(mode string, args []string) {
 	head := os.Getenv("FAKE_CLI_ACTIONS_HEAD")
-	if head == "" || strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") != "gh" || len(args) != 2 || args[0] != "api" {
+	if head == "" || !fakeGitHubMode(mode) || len(args) != 2 || args[0] != "api" {
 		return
 	}
 	attempt := 1

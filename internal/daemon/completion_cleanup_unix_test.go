@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -45,6 +46,9 @@ func (s *unrecordedHeadStep) Execute(sctx *pipeline.StepContext) (*pipeline.Step
 }
 
 func TestStartupTerminalPRCompletionReapsOwnedProcesses(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("restart-time marker discovery is implemented through /proc on Linux")
+	}
 	for _, removeWorktreeFirst := range []bool{false, true} {
 		name := "worktree present"
 		if removeWorktreeFirst {

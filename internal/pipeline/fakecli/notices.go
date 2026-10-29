@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
 // Notice traffic is separate from description readback: posting a comment must
 // neither overwrite the PR body nor masquerade as its last --body argument.
-func fakeNoticeCommands(args []string) {
-	if strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") != "gh" || len(args) < 2 {
+func fakeNoticeCommands(mode string, args []string) {
+	if !fakeGitHubMode(mode) || len(args) < 2 {
 		return
 	}
 	path := os.Getenv("FAKE_CLI_RISK_BODY")
