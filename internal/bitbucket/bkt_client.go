@@ -255,6 +255,17 @@ type bktPRViewEnvelope struct {
 	PullRequest bktPullRequest `json:"pull_request"`
 }
 
+type bktPRCommentsEnvelope struct {
+	Workspace string `json:"workspace"`
+	Repo      string `json:"repo"`
+	Comments  []struct {
+		Text    string `json:"text"`
+		Content struct {
+			Raw string `json:"raw"`
+		} `json:"content"`
+	} `json:"comments"`
+}
+
 func (c *BKTClient) FindOpenPRBySourceBranch(ctx context.Context, repo RepoRef, branch, destBranch string) (*PullRequest, error) {
 	selectors, err := c.repoArgs(repo)
 	if err != nil {
@@ -324,7 +335,10 @@ func (c *BKTClient) UpdatePR(ctx context.Context, repo RepoRef, prID int, title,
 	}
 	args := []string{"pr", "edit", strconv.Itoa(prID)}
 	args = append(args, selectors...)
-	args = append(args, "--title", title, "--body", body, "--json")
+	if title != "" {
+		args = append(args, "--title", title)
+	}
+	args = append(args, "--body", body, "--json")
 	var envelope bktPRViewEnvelope
 	if err := c.runJSON(ctx, "PR update", &envelope, args...); err != nil {
 		return nil, err
@@ -360,20 +374,18 @@ func (c *BKTClient) ListPRComments(ctx context.Context, repo RepoRef, prID int) 
 	args := []string{"pr", "comments", strconv.Itoa(prID)}
 	args = append(args, selectors...)
 	args = append(args, "--state", "all", "--json")
-	var comments []struct {
-		Text    string `json:"text"`
-		Content struct {
-			Raw string `json:"raw"`
-		} `json:"content"`
-	}
-	if err := c.runJSON(ctx, "PR comments", &comments, args...); err != nil {
+	var envelope bktPRCommentsEnvelope
+	if err := c.runJSON(ctx, "PR comments", &envelope, args...); err != nil {
 		return nil, err
 	}
-	if err := notices.ValidateCounts(1, len(comments)); err != nil {
+	if err := validateRepoEnvelope(repo, envelope.Workspace, envelope.Repo); err != nil {
+		return nil, err
+	}
+	if err := notices.ValidateCounts(1, len(envelope.Comments)); err != nil {
 		return nil, fmt.Errorf("read bkt PR notices: %w", err)
 	}
-	bodies := make([]string, 0, len(comments))
-	for _, comment := range comments {
+	bodies := make([]string, 0, len(envelope.Comments))
+	for _, comment := range envelope.Comments {
 		if comment.Content.Raw != "" {
 			bodies = append(bodies, comment.Content.Raw)
 		} else {
