@@ -146,8 +146,10 @@ func TestFinalHeadVerification_ConfiguredTestUsesPinnedNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	resolvedNode := strings.TrimSpace(strings.Split(strings.ReplaceAll(string(resolved), "\r\n", "\n"), "\n")[0])
-	if !strings.EqualFold(resolvedNode, fakeNode) {
-		t.Fatalf("final verification used Node %q, want %q", resolvedNode, fakeNode)
+	resolvedInfo, resolvedErr := os.Stat(resolvedNode)
+	fakeInfo, fakeErr := os.Stat(fakeNode)
+	if resolvedErr != nil || fakeErr != nil || !os.SameFile(resolvedInfo, fakeInfo) {
+		t.Fatalf("final verification used Node %q, want %q (stat errors: %v, %v)", resolvedNode, fakeNode, resolvedErr, fakeErr)
 	}
 }
 

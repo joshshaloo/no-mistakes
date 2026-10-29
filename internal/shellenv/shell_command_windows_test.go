@@ -79,12 +79,12 @@ func TestConfigureCooperativeShellCommandPreservesRawCommandLine(t *testing.T) {
 		CmdLine: `"` + cmd.Path + `" /d /s /c "echo "raw value""`,
 	}
 	ConfigureCooperativeShellCommand(cmd)
-	if cmd.SysProcAttr.CmdLine != "" {
-		t.Fatal("the helper must use its own argv, not the target's raw command line")
-	}
 	out, err := CombinedOutputShellCommand(cmd)
 	if err != nil || strings.TrimSpace(string(out)) != `"raw value"` {
 		t.Fatalf("raw command line: output=%q, err=%v", out, err)
+	}
+	if cmd.SysProcAttr.CmdLine != "" {
+		t.Fatal("the helper must use its own argv, not the target's raw command line")
 	}
 }
 
