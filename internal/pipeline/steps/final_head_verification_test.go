@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -117,16 +118,20 @@ func TestFinalHeadVerification_ConfiguredTestUsesPinnedNode(t *testing.T) {
 	t.Setenv("VOLTA_HOME", filepath.Join(root, "volta"))
 	t.Setenv("FNM_DIR", filepath.Join(root, "fnm"))
 	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
-	installBin := filepath.Join(root, "installs", "node", "20.19.0", "bin")
+	installBin := testMiseNodeBin(root, "20.19.0")
 	if err := os.MkdirAll(installBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	fakeNode := filepath.Join(installBin, nodeBinaryName())
 	writeExecutable(t, fakeNode)
 	whichLog := filepath.Join(dir, "final-node.log")
+	whichCommand := "command -v node > \"" + whichLog + "\""
+	if runtime.GOOS == "windows" {
+		whichCommand = "where node > \"" + whichLog + "\""
+	}
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
-		Test: "command -v node > " + whichLog,
+		Test: whichCommand,
 	})
 	sctx.Shared = &pipeline.RunShared{}
 	completeTestStepWithVerifiedTree(t, sctx, `{"findings":[],"summary":"tests passed"}`)
@@ -140,8 +145,9 @@ func TestFinalHeadVerification_ConfiguredTestUsesPinnedNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(resolved)) != fakeNode {
-		t.Fatalf("final verification used Node %q, want %q", strings.TrimSpace(string(resolved)), fakeNode)
+	resolvedNode := strings.TrimSpace(strings.Split(strings.ReplaceAll(string(resolved), "\r\n", "\n"), "\n")[0])
+	if !strings.EqualFold(resolvedNode, fakeNode) {
+		t.Fatalf("final verification used Node %q, want %q", resolvedNode, fakeNode)
 	}
 }
 
@@ -447,9 +453,15 @@ func TestPushStep_FormatOnlyChangeReverifiesFinalHead(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
+	formatCommand := "printf 'reformatted\n' > feature.txt"
+	testCommand := "grep -q '^feature code$' feature.txt"
+	if runtime.GOOS == "windows" {
+		formatCommand = "echo reformatted> feature.txt"
+		testCommand = "findstr /x /c:\"feature code\" feature.txt >NUL"
+	}
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{
-		Format: "printf 'reformatted\n' > feature.txt",
-		Test:   "grep -q '^feature code$' feature.txt",
+		Format: formatCommand,
+		Test:   testCommand,
 	})
 	sctx.Shared = &pipeline.RunShared{}
 	recordReviewApproval(t, sctx, headSHA)

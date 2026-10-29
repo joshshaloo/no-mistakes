@@ -10,6 +10,14 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		if executable, err := os.Executable(); err == nil {
+			if version, err := os.ReadFile(executable + ".version"); err == nil {
+				fmt.Printf("v%s\n", version)
+				os.Exit(0)
+			}
+		}
+	}
 	if handled, exitCode, err := shellenv.RunWindowsCooperativeCommandHelper(os.Args[1:]); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)

@@ -23,6 +23,20 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestWindowsShellCommandMapsOnlyCommandNotFound(t *testing.T) {
+	wrapped := windowsShellCommand("missing-tool --check")
+	for _, want := range []string{
+		"missing-tool --check\r\n",
+		"NO_MISTAKES_COMMAND_EXIT=%ERRORLEVEL%",
+		"==\"9009\" exit /b 127",
+		"exit /b %NO_MISTAKES_COMMAND_EXIT%",
+	} {
+		if !strings.Contains(wrapped, want) {
+			t.Fatalf("windows shell wrapper %q does not contain %q", wrapped, want)
+		}
+	}
+}
+
 func TestCopyDirContents_PreservesGitRepo(t *testing.T) {
 	t.Parallel()
 	ensureGitRepoTemplate(t)

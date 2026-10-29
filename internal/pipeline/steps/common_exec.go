@@ -366,7 +366,7 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 func runShellCommandWithProcessEnv(ctx context.Context, dir string, env []string, cmdStr string) (string, int, error) {
 	var cmd *exec.Cmd
 	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd.exe", "/c", cmdStr)
+		cmd = exec.CommandContext(ctx, "cmd.exe", "/d", "/c", windowsShellCommand(cmdStr))
 	} else {
 		cmd = exec.CommandContext(ctx, "sh", "-c", shellenv.OwnOOMScoreScript(cmdStr))
 	}
@@ -384,4 +384,14 @@ func runShellCommandWithProcessEnv(ctx context.Context, dir string, env []string
 		return string(out), -1, fmt.Errorf("run command %q: %w", cmdStr, err)
 	}
 	return string(out), 0, nil
+}
+
+// cmd.exe reports an absent command as ERRORLEVEL 9009 inside the shell but
+// can expose only exit code 1 to its parent unless the batch explicitly maps
+// it. Preserve every other status while normalizing command-not-found to the
+// cross-platform configured-command contract (127).
+func windowsShellCommand(cmdStr string) string {
+	return cmdStr + "\r\nset \"NO_MISTAKES_COMMAND_EXIT=%ERRORLEVEL%\"\r\n" +
+		"if \"%NO_MISTAKES_COMMAND_EXIT%\"==\"9009\" exit /b 127\r\n" +
+		"exit /b %NO_MISTAKES_COMMAND_EXIT%"
 }
