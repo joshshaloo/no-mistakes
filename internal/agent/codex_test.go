@@ -3,21 +3,54 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
+
+func TestCodexAgentRunAppliesForgeEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	capture := filepath.Join(dir, "env.txt")
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf 'config:%s token:%s\n' "$GH_CONFIG_DIR" "${GH_TOKEN:+set}" > "$CAPTURE_FILE"
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"ok"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+`, "@echo off\r\nset TOKENSTATE=\r\nif defined GH_TOKEN set TOKENSTATE=set\r\necho config:%GH_CONFIG_DIR% token:%TOKENSTATE%>\"%CAPTURE_FILE%\"\r\necho {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"ok\"}}\r\necho {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\r\n")
+	t.Setenv("GH_TOKEN", "ambient-must-not-leak")
+
+	ca := &codexAgent{bin: bin, subprocessContext: newSubprocessContext(runenv.Overlay{
+		Set: map[string]string{
+			"CAPTURE_FILE":  capture,
+			"GH_CONFIG_DIR": "/profiles/personal",
+		},
+		Unset: []string{"GH_TOKEN"},
+	})}
+	if _, err := ca.Run(context.Background(), RunOpts{Prompt: "test", CWD: dir}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "config:/profiles/personal token:" {
+		t.Fatalf("agent environment = %q", got)
+	}
+}
 
 func TestCodexAgent_BuildArgs(t *testing.T) {
 	ca := &codexAgent{bin: "codex"}
-	args := ca.buildArgs("fix the bug", "", "")
+	args := ca.buildArgs("", "")
 
 	// Default (no opt-out): pristine args, no project-doc suppression - ordinary
 	// repos keep loading AGENTS.md (backward-compat).
 	expected := []string{
-		"exec", "fix the bug",
+		"exec", "-",
 		"--json",
 		"--dangerously-bypass-approvals-and-sandbox",
 		"--color", "never",
@@ -35,12 +68,12 @@ func TestCodexAgent_BuildArgs(t *testing.T) {
 
 func TestCodexAgent_BuildArgs_ExtraArgsAfterExec(t *testing.T) {
 	ca := &codexAgent{bin: "codex", extraArgs: []string{"-m", "gpt-5.4"}}
-	args := ca.buildArgs("fix it", "", "")
+	args := ca.buildArgs("", "")
 
 	expected := []string{
 		"exec",
 		"-m", "gpt-5.4",
-		"fix it",
+		"-",
 		"--json",
 		"--dangerously-bypass-approvals-and-sandbox",
 		"--color", "never",
@@ -64,7 +97,7 @@ func TestCodexAgent_BuildArgs_UserExecutionModeSuppressesBypass(t *testing.T) {
 	}
 	for _, extra := range tests {
 		ca := &codexAgent{bin: "codex", extraArgs: extra}
-		args := ca.buildArgs("p", "", "")
+		args := ca.buildArgs("", "")
 
 		bypassCount := 0
 		for _, a := range args {
@@ -84,10 +117,10 @@ func TestCodexAgent_BuildArgs_UserExecutionModeSuppressesBypass(t *testing.T) {
 
 func TestCodexAgent_BuildArgs_WithOutputSchema(t *testing.T) {
 	ca := &codexAgent{bin: "codex"}
-	args := ca.buildArgs("review", "/tmp/schema.json", "")
+	args := ca.buildArgs("/tmp/schema.json", "")
 
 	want := []string{
-		"exec", "review",
+		"exec", "-",
 		"--json",
 		"--output-schema", "/tmp/schema.json",
 		"--dangerously-bypass-approvals-and-sandbox",
@@ -118,6 +151,38 @@ func writeFakeCodex(t *testing.T, dir, posixScript, windowsScript string) string
 		t.Fatalf("write fake codex: %v", err)
 	}
 	return bin
+}
+
+func TestCodexAgent_RunSendsLargePromptOnlyOnStdin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' "$@" > argv.txt
+cat > stdin.txt
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
+`, "")
+	prompt := strings.Repeat("codex-prompt-", 512)
+	ca := &codexAgent{bin: bin}
+	if _, err := ca.Run(context.Background(), RunOpts{Prompt: prompt, CWD: dir}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	argv, err := os.ReadFile(filepath.Join(dir, "argv.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(argv), prompt) || !strings.Contains(string(argv), "\n-\n") {
+		t.Fatalf("argv must contain stdin marker, not prompt: %q", argv)
+	}
+	stdin, err := os.ReadFile(filepath.Join(dir, "stdin.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stdin) != prompt {
+		t.Fatalf("stdin prompt mismatch: got %d bytes, want %d", len(stdin), len(prompt))
+	}
 }
 
 func TestCodexAgent_RunWritesOutputSchemaFile(t *testing.T) {
@@ -217,6 +282,78 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens
 	}
 }
 
+// TestCodexAgent_RunCancelsSilentHang pins the 0%-CPU stall the Test step's
+// evidence agent hits: Codex has consumed the prompt, emits no JSONL, and
+// waits. A deadline on the Run context must cancel that wait instead of
+// blocking forever on stdout.
+func TestCodexAgent_RunCancelsSilentHang(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+cat >/dev/null
+sleep 100
+	`, strings.Join([]string{
+		"@echo off",
+		"more > nul",
+		"ping -n 101 127.0.0.1 > nul",
+	}, "\r\n"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := (&codexAgent{bin: bin}).Run(ctx, RunOpts{Prompt: "gather evidence", CWD: dir})
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("expected silent hang to fail")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("Run error = %v, want context deadline", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("silent hang took %s, want cancellation well under 5s", elapsed)
+	}
+}
+
+func TestCodexAgent_ProgressWithoutTerminalCompletionIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	progress := `{"findings":[],"risk_level":"low"}`
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"findings\":[],\"risk_level\":\"low\"}"}}'
+sleep 100
+	`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"findings\\\":[],\\\"risk_level\\\":\\\"low\\\"}\"}}",
+		"ping -n 101 127.0.0.1 > nul",
+	}, "\r\n"))
+
+	// The turn is ended by the streamed progress arriving, not by a wall
+	// clock: the fake emits one line and then hangs forever, so a fixed
+	// millisecond budget was really a race between process spawn and the
+	// deadline, and it lost on a loaded machine. Cancelling from the chunk
+	// callback makes the same scenario deterministic - progress streamed,
+	// never a terminal completion - at any load. The outer budget only stops
+	// the test hanging if the chunk never arrives at all.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var chunks []string
+	result, err := (&codexAgent{bin: bin}).Run(ctx, RunOpts{
+		Prompt: "review",
+		CWD:    dir,
+		OnChunk: func(text string) {
+			chunks = append(chunks, text)
+			cancel()
+		},
+	})
+	if err == nil {
+		t.Fatal("expected progress-only turn to fail without native completion")
+	}
+	if result != nil {
+		t.Fatalf("progress-only result = %+v, want nil", result)
+	}
+	if len(chunks) != 1 || chunks[0] != progress {
+		t.Fatalf("streamed progress = %q, want %q", chunks, progress)
+	}
+}
+
 func TestCodexAgent_RunIncludesJSONLErrorOnExitFailure(t *testing.T) {
 	dir := t.TempDir()
 	bin := writeFakeCodex(t, dir, `#!/bin/sh
@@ -241,6 +378,100 @@ exit 1
 	}
 	if !strings.Contains(err.Error(), "schema rejected by codex") {
 		t.Fatalf("expected JSONL error in message, got %v", err)
+	}
+}
+
+// TestCodexAgent_FailedExitCarriesCumulativeUsageMarker proves a turn that
+// reported usage and then exited non-zero still returns codex's own session
+// facts. codex counts usage cumulatively across a resumed thread, so a result
+// missing SessionUsageCumulative is recorded as a per-round delta and charges
+// every earlier round of the thread a second time.
+func TestCodexAgent_FailedExitCarriesCumulativeUsageMarker(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-1"}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":2500,"output_tokens":250,"cached_input_tokens":1800}}'
+exit 1
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}",
+		"echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":2500,\"output_tokens\":250,\"cached_input_tokens\":1800}}",
+		"exit /b 1",
+	}, "\r\n"))
+
+	ca := &codexAgent{bin: bin}
+	res, err := ca.Run(context.Background(), RunOpts{
+		Prompt:  "review",
+		CWD:     t.TempDir(),
+		Session: &SessionRef{ID: "thread-1"},
+	})
+	if err == nil {
+		t.Fatal("expected codex failure")
+	}
+	if res == nil {
+		t.Fatal("failed codex turn that reported usage must return its usage")
+	}
+	if !res.UsageReported || res.Usage.InputTokens != 2500 {
+		t.Fatalf("usage = %+v, want reported input 2500", res.Usage)
+	}
+	if !res.SessionUsageCumulative {
+		t.Fatal("failed codex turn must mark its usage cumulative")
+	}
+	if !res.Resumed {
+		t.Fatal("failed codex turn must report the resume it was asked for")
+	}
+}
+
+func TestCodexAgent_RunFillsOmittedNullableFields(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"{\"required\":\"present\",\"nested\":{}}"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":2}}'
+`, strings.Join([]string{
+		"@echo off",
+		"echo {\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"required\\\":\\\"present\\\",\\\"nested\\\":{}}\"}}",
+		"echo {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2}}",
+	}, "\r\n"))
+
+	schema := json.RawMessage(`{
+		"type":"object",
+		"properties":{
+			"required":{"type":"string"},
+			"optional":{"type":"string"},
+			"nested":{
+				"type":"object",
+				"properties":{
+					"nested_optional":{"type":"boolean"}
+				},
+				"required":[]
+			}
+		},
+		"required":["required","nested"]
+	}`)
+
+	result, err := (&codexAgent{bin: bin}).Run(context.Background(), RunOpts{
+		Prompt:     "review",
+		CWD:        dir,
+		JSONSchema: schema,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var output map[string]any
+	if err := json.Unmarshal(result.Output, &output); err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	optional, present := output["optional"]
+	if !present || optional != nil {
+		t.Fatalf("optional field = %#v (present=%t), want explicit null", optional, present)
+	}
+	nested, ok := output["nested"].(map[string]any)
+	if !ok {
+		t.Fatalf("nested field = %#v, want object", output["nested"])
+	}
+	nestedOptional, present := nested["nested_optional"]
+	if !present || nestedOptional != nil {
+		t.Fatalf("nested optional field = %#v (present=%t), want explicit null", nestedOptional, present)
 	}
 }
 
@@ -485,7 +716,7 @@ func TestParseCodexEvents_SkipsMalformedLines(t *testing.T) {
 // suppression knobs are emitted under the opt-out.
 func TestCodexAgent_BuildArgs_SuppressesProjectDocUnderOptOut(t *testing.T) {
 	ca := &codexAgent{bin: "codex", disableProjectSettings: true}
-	args := ca.buildArgs("review the diff", "", "")
+	args := ca.buildArgs("", "")
 	if !argsContainPair(args, "-c", "project_doc_max_bytes=0") {
 		t.Errorf("buildArgs = %v, want a `-c project_doc_max_bytes=0` pair", args)
 	}
@@ -499,7 +730,7 @@ func TestCodexAgent_BuildArgs_SuppressesProjectDocUnderOptOut(t *testing.T) {
 // exactly as before.
 func TestCodexAgent_BuildArgs_NoSuppressionWithoutOptOut(t *testing.T) {
 	ca := &codexAgent{bin: "codex"}
-	args := ca.buildArgs("review the diff", "", "")
+	args := ca.buildArgs("", "")
 	if argsContainPair(args, "-c", "project_doc_max_bytes=0") || argsContain(args, "--ignore-rules") {
 		t.Errorf("buildArgs = %v, must add no suppression when the repo did not opt out", args)
 	}
@@ -510,7 +741,7 @@ func TestCodexAgent_BuildArgs_NoSuppressionWithoutOptOut(t *testing.T) {
 // but still accepts the global -c and --ignore-rules.
 func TestCodexAgent_BuildArgs_SuppressesOnResumeUnderOptOut(t *testing.T) {
 	ca := &codexAgent{bin: "codex", disableProjectSettings: true}
-	args := ca.buildArgs("rereview", "", "thread-123")
+	args := ca.buildArgs("", "thread-123")
 	if args[0] != "exec" || args[1] != "resume" || args[2] != "thread-123" {
 		t.Fatalf("resume positional prefix disturbed: %v", args)
 	}
@@ -523,7 +754,7 @@ func TestCodexAgent_BuildArgs_SuppressesOnResumeUnderOptOut(t *testing.T) {
 // pinned their own project_doc_max_bytes is not double-set even under opt-out.
 func TestCodexAgent_BuildArgs_UserProjectDocOverrideWins(t *testing.T) {
 	ca := &codexAgent{bin: "codex", disableProjectSettings: true, extraArgs: []string{"-c", "project_doc_max_bytes=4096"}}
-	args := ca.buildArgs("p", "", "")
+	args := ca.buildArgs("", "")
 	if argsContainPair(args, "-c", "project_doc_max_bytes=0") {
 		t.Errorf("buildArgs = %v, must not add project_doc_max_bytes=0 over a user pin", args)
 	}

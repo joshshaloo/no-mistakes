@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,21 +16,15 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/notices"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
-	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // outputJSON runs cmd and returns its stdout alone, leaving stderr out of the
 // payload so non-JSON az chatter (preview-command notices, token-refresh
 // messages) cannot corrupt the bytes a caller json.Unmarshal's. On failure it
 // surfaces the separately-captured stderr in the error.
-func outputJSON(cmd *exec.Cmd) ([]byte, error) {
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := shellenv.OutputShellCommand(cmd)
+func outputJSON(cmd *scm.Command) ([]byte, error) {
+	out, err := cmd.Output()
 	if err != nil {
-		if len(bytes.TrimSpace(stderr.Bytes())) > 0 {
-			return nil, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
-		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(bytes.TrimSpace(ee.Stderr)) > 0 {
 			return nil, fmt.Errorf("%s: %w", strings.TrimSpace(string(ee.Stderr)), err)
@@ -52,11 +47,12 @@ type CmdFactory func(ctx context.Context, name string, args ...string) *exec.Cmd
 
 // Host talks to Azure DevOps through the az CLI (azure-devops extension).
 type Host struct {
-	cmd          CmdFactory
+	cmd          scm.CommandFactory
 	cliAvailable func() bool
 	org          string // organization URL, e.g. https://dev.azure.com/myorg
 	project      string // project name (may contain spaces)
 	repo         string // repository name
+	draft        bool   // open created PRs as drafts (az repos pr create --draft true)
 }
 
 // New builds a Host. cliAvailable reports whether the az binary is resolvable
@@ -67,12 +63,20 @@ type Host struct {
 // fails on every poll. project and repo name the repository.
 func New(cmd CmdFactory, cliAvailable func() bool, org, project, repo string) *Host {
 	return &Host{
-		cmd:          cmd,
+		cmd:          scm.SuperviseCommands(cmd),
 		cliAvailable: cliAvailable,
 		org:          strings.TrimSpace(org),
 		project:      strings.TrimSpace(project),
 		repo:         strings.TrimSpace(repo),
 	}
+}
+
+// NewWithDraft builds a Host that opens created PRs as drafts when draft is
+// true (az repos pr create --draft true). See New for the other parameters.
+func NewWithDraft(cmd CmdFactory, cliAvailable func() bool, org, project, repo string, draft bool) *Host {
+	h := New(cmd, cliAvailable, org, project, repo)
+	h.draft = draft
+	return h
 }
 
 func (h *Host) Provider() scm.Provider { return scm.ProviderAzureDevOps }
@@ -138,17 +142,120 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 	if err != nil {
 		return nil, fmt.Errorf("az repos pr list: %w", err)
 	}
-	if len(bytes.TrimSpace(out)) == 0 {
-		return nil, nil
+	trimmed := bytes.TrimSpace(out)
+	if len(trimmed) == 0 {
+		return nil, errors.New("az repos pr list: parse response: expected array")
 	}
 	var prs []azPR
-	if err := json.Unmarshal(out, &prs); err != nil {
+	if err := json.Unmarshal(trimmed, &prs); err != nil {
 		return nil, fmt.Errorf("az repos pr list: parse response: %w", err)
+	}
+	if prs == nil {
+		return nil, errors.New("az repos pr list: parse response: expected array")
 	}
 	if len(prs) == 0 {
 		return nil, nil
 	}
+	for i, candidate := range prs {
+		if err := h.validateListedPR(candidate); err != nil {
+			return nil, fmt.Errorf("az repos pr list: parse response: entry %d: %w", i, err)
+		}
+	}
 	return h.toPR(&prs[0]), nil
+}
+
+func (h *Host) validateListedPR(candidate azPR) error {
+	if candidate.PullRequestID <= 0 {
+		return errors.New("missing positive pullRequestId")
+	}
+	// az repos pr list often omits repository.webUrl (null in list payloads;
+	// the show endpoint supplies it). Organization is already pinned by the
+	// list command's --organization flag, so a missing URL is identified by
+	// repository.name and repository.project.name instead of a second show
+	// call. A nonempty URL is still parsed and must match; names never
+	// rescue a malformed URL.
+	if candidate.Repository.WebURL != "" {
+		org, project, repo, err := parseRepositoryWebURL(candidate.Repository.WebURL)
+		if err != nil {
+			return err
+		}
+		if !strings.EqualFold(azureOrganizationName(org), azureOrganizationName(h.org)) {
+			return fmt.Errorf("repository organization %q does not match configured organization %q", org, h.org)
+		}
+		if !strings.EqualFold(project, h.project) {
+			return fmt.Errorf("repository project %q does not match configured project %q", project, h.project)
+		}
+		if !strings.EqualFold(repo, h.repo) {
+			return fmt.Errorf("repository name %q does not match configured repository %q", repo, h.repo)
+		}
+		if name := strings.TrimSpace(candidate.Repository.Name); name != "" && !strings.EqualFold(name, h.repo) {
+			return fmt.Errorf("repository metadata name %q does not match configured repository %q", name, h.repo)
+		}
+		if name := strings.TrimSpace(candidate.Repository.Project.Name); name != "" && !strings.EqualFold(name, h.project) {
+			return fmt.Errorf("repository metadata project %q does not match configured project %q", name, h.project)
+		}
+		return nil
+	}
+	repo := strings.TrimSpace(candidate.Repository.Name)
+	if repo == "" {
+		return errors.New("missing repository.name")
+	}
+	if !strings.EqualFold(repo, h.repo) {
+		return fmt.Errorf("repository metadata name %q does not match configured repository %q", repo, h.repo)
+	}
+	project := strings.TrimSpace(candidate.Repository.Project.Name)
+	if project == "" {
+		return errors.New("missing repository.project.name")
+	}
+	if !strings.EqualFold(project, h.project) {
+		return fmt.Errorf("repository metadata project %q does not match configured project %q", project, h.project)
+	}
+	return nil
+}
+
+func parseRepositoryWebURL(raw string) (string, string, string, error) {
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return "", "", "", errors.New("missing valid repository.webUrl")
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return "", "", "", errors.New("repository.webUrl must be HTTP")
+	}
+	if parsed.ForceQuery || parsed.RawQuery != "" || strings.Contains(trimmed, "#") {
+		return "", "", "", errors.New("repository.webUrl must not contain query or fragment")
+	}
+	segments := splitDecodePath(parsed.EscapedPath())
+	gitIndex := -1
+	for i, segment := range segments {
+		if segment == "_git" {
+			gitIndex = i
+			break
+		}
+	}
+	if gitIndex < 1 || gitIndex+2 != len(segments) {
+		return "", "", "", errors.New("repository.webUrl must end at the repository path")
+	}
+	org, project, repo, ok := ParseRemote(trimmed)
+	if !ok {
+		return "", "", "", errors.New("missing valid repository.webUrl")
+	}
+	return org, project, repo, nil
+}
+
+func azureOrganizationName(raw string) string {
+	parsed, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return ""
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "dev.azure.com" {
+		parts := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+		if len(parts) > 0 {
+			return parts[0]
+		}
+	}
+	return strings.TrimSuffix(host, ".visualstudio.com")
 }
 
 // runWithDescription runs an az PR command whose description is supplied
@@ -196,6 +303,9 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 			"--title", content.Title,
 			"--description", descArg,
 		}
+		if h.draft {
+			args = append(args, "--draft", "true")
+		}
 		args = append(args, h.scopeArgs()...)
 		return append(args, "--output", "json")
 	})
@@ -215,9 +325,9 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		return nil, errors.New("az repos pr update: missing PR id")
 	}
 	if _, err := h.runWithDescription(ctx, content.Body, func(descArg string) []string {
-		args := []string{"repos", "pr", "update", "--id", id,
-			"--title", content.Title,
-			"--description", descArg,
+		args := []string{"repos", "pr", "update", "--id", id, "--description", descArg}
+		if content.Title != "" {
+			args = append(args, "--title", content.Title)
 		}
 		args = append(args, h.orgArgs()...)
 		return append(args, "--output", "json")
@@ -280,7 +390,7 @@ func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) err
 	}
 	args = append(args, h.orgArgs()...)
 	args = append(args, "--output", "none")
-	if out, err := shellenv.CombinedOutputShellCommand(h.cmd(ctx, "az", args...)); err != nil {
+	if out, err := h.cmd(ctx, "az", args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("az devops invoke pullRequestThreads: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
@@ -304,7 +414,7 @@ func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) 
 	}
 	args = append(args, h.orgArgs()...)
 	args = append(args, "--output", "json")
-	out, err := notices.RunCommand(h.cmd(ctx, "az", args...), "read Azure PR notices")
+	out, err := notices.RunCommand(h.cmd(ctx, "az", args...).Cmd, "read Azure PR notices")
 	if err != nil {
 		return nil, err
 	}
@@ -394,8 +504,13 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 		if bucket == "" {
 			continue
 		}
+		providerID := ""
+		if id := strings.TrimSpace(e.EvaluationID); id != "" {
+			providerID = "azure-policy-evaluation:" + id
+		}
 		checks = append(checks, scm.Check{
 			Name:        e.checkName(),
+			ProviderID:  providerID,
 			Bucket:      bucket,
 			CompletedAt: parseAzTime(e.CompletedDate),
 		})
@@ -457,7 +572,8 @@ func (h *Host) toPR(raw *azPR) *scm.PR {
 		id = strconv.Itoa(raw.PullRequestID)
 	}
 	return &scm.PR{
-		Number: id,
-		URL:    webPRURL(h.org, h.project, h.repo, raw.Repository.WebURL, id),
+		Number:     id,
+		URL:        webPRURL(h.org, h.project, h.repo, "", id),
+		BaseBranch: strings.TrimPrefix(strings.TrimSpace(raw.TargetRefName), "refs/heads/"),
 	}
 }

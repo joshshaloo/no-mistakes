@@ -15,6 +15,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 type failingRenameError string
@@ -59,7 +60,7 @@ func TestWaitForDaemonStopKeepsArtifactsWhenKillFails(t *testing.T) {
 	}()
 
 	started := time.Now()
-	err = waitForDaemonStop(p)
+	err = waitForDaemonStop(p, daemonInstance{})
 	if err == nil {
 		t.Fatal("expected waitForDaemonStop to fail when kill fails")
 	}
@@ -74,14 +75,58 @@ func TestWaitForDaemonStopKeepsArtifactsWhenKillFails(t *testing.T) {
 	}
 }
 
-func TestDaemonStartTimeoutCoversColdProductionWork(t *testing.T) {
+func TestWaitForDaemonStopRetriesProcessProbeErrors(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NM_TEST_DAEMON_STOP_TIMEOUT", "500ms")
+
+	oldHealthCheck := daemonHealthCheck
+	oldProcessRunning := daemonProcessRunning
+	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	checks := 0
+	daemonProcessRunning = func(pid int) (bool, error) {
+		if pid != 4242 {
+			t.Fatalf("daemonProcessRunning pid = %d, want 4242", pid)
+		}
+		checks++
+		if checks == 1 {
+			return false, fmt.Errorf("transient process inspection failure")
+		}
+		return false, nil
+	}
+	t.Cleanup(func() {
+		daemonHealthCheck = oldHealthCheck
+		daemonProcessRunning = oldProcessRunning
+	})
+
+	instance := daemonInstance{
+		pid:       4242,
+		startedAt: time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC),
+	}
+	if err := waitForDaemonStop(p, instance); err != nil {
+		t.Fatalf("waitForDaemonStop should retry the transient probe error: %v", err)
+	}
+	if checks < 2 {
+		t.Fatalf("daemonProcessRunning checks = %d, want at least 2", checks)
+	}
+}
+
+func TestDaemonStartTimeoutMatchesPlatformStartupWork(t *testing.T) {
 	t.Setenv("NM_TEST_DAEMON_START_TIMEOUT", "")
 	oldGOOS := runtimeGOOS
-	runtimeGOOS = "windows"
 	t.Cleanup(func() { runtimeGOOS = oldGOOS })
 
+	runtimeGOOS = "windows"
 	if got := daemonStartTimeout(); got != 45*time.Second {
-		t.Fatalf("daemonStartTimeout() = %v, want 45s", got)
+		t.Fatalf("daemonStartTimeout() on Windows = %v, want 45s", got)
+	}
+
+	runtimeGOOS = "linux"
+	want := 45*time.Second + shellenv.DefaultShellRetryWindow + shellenv.DefaultShellProbeTimeout
+	if got := daemonStartTimeout(); got != want {
+		t.Fatalf("daemonStartTimeout() on Linux = %v, want %v", got, want)
 	}
 }
 
@@ -885,7 +930,7 @@ func TestWaitForDaemonStopNeverKillsOwnPIDWhenHealthCheckOnlyErrors(t *testing.T
 		daemonKillPID = originalKillPID
 	}()
 
-	err = waitForDaemonStop(p)
+	err = waitForDaemonStop(p, daemonInstance{})
 	if err == nil {
 		t.Fatal("expected waitForDaemonStop to fail rather than kill our own pid")
 	}
@@ -924,7 +969,7 @@ func TestWaitForDaemonStopDoesNotTreatHealthCheckErrorsAsStopped(t *testing.T) {
 	}()
 
 	started := time.Now()
-	err = waitForDaemonStop(p)
+	err = waitForDaemonStop(p, daemonInstance{})
 	if err == nil {
 		t.Fatal("expected waitForDaemonStop to fail when health checks only error")
 	}
@@ -983,7 +1028,7 @@ func TestWaitForDaemonStopRejectsStalePIDBeforeKill(t *testing.T) {
 	}()
 
 	started := time.Now()
-	err = waitForDaemonStop(p)
+	err = waitForDaemonStop(p, daemonInstance{})
 	if err == nil {
 		t.Fatal("expected waitForDaemonStop to fail for stale pid")
 	}

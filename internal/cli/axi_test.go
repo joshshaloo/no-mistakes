@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/skill"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -39,13 +40,33 @@ func TestRunViewFromDBAwaitingStep(t *testing.T) {
 		{StepName: types.StepReview, Status: types.StepStatusCompleted},
 		{StepName: types.StepTest, Status: types.StepStatusAwaitingApproval, FindingsJSON: strptr(`{"findings":[],"summary":"x"}`)},
 	}
-	rv := runViewFromDB(run, steps)
+	rv := runViewFromDB(run, steps, nil)
 	gate, ok := rv.awaitingStep()
 	if !ok {
 		t.Fatal("expected an awaiting step")
 	}
 	if gate.Name != string(types.StepTest) {
 		t.Errorf("gate.Name = %q, want test", gate.Name)
+	}
+}
+
+// TestRunViewFromDBCarriesCIOverrideReason pins that a completed run whose step
+// recorded an approval override reads as passed-with-override on the DB-backed
+// status path, matching the live IPC path. Regression: runViewFromDB used to
+// drop step OverrideReason, so axi status reported a plain pass for an override.
+func TestRunViewFromDBCarriesCIOverrideReason(t *testing.T) {
+	run := &db.Run{ID: "r1", Branch: "feature/x", HeadSHA: "abcdef1234567890", Status: types.RunCompleted}
+	steps := []*db.StepResult{
+		{StepName: types.StepReview, Status: types.StepStatusCompleted},
+		{StepName: types.StepTest, Status: types.StepStatusCompleted, OverrideReason: strptr("configured test command failed")},
+		{StepName: types.StepCI, Status: types.StepStatusCompleted, OverrideReason: strptr("live checks still failing: required-check")},
+	}
+	rv := runViewFromDB(run, steps, nil)
+	if rv.CIOverrideReason != "live checks still failing: required-check" {
+		t.Errorf("CIOverrideReason = %q, want the step's override reason", rv.CIOverrideReason)
+	}
+	if got := outcomeForRun(rv); got != "passed-with-override" {
+		t.Errorf("outcomeForRun = %q, want passed-with-override", got)
 	}
 }
 
@@ -112,6 +133,31 @@ func TestWriteRunObjectShape(t *testing.T) {
 	}
 }
 
+func TestRunObjectRendersCombinedHousekeepingAttribution(t *testing.T) {
+	rv := runView{
+		ID:      "run-1",
+		Branch:  "feature/x",
+		Status:  string(types.RunRunning),
+		HeadSHA: "abcdef1234567890",
+		Steps: []stepView{{
+			Name:       string(types.StepDocument),
+			Status:     string(types.StepStatusCompleted),
+			DurationMS: 173_000,
+			WorkScope:  ipc.WorkScopeDocumentLintHousekeeping,
+		}},
+	}
+
+	out := axiDoc(runObjectField(rv))
+	for _, want := range []string{
+		"shared_work[1]{attributed_to,scope,duration_ms}:\n",
+		"document,document+lint housekeeping,173000\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("combined housekeeping attribution missing %q in:\n%s", want, out)
+		}
+	}
+}
+
 func TestRunObjectRendersAwaitingAgent(t *testing.T) {
 	// Pin the clock so the parked duration is deterministic.
 	restore := nowUnix
@@ -158,6 +204,7 @@ func TestRunObjectRendersActiveStepDiagnostics(t *testing.T) {
 	defer func() { nowUnix = restore }()
 
 	started := int64(1_000_000 - 20*60)
+	roundStarted := int64(1_000_000 - 30)
 	last := int64(1_000_000 - 11*60)
 	pid := 4242
 	rv := runView{
@@ -170,6 +217,7 @@ func TestRunObjectRendersActiveStepDiagnostics(t *testing.T) {
 				Name:             "review",
 				Status:           string(types.StepStatusFixing),
 				StartedAt:        &started,
+				RoundStartedAt:   &roundStarted,
 				LastActivityAt:   &last,
 				LastActivity:     "codex started pid=4242",
 				AgentPID:         &pid,
@@ -183,14 +231,38 @@ func TestRunObjectRendersActiveStepDiagnostics(t *testing.T) {
 	out := axiDoc(runObjectField(rv))
 
 	for _, want := range []string{
-		"active_steps[1]{step,status,active_for,last_activity,agent_pid,round}:\n",
-		"review,fixing,20m0s",
+		"active_steps[1]{step,status,active_for,round_active_for,last_activity,agent_pid,round}:\n",
+		"review,fixing,20m0s,30s",
 		"quiet 11m0s ago: codex started pid=4242",
 		`,"4242",auto-fix 1/3`,
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("active diagnostics missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+func TestRunObjectRendersLegacyActiveStepWithoutRoundClock(t *testing.T) {
+	restore := nowUnix
+	nowUnix = func() int64 { return 1_000_000 }
+	defer func() { nowUnix = restore }()
+
+	started := int64(1_000_000 - 2*60)
+	rv := runView{
+		ID:      "legacy-run",
+		Branch:  "feature/legacy",
+		Status:  string(types.RunRunning),
+		HeadSHA: "abcdef1234567890",
+		Steps: []stepView{{
+			Name:      "review",
+			Status:    string(types.StepStatusRunning),
+			StartedAt: &started,
+		}},
+	}
+
+	out := axiDoc(runObjectField(rv))
+	if !strings.Contains(out, `review,running,2m0s,"",unknown,"",starting`) {
+		t.Fatalf("legacy active step should retain its step clock and leave the unavailable round clock blank:\n%s", out)
 	}
 }
 
@@ -231,7 +303,7 @@ func TestStatusRendersCurrentAutoFixAttemptWithPersistedLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load steps: %v", err)
 	}
-	rv := runViewFromDB(run, steps)
+	rv := runViewFromDB(run, steps, database)
 	reviewLimit := 9
 	annotateRunView(&axiEnv{
 		d: database,
@@ -274,6 +346,24 @@ func TestFormatParkedFor(t *testing.T) {
 	}
 }
 
+func TestGateHelpForUnvalidatedTestWorkDoesNotOfferSkip(t *testing.T) {
+	gate := stepView{
+		Name:   "test",
+		Status: "awaiting_approval",
+		FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: types.FindingIDTestAgentTimeout, Severity: "warning", Action: types.ActionAskUser, Description: "budget cut"},
+			{ID: types.FindingIDTestAgentUnvalidatedWork, Severity: "error", Action: types.ActionAskUser, Description: "uncommitted changes to fix.txt"},
+		}, "Test agent exceeded its invocation budget"),
+	}
+	out := axiDoc(gateFields(gate)...)
+	if strings.Contains(out, "--action skip") || strings.Contains(out, "--action approve") {
+		t.Fatalf("gate help offers a response that would publish unvalidated work:\n%s", out)
+	}
+	if !strings.Contains(out, "Do not skip this step") || !strings.Contains(out, "--action fix") || !strings.Contains(out, "`no-mistakes axi abort`") {
+		t.Fatalf("gate help missing the skip warning, the fix path, or the real abort command:\n%s", out)
+	}
+}
+
 func TestWriteGateShape(t *testing.T) {
 	gate := stepView{
 		Name:   "review",
@@ -301,6 +391,65 @@ func TestWriteGateShape(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("gate missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestRenderDriveResult_ProtectedPathGateHelp(t *testing.T) {
+	refusal := pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "package.lock", Rule: "*.lock"})
+	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+		for _, tc := range []struct {
+			name     string
+			findings string
+			want     []string
+			absent   []string
+		}{
+			{
+				name:     "protected",
+				findings: refusal.Findings,
+				want: []string{
+					"explicit operator response", "Approve is rejected",
+					"operator inspect and resolve", "repository's authorized workflow",
+					"no-mistakes axi respond --action fix`", "retry the refused step",
+					"including its commit and publication",
+				},
+				absent: []string{"--action approve", "do not edit files yourself"},
+			},
+			{
+				name:     "ordinary",
+				findings: findingsJSON(t, []types.Finding{{ID: "doc-1", Action: types.ActionAskUser, Description: "clarify documentation"}}, "Documentation decision"),
+				want:     []string{"no-mistakes axi respond --action approve", "--action fix --findings <ids>", "do not edit files yourself"},
+				absent:   []string{"protected-path", "Approve is rejected"},
+			},
+		} {
+			t.Run(string(status)+"/"+tc.name, func(t *testing.T) {
+				var buf bytes.Buffer
+				cmd := &cobra.Command{}
+				cmd.SetOut(&buf)
+				if err := renderDriveResult(cmd, &ipc.RunInfo{
+					ID: "run-1", Status: types.RunRunning,
+					Steps: []ipc.StepResultInfo{{StepName: types.StepDocument, Status: status, FindingsJSON: &tc.findings}},
+				}, false); err != nil {
+					t.Fatal(err)
+				}
+				var doc struct {
+					Help []string `toon:"help"`
+				}
+				if err := toon.Unmarshal(buf.Bytes(), &doc); err != nil {
+					t.Fatalf("decode emitted gate help: %v\n%s", err, buf.String())
+				}
+				help := strings.Join(doc.Help, "\n")
+				for _, want := range append(tc.want, "--action skip", "axi logs --step document --full", preserveGateFixCommitsGuidance) {
+					if !strings.Contains(help, want) {
+						t.Errorf("gate help missing %q:\n%s", want, help)
+					}
+				}
+				for _, absent := range tc.absent {
+					if strings.Contains(help, absent) {
+						t.Errorf("gate help includes inappropriate guidance %q:\n%s", absent, help)
+					}
+				}
+			})
 		}
 	}
 }
@@ -416,6 +565,43 @@ func TestOutcomeFor(t *testing.T) {
 	}
 }
 
+// TestOutcomeForRun pins that a run's outcome word distinguishes a genuinely
+// green completion from one where a human approved past a live CI failure
+// (rv.CIOverrideReason, see pipeline.ApprovalOverrideVerifier). Without this,
+// "outcome=passed" in axi's agent-facing output is ambiguous between the two -
+// exactly the ambiguity that let no-mistakes self-report a passing terminal
+// outcome while the live PR still showed a failed check.
+func TestOutcomeForRun(t *testing.T) {
+	cases := []struct {
+		name string
+		rv   runView
+		want string
+	}{
+		{
+			name: "clean pass has no override qualifier",
+			rv:   runView{Status: string(types.RunCompleted)},
+			want: "passed",
+		},
+		{
+			name: "override qualifies an otherwise-clean pass",
+			rv:   runView{Status: string(types.RunCompleted), CIOverrideReason: "live checks still failing: required-check"},
+			want: "passed-with-override",
+		},
+		{
+			name: "a failed run is unaffected by a stray override reason",
+			rv:   runView{Status: string(types.RunFailed), CIOverrideReason: "live checks still failing: required-check"},
+			want: "failed",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := outcomeForRun(tc.rv); got != tc.want {
+				t.Errorf("outcomeForRun(%+v) = %q, want %q", tc.rv, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTriggerRunDoesNotRerunAfterFailedPush(t *testing.T) {
 	if shouldRerunAfterNoActiveRun(errors.New("push failed")) {
 		t.Fatal("failed pushes must not fall back to rerun")
@@ -496,12 +682,15 @@ func TestConfigErrorForFreshAxiRunAllowsReattach(t *testing.T) {
 }
 
 func TestRerunParamsIncludeSkipSteps(t *testing.T) {
-	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal")
+	params := rerunParams("repo-1", "feature/x", []types.StepName{types.StepReview}, "user goal", "develop")
 	if params.RepoID != "repo-1" || params.Branch != "feature/x" || params.Intent != "user goal" {
 		t.Fatalf("unexpected rerun params: %#v", params)
 	}
 	if len(params.SkipSteps) != 1 || params.SkipSteps[0] != types.StepReview {
 		t.Fatalf("SkipSteps = %#v, want review", params.SkipSteps)
+	}
+	if params.PRBaseBranch != "develop" {
+		t.Fatalf("PRBaseBranch = %q, want develop", params.PRBaseBranch)
 	}
 }
 
@@ -524,6 +713,106 @@ func TestPreflightGuardReportsWorkingTreeCheckError(t *testing.T) {
 	}
 }
 
+func TestPreflightGuardDirtyTreeNamesUntrackedFiles(t *testing.T) {
+	dir := t.TempDir()
+	run(t, dir, "git", "init")
+	run(t, dir, "git", "config", "user.email", "test@test.com")
+	run(t, dir, "git", "config", "user.name", "Test")
+	run(t, dir, "git", "commit", "--allow-empty", "-m", "initial")
+	run(t, dir, "git", "checkout", "-b", "feature/x")
+	if err := os.MkdirAll(filepath.Join(dir, "docs", "plans"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "docs", "plans", "spec.md"), []byte("spec\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "info", "exclude"), []byte("scratch/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "scratch"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scratch", "notes.md"), []byte("scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chdir(t, dir)
+	guard := preflightGuard(context.Background(), &axiEnv{repo: &db.Repo{DefaultBranch: "main"}}, "feature/x")
+	if guard == nil {
+		t.Fatal("expected guard for uncommitted changes")
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := guard(cmd); err == nil {
+		t.Fatal("expected structured preflight error")
+	}
+	got := out.String()
+	for _, want := range []string{
+		"uncommitted changes in the working tree",
+		"Untracked files (not in git yet): docs/plans/spec.md",
+		"git add <path>",
+		"`.git/info/exclude`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("expected hint %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "git add -A") {
+		t.Fatalf("hint must never recommend `git add -A`, got:\n%s", got)
+	}
+	if strings.Contains(got, "scratch") {
+		t.Fatalf("hint must not name ignored files, got:\n%s", got)
+	}
+}
+
+func TestPreflightGuardDirtyTreeTrackedOnlyHasNoUntrackedList(t *testing.T) {
+	dir := t.TempDir()
+	run(t, dir, "git", "init")
+	run(t, dir, "git", "config", "user.email", "test@test.com")
+	run(t, dir, "git", "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# test\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, dir, "git", "add", ".")
+	run(t, dir, "git", "commit", "-m", "initial")
+	run(t, dir, "git", "checkout", "-b", "feature/x")
+	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	chdir(t, dir)
+	guard := preflightGuard(context.Background(), &axiEnv{repo: &db.Repo{DefaultBranch: "main"}}, "feature/x")
+	if guard == nil {
+		t.Fatal("expected guard for uncommitted changes")
+	}
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := guard(cmd); err == nil {
+		t.Fatal("expected structured preflight error")
+	}
+	got := out.String()
+	if !strings.Contains(got, "uncommitted changes in the working tree") {
+		t.Fatalf("expected dirty-tree error, got:\n%s", got)
+	}
+	for _, forbidden := range []string{"Untracked files", "git add -A"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("tracked-only hint must not contain %q, got:\n%s", forbidden, got)
+		}
+	}
+}
+
+func TestUntrackedHintBoundsLongLists(t *testing.T) {
+	paths := []string{"a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.txt"}
+	hint := untrackedHint(paths)
+	if !strings.Contains(hint, "e.txt") || !strings.Contains(hint, "(+2 more)") {
+		t.Fatalf("expected first five paths and (+2 more), got:\n%s", hint)
+	}
+	if strings.Contains(hint, "f.txt") {
+		t.Fatalf("hint must not list the sixth path, got:\n%s", hint)
+	}
+}
+
 func TestStatusEmptyHelpIncludesRequiredIntent(t *testing.T) {
 	out := axiDoc(
 		toon.Field{Key: "runs", Value: "0 runs yet in this repository"},
@@ -535,8 +824,9 @@ func TestStatusEmptyHelpIncludesRequiredIntent(t *testing.T) {
 }
 
 func TestLogsNoRunHelpIncludesRequiredIntent(t *testing.T) {
-	if !strings.Contains(noRunLogsHelp(), "--intent") {
-		t.Fatalf("no-run logs help must include required --intent, got %q", noRunLogsHelp())
+	help := strings.Join(noRunLogsHelp(), "\n")
+	if !strings.Contains(help, "--intent") {
+		t.Fatalf("no-run logs help must include required --intent, got %q", help)
 	}
 }
 
@@ -590,7 +880,7 @@ func TestAxiHomeStartsCurrentBranchWhenOtherBranchIsActive(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if _, err := runAxiHome(cmd); err != nil {
+	if err := runAxiHome(cmd); err != nil {
 		t.Fatalf("axi home: %v\n%s", err, out.String())
 	}
 	got := out.String()
@@ -613,26 +903,6 @@ func TestAxiHomeStartsCurrentBranchWhenOtherBranchIsActive(t *testing.T) {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("axi home should not tell the agent to act on another branch via %q, got:\n%s", forbidden, got)
 		}
-	}
-}
-
-func TestRenderedRunsFingerprintChangesForEveryDisplayedRun(t *testing.T) {
-	runs := []*db.Run{
-		{ID: "newer", Branch: "feature/newer", HeadSHA: "head-newer", Status: types.RunRunning},
-		{ID: "older", Branch: "feature/older", HeadSHA: "head-older", Status: types.RunCompleted},
-	}
-	before := renderedRunsFingerprint(runs, 10)
-	runs[1].Status = types.RunFailed
-	after := renderedRunsFingerprint(runs, 10)
-	if before == after {
-		t.Fatal("changing a displayed older run must change the fingerprint")
-	}
-
-	limitedBefore := renderedRunsFingerprint(runs, 1)
-	runs[1].Status = types.RunCompleted
-	limitedAfter := renderedRunsFingerprint(runs, 1)
-	if limitedBefore != limitedAfter {
-		t.Fatal("a hidden run must not change the displayed-run fingerprint")
 	}
 }
 
@@ -668,7 +938,7 @@ func TestAxiStatusEscapesControlBytesInAwaitingTestGate(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if _, err := runAxiStatus(cmd, dbRun.ID); err != nil {
+	if err := runAxiStatus(cmd, dbRun.ID); err != nil {
 		t.Fatalf("axi status: %v\n%s", err, out.String())
 	}
 	got := out.String()
@@ -710,7 +980,7 @@ func TestAxiLogsFullEscapesControlByteOutsideTailWithoutRewritingLog(t *testing.
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if _, err := runAxiLogs(cmd, "test", dbRun.ID, true); err != nil {
+	if err := runAxiLogs(cmd, "test", dbRun.ID, true); err != nil {
 		t.Fatalf("axi logs --full: %v\n%s", err, out.String())
 	}
 	got := out.String()
@@ -778,7 +1048,7 @@ func TestAxiStatusIgnoresInvalidGlobalConfig(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if _, err := runAxiStatus(cmd, dbRun.ID); err != nil {
+	if err := runAxiStatus(cmd, dbRun.ID); err != nil {
 		t.Fatalf("axi status should not fail on invalid global config: %v\n%s", err, out.String())
 	}
 	got := out.String()
@@ -826,7 +1096,7 @@ func TestAxiRunReportsInvalidGlobalConfig(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetContext(context.Background())
 	cmd.SetOut(&out)
-	if err := runAxiRun(cmd, false, nil, "user goal"); err == nil {
+	if err := runAxiRun(cmd, false, nil, "user goal", ""); err == nil {
 		t.Fatalf("axi run should fail on invalid global config:\n%s", out.String())
 	}
 	got := out.String()
@@ -839,9 +1109,9 @@ func TestAxiRunReportsInvalidGlobalConfig(t *testing.T) {
 }
 
 // TestAxiAbortByRunIDNoOpWhenDaemonStopped covers the abort-by-id path when no
-// daemon is running: a run only exists in a live daemon's memory, so there is
-// nothing to cancel and the command reports a successful no-op without needing
-// a repo or worktree.
+// daemon is running and the durable database proves the requested id is
+// unknown. That exact case remains a successful no-op without needing a repo
+// or worktree.
 func TestAxiAbortByRunIDNoOpWhenDaemonStopped(t *testing.T) {
 	nmHome := t.TempDir()
 	t.Setenv("NM_HOME", nmHome)
@@ -882,7 +1152,7 @@ func TestResolveRunPrefersCurrentBranchLatestRun(t *testing.T) {
 		t.Fatalf("run other run: %v", err)
 	}
 
-	got, err := resolveRun(&axiEnv{d: database, repo: repo}, "", "feature/current")
+	got, _, err := resolveRun(&axiEnv{d: database, repo: repo}, "", "feature/current")
 	if err != nil {
 		t.Fatalf("resolve run: %v", err)
 	}
@@ -938,5 +1208,117 @@ func TestSkillExitCodeGuidanceDistinguishesDecisionGates(t *testing.T) {
 	}
 	if !strings.Contains(md, "decision gates") {
 		t.Fatal("skill should explicitly identify decision gates as normal exit 0 stops")
+	}
+}
+
+// TestAxiHomeLeadsWithAnsweringWhenTheGateHasAnOpenQuestion pins the home
+// view's answering branch, which was unpinned before the rendering it used to
+// read was deleted.
+//
+// The condition now comes from pipeline.HasUnansweredReviewQuestion - the same
+// predicate the two auto-resolve carve-outs read - rather than from
+// string-splitting the finding's prose, so it is keyed on the review-question
+// CATEGORY. A gate parked on ordinary findings must still be told to respond,
+// not to answer.
+func TestAxiHomeLeadsWithAnsweringWhenTheGateHasAnOpenQuestion(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		finding   types.Finding
+		wantsHome bool
+	}{
+		{
+			name: "open question",
+			finding: types.Finding{
+				ID: "question-q1", Severity: types.FindingSeverityWarning, Action: types.ActionAskUser,
+				Category:    types.FindingCategoryReviewQuestion,
+				Description: "Review question awaiting an answer: keep the legacy route?",
+			},
+			wantsHome: true,
+		},
+		{
+			// Same ID shape, no category: an ordinary gate, so the home view
+			// tells the operator to clear the gate rather than to answer it.
+			name: "question-shaped id without the category",
+			finding: types.Finding{
+				ID: "question-q1", Severity: types.FindingSeverityWarning, Action: types.ActionAskUser,
+				Description: "not actually a review question",
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			nmHome := t.TempDir()
+			t.Setenv("NM_HOME", nmHome)
+			run(t, repoDir, "git", "init")
+			run(t, repoDir, "git", "config", "user.email", "test@test.com")
+			run(t, repoDir, "git", "config", "user.name", "Test")
+			run(t, repoDir, "git", "commit", "--allow-empty", "-m", "initial")
+			run(t, repoDir, "git", "checkout", "-b", "feature/current")
+			rawRoot, err := filepath.EvalSymlinks(repoDir)
+			if err != nil {
+				rawRoot = repoDir
+			}
+			chdir(t, rawRoot)
+
+			p := paths.WithRoot(nmHome)
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatalf("ensure dirs: %v", err)
+			}
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatalf("open db: %v", err)
+			}
+			defer database.Close()
+			repo, err := database.InsertRepoWithID("repo-1", rawRoot, "origin", "main")
+			if err != nil {
+				t.Fatalf("insert repo: %v", err)
+			}
+			active, err := database.InsertRun(repo.ID, "feature/current", "head-1", "base")
+			if err != nil {
+				t.Fatalf("insert run: %v", err)
+			}
+			if err := database.UpdateRunStatus(active.ID, types.RunRunning); err != nil {
+				t.Fatalf("mark run running: %v", err)
+			}
+			step, err := database.InsertStepResult(active.ID, types.StepReview)
+			if err != nil {
+				t.Fatalf("insert step: %v", err)
+			}
+			if err := database.UpdateStepStatus(step.ID, types.StepStatusAwaitingApproval); err != nil {
+				t.Fatalf("mark step awaiting: %v", err)
+			}
+			if err := database.SetStepFindings(step.ID, findingsJSON(t, []types.Finding{tc.finding}, "1 issue")); err != nil {
+				t.Fatalf("set findings: %v", err)
+			}
+
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetContext(context.Background())
+			cmd.SetOut(&out)
+			if err := runAxiHome(cmd); err != nil {
+				t.Fatalf("runAxiHome: %v", err)
+			}
+			// The HOME-level help line, not the gate block's - the gate still
+			// offers approve/fix either way, because a human may knowingly
+			// approve over an open question.
+			const homeAnswerHelp = "for each question in the gate; the reviewer resumes when none are open"
+			const homeGateHelp = "to clear the current gate"
+			got := out.String()
+			if tc.wantsHome {
+				if !strings.Contains(got, homeAnswerHelp) {
+					t.Fatalf("home help does not lead with answering:\n%s", got)
+				}
+				if strings.Contains(got, homeGateHelp) {
+					t.Fatalf("home help offered a verdict for an open question:\n%s", got)
+				}
+				return
+			}
+			if !strings.Contains(got, homeGateHelp) {
+				t.Fatalf("ordinary gate lost its home-level verdict help:\n%s", got)
+			}
+			if strings.Contains(got, homeAnswerHelp) {
+				t.Fatalf("a question-shaped ID summoned the answering help:\n%s", got)
+			}
+		})
 	}
 }

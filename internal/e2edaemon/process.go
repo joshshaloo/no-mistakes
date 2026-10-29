@@ -15,6 +15,13 @@ func processAlive(pid int) (bool, error) {
 	return processAliveOS(pid)
 }
 
+// ProcessAlive reports whether pid is still a live process. Exited zombies do
+// not count as live: they no longer hold the daemon singleton lock even though
+// a signal-zero probe still finds their unreaped process-table entry.
+func ProcessAlive(pid int) (bool, error) {
+	return processAlive(pid)
+}
+
 // MatchesDaemonRoot reports whether pid's argv is a no-mistakes daemon run
 // for exactly the given NM_HOME root (bounded ownership check).
 func MatchesDaemonRoot(pid int, nmHome string) bool {

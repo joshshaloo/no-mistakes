@@ -1,6 +1,9 @@
 package agent
 
-import "github.com/kunchenguid/no-mistakes/internal/git"
+import (
+	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
+)
 
 // GateRoleEnvVar is exported into every spawned gate agent's environment as an
 // coarse diagnostic marker that the process is a no-mistakes gate agent (a
@@ -16,6 +19,33 @@ import "github.com/kunchenguid/no-mistakes/internal/git"
 // coarse (`=1`): presence is the whole signal.
 const GateRoleEnvVar = "NO_MISTAKES_GATE"
 
+// CompactAdviserDisableEnvVar is stamped onto every spawned gate-agent
+// subprocess, including managed agent servers that can load host plugins, so
+// compact-adviser stays inert during unattended pipeline work. The daemon
+// process itself is unchanged; only agent children receive the flag. Truthy
+// values recognized by compact-adviser are 1/true/yes/on; the product stamp
+// is always "1". Appended last so forge/profile overlays and ambient values
+// cannot drop or weaken it.
+const CompactAdviserDisableEnvVar = "COMPACT_ADVISER_DISABLE"
+
+// subprocessContext centralizes environment policy shared by every agent
+// adapter, including persistent server-backed adapters.
+type subprocessContext struct {
+	environment runenv.Overlay
+}
+
+func newSubprocessContext(environment runenv.Overlay) subprocessContext {
+	return subprocessContext{environment: environment.Clone()}
+}
+
+func (c subprocessContext) gitSafeEnv(dir string, extra ...[]string) []string {
+	return gitSafeEnvWithOverlay(dir, c.environment, extra...)
+}
+
+func (c subprocessContext) overlay() runenv.Overlay {
+	return c.environment.Clone()
+}
+
 // gitSafeEnv returns the environment for a spawned agent subprocess with git
 // forced into non-interactive mode. Agents shell out to git directly (for
 // example `git rebase --continue` during conflict resolution), which would
@@ -24,10 +54,20 @@ const GateRoleEnvVar = "NO_MISTAKES_GATE"
 //
 // It also stamps GateRoleEnvVar so a cooperating orchestration harness in the
 // target repo can recognize the gate agent and refuse to let it act as a fleet
-// operator. Appended last so it wins over any ambient value.
+// operator, and CompactAdviserDisableEnvVar so compact-adviser stays inert.
+// Both are appended last so they win over any ambient or overlay value.
 //
 // dir must be the value assigned to cmd.Dir so PWD stays coupled to the working
 // directory; see git.NonInteractiveEnv for why this matters.
-func gitSafeEnv(dir string) []string {
-	return append(git.NonInteractiveEnv(dir), GateRoleEnvVar+"=1")
+func gitSafeEnv(dir string, extra ...[]string) []string {
+	return gitSafeEnvWithOverlay(dir, runenv.Overlay{}, extra...)
+}
+
+func gitSafeEnvWithOverlay(dir string, overlay runenv.Overlay, extra ...[]string) []string {
+	base := overlay.Apply(nil)
+	env := git.NonInteractiveEnvFrom(base, dir)
+	if len(extra) > 0 {
+		env = append(env, extra[0]...)
+	}
+	return append(env, GateRoleEnvVar+"=1", CompactAdviserDisableEnvVar+"=1")
 }

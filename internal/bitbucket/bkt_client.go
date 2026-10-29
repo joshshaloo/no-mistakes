@@ -286,7 +286,7 @@ func (c *BKTClient) FindOpenPRBySourceBranch(ctx context.Context, repo RepoRef, 
 	return nil, nil
 }
 
-func (c *BKTClient) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destBranch, title, body string) (*PullRequest, error) {
+func (c *BKTClient) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destBranch, title, body string, draft bool) (*PullRequest, error) {
 	selectors, err := c.repoArgs(repo)
 	if err != nil {
 		return nil, err
@@ -300,6 +300,9 @@ func (c *BKTClient) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, de
 		"--body", body,
 		"--json",
 	)
+	if draft {
+		args = append(args, "--draft")
+	}
 	var result struct {
 		ID int `json:"id"`
 	}

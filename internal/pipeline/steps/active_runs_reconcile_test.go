@@ -114,6 +114,7 @@ func TestCIGateReconciliationPreservesOpenErrorAndUnknownStates(t *testing.T) {
 func setupCIGateReconcileTest(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.Repo, string, string, []string) {
 	t.Helper()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	ensureHermeticOrigin(t, dir)
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
@@ -139,8 +140,9 @@ func setupCIGateReconcileTest(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.
 		t.Fatal(err)
 	}
 	env := fakeCLIEnv(binDir, map[string]string{
-		"FAKE_CLI_MODE":       "ci-gh-reconcile",
-		"FAKE_CLI_STATE_PATH": statePath,
+		"FAKE_CLI_MODE":        "ci-gh-reconcile",
+		"FAKE_CLI_STATE_PATH":  statePath,
+		"FAKE_CLI_PR_HEAD_SHA": "deadbeef",
 	})
 	return database, p, run, repo, dir, statePath, env
 }

@@ -82,7 +82,7 @@ func TestRunViewCarriesNonconvergenceFromIPCAndDB(t *testing.T) {
 		NonconvergenceRound:       &round,
 		NonconvergenceThemes:      &themes,
 		NonconvergenceObservedAt:  &observed,
-	}, nil)
+	}, nil, nil)
 	if fromDB.Nonconvergence == nil || fromDB.Nonconvergence.Probability != 0.7 || fromDB.Nonconvergence.Round != 2 {
 		t.Fatalf("DB view lost the signal: %+v", fromDB.Nonconvergence)
 	}
@@ -91,7 +91,7 @@ func TestRunViewCarriesNonconvergenceFromIPCAndDB(t *testing.T) {
 	if runViewFromIPC(&ipc.RunInfo{ID: "r"}).Nonconvergence != nil {
 		t.Error("an IPC run with no signal must produce no view")
 	}
-	if runViewFromDB(&db.Run{ID: "r"}, nil).Nonconvergence != nil {
+	if runViewFromDB(&db.Run{ID: "r"}, nil, nil).Nonconvergence != nil {
 		t.Error("a DB run with no signal must produce no view")
 	}
 }

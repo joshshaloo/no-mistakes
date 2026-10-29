@@ -7,9 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -42,6 +45,9 @@ func TestDocumentStep_AgentManaged_FixesAndCommitsWithoutApproval(t *testing.T) 
 	}
 	if outcome.AutoFixable {
 		t.Error("expected no auto-fix loop in agent-managed document mode")
+	}
+	if outcome.FixSummary != changesAppliedSummary {
+		t.Fatalf("fix summary = %q, want %q", outcome.FixSummary, changesAppliedSummary)
 	}
 	if status := gitStatusPorcelain(t, dir); status != "" {
 		t.Fatalf("expected clean worktree after doc commit, got %q", status)
@@ -131,6 +137,9 @@ func TestDocumentStep_AgentManaged_UnresolvedFindingsNeedApprovalWithoutAutoFixL
 	if outcome.AutoFixable {
 		t.Error("expected unresolved documentation findings not to trigger an auto-fix round")
 	}
+	if outcome.FixSummary != NoChangesAppliedSummary {
+		t.Fatalf("fix summary = %q, want %q", outcome.FixSummary, NoChangesAppliedSummary)
+	}
 	var findings Findings
 	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
 		t.Fatalf("unmarshal findings: %v", err)
@@ -143,10 +152,11 @@ func TestDocumentStep_AgentManaged_UnresolvedFindingsNeedApprovalWithoutAutoFixL
 // TestDocumentStep_PromptAppliesPlacementPolicy pins the placement-policy
 // prompt contract from the 121-PR audit: each fact has one authoritative
 // owner, stale duplicates are removed or reduced to pointers (not
-// synchronized), AGENTS.md never receives incident narratives (invariant +
-// regression-test pointer instead), no new surfaces for perceived gaps, and
-// the scope stays on documentation this change made stale. The old
-// exhaustive-corpus-synchronization incentives must be gone.
+// synchronized), AGENTS.md and CLAUDE.md never receive incident narratives
+// (invariant + regression-test pointer instead) and are edited only to
+// correct factually wrong content - never to fill gaps, no new surfaces for
+// perceived gaps, and the scope stays on documentation this change made
+// stale. The old exhaustive-corpus-synchronization incentives must be gone.
 func TestDocumentStep_PromptAppliesPlacementPolicy(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -169,10 +179,13 @@ func TestDocumentStep_PromptAppliesPlacementPolicy(t *testing.T) {
 		"exactly one authoritative owner document",
 		"remove the duplicate or reduce it to a short pointer to the owner",
 		"never synchronize prose copies",
-		// No new surfaces, no AGENTS.md postmortems; invariants + test pointers.
+		// No new surfaces, no memory-file postmortems; invariants + test
+		// pointers, and memory files are corrected but never added to.
 		"Do not create a new documentation surface merely to close a perceived gap",
 		"Do not add incident narratives or postmortems to AGENTS.md",
 		"point to the regression test or authoritative implementation",
+		"Edit them only to correct or remove information that is factually wrong",
+		"never add content because something is missing",
 		// Ownership map for the standard surfaces.
 		"README.md owns the user-facing product introduction",
 		"CONTRIBUTING.md owns contribution mechanics",
@@ -307,7 +320,7 @@ func TestDocumentStep_NoChanges_SkipsAgent(t *testing.T) {
 	}
 }
 
-func TestDocumentStep_MalformedOutput_CommitsAndRequiresApproval(t *testing.T) {
+func TestDocumentStep_MalformedOutput_CommitsAndFailsClosed(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
@@ -326,24 +339,11 @@ func TestDocumentStep_MalformedOutput_CommitsAndRequiresApproval(t *testing.T) {
 
 	step := &DocumentStep{}
 	outcome, err := step.Execute(sctx)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "validate document analyzer findings") {
+		t.Fatalf("Execute() error = %v, want malformed document analyzer output", err)
 	}
-	if !outcome.NeedsApproval {
-		t.Fatal("expected malformed output to require approval")
-	}
-	if outcome.AutoFixable {
-		t.Fatal("expected malformed output not to trigger an auto-fix loop")
-	}
-	var findings Findings
-	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
-		t.Fatalf("unmarshal findings: %v", err)
-	}
-	if len(findings.Items) != 1 {
-		t.Fatalf("expected 1 finding, got %+v", findings.Items)
-	}
-	if findings.Items[0].Action != types.ActionAskUser {
-		t.Error("expected malformed output finding to require human review")
+	if outcome != nil {
+		t.Fatalf("Execute() outcome = %+v, want no outcome", outcome)
 	}
 	// Any edits the agent made should still be committed.
 	if status := gitStatusPorcelain(t, dir); status != "" {
@@ -351,7 +351,7 @@ func TestDocumentStep_MalformedOutput_CommitsAndRequiresApproval(t *testing.T) {
 	}
 }
 
-func TestDocumentStep_NoStructuredOutput_RequiresApproval(t *testing.T) {
+func TestDocumentStep_NoStructuredOutput_FailsClosed(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
@@ -365,20 +365,68 @@ func TestDocumentStep_NoStructuredOutput_RequiresApproval(t *testing.T) {
 
 	step := &DocumentStep{}
 	outcome, err := step.Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "document analyzer returned no structured findings") {
+		t.Fatalf("Execute() error = %v, want missing document analyzer output", err)
+	}
+	if outcome != nil {
+		t.Fatalf("Execute() outcome = %+v, want no outcome", outcome)
+	}
+}
+
+func TestDocumentStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "hanging-document-agent",
+		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			<-ctx.Done()
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"update docs"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.AgentTimeout = 20 * time.Millisecond
+
+	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&DocumentStep{}}, nil)
+	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil {
+		t.Fatal("expected hanging document agent to fail the run")
+	}
+
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("get run: %v", err)
 	}
-	if !outcome.NeedsApproval {
-		t.Fatal("expected missing structured output to require approval")
+	if run.Status != types.RunFailed {
+		t.Fatalf("run status = %s, want %s", run.Status, types.RunFailed)
 	}
-	if outcome.AutoFixable {
-		t.Fatal("expected missing structured output not to trigger an auto-fix loop")
+	if run.Error == nil || !strings.Contains(*run.Error, "agent timed out after 20ms") {
+		var got string
+		if run.Error != nil {
+			got = *run.Error
+		}
+		t.Fatalf("run error = %q, want timeout diagnostic", got)
 	}
-	var findings Findings
-	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
-		t.Fatalf("unmarshal findings: %v", err)
+}
+
+func TestDocumentStep_SuccessfulReturnAfterTimeoutFailsWithoutCommit(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	ag := &mockAgent{
+		name: "late-document-agent",
+		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# late\n"), 0o644); err != nil {
+				return nil, err
+			}
+			<-ctx.Done()
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"update README"}`)}, nil
+		},
 	}
-	if len(findings.Items) != 1 || findings.Items[0].Action != types.ActionAskUser {
-		t.Fatalf("expected 1 ask-user finding, got %+v", findings.Items)
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.AgentTimeout = 20 * time.Millisecond
+
+	if _, err := (&DocumentStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "timed out after 20ms") {
+		t.Fatalf("late successful return error = %v, want timeout", err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("HEAD = %s, want unchanged %s", got, headSHA)
 	}
 }

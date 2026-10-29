@@ -14,6 +14,10 @@ type Repo struct {
 	ForkURL       string
 	DefaultBranch string
 	CreatedAt     int64
+
+	// URLsVerified is run-scoped, in-memory evidence that the URL fields were
+	// just validated against the working clone. It is never persisted.
+	URLsVerified bool `json:"-"`
 }
 
 // PushURL returns the remote URL that should receive branch updates.
@@ -77,6 +81,34 @@ func (d *DB) InsertRepoWithFork(workingPath, upstreamURL, forkURL, defaultBranch
 	return r, nil
 }
 
+// RepoWorkingPaths returns the working path of every registered repository.
+//
+// It is the set of checkouts a run worktree placement must stay out of (see
+// worktrees.CheckPlacement): a run worktree inside a checkout leaves it dirty
+// for the duration of the run. Both gates that judge placement read the set from
+// here - the daemon at startup and `init --worktree-root` before it prints an
+// entry - so the two cannot diverge on which checkouts exist.
+func (d *DB) RepoWorkingPaths() ([]string, error) {
+	rows, err := d.sql.Query(`SELECT working_path FROM repos ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("get repo working paths: %w", err)
+	}
+	defer rows.Close()
+
+	var paths []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, fmt.Errorf("scan repo working path: %w", err)
+		}
+		paths = append(paths, path)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate repo working paths: %w", err)
+	}
+	return paths, nil
+}
+
 // GetRepos returns every authoritative repository record ordered by ID.
 func (d *DB) GetRepos() ([]*Repo, error) {
 	rows, err := d.sql.Query(
@@ -127,6 +159,41 @@ func (d *DB) GetRepoByPath(workingPath string) (*Repo, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get repo by path: %w", err)
+	}
+	return r, nil
+}
+
+// ReplaceRepoURLs atomically replaces both registered repository URLs and
+// returns the committed record. A failure leaves the exact prior registration
+// intact.
+func (d *DB) ReplaceRepoURLs(id, upstreamURL, forkURL string) (*Repo, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin repo URL replacement: %w", err)
+	}
+	defer tx.Rollback()
+
+	result, err := tx.Exec(
+		`UPDATE repos SET upstream_url = ?, fork_url = ? WHERE id = ?`,
+		upstreamURL, nullableString(forkURL), id,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("replace repo URLs: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return nil, fmt.Errorf("replace repo URLs rows affected: %w", err)
+	} else if affected != 1 {
+		return nil, fmt.Errorf("replace repo URLs: repository not found")
+	}
+
+	r := &Repo{}
+	if err := tx.QueryRow(
+		`SELECT id, working_path, upstream_url, COALESCE(fork_url, ''), default_branch, created_at FROM repos WHERE id = ?`, id,
+	).Scan(&r.ID, &r.WorkingPath, &r.UpstreamURL, &r.ForkURL, &r.DefaultBranch, &r.CreatedAt); err != nil {
+		return nil, fmt.Errorf("read replaced repo URLs: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit repo URL replacement: %w", err)
 	}
 	return r, nil
 }

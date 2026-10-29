@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,18 @@ func TestPipelinePostTestDocumentFixFailureFailsBeforePush(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			callCount++
 			if callCount == 1 {
+				// Configured Test still gathers live evidence, with the same
+				// required scenario schema as an unconfigured Test invocation.
+				content, err := os.ReadFile(filepath.Join(dir, "feature.txt"))
+				if err != nil || string(content) != "feature code\n" {
+					return nil, fmt.Errorf("initial fixture content: %q %v", content, err)
+				}
+				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"configured baseline passed","tested":["read feature.txt"],"testing_summary":"read fixture content","artifacts":[],"scenarios":[{"name":"fixture consumer sees content","result":"pass","live":true,"evidence":"feature code","reason":""}],"verdict":"go"}`)}, nil
+			}
+			if opts.Purpose != "housekeeping" {
+				return nil, fmt.Errorf("unexpected agent turn %d (%s): %s", callCount, opts.Purpose, opts.Prompt)
+			}
+			if callCount == 2 {
 				return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"docs need a copy fix","action":"auto-fix"}],"summary":"needs copy fix"}`)}, nil
 			}
 			if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("broken by docs\n"), 0o644); err != nil {
@@ -44,11 +57,14 @@ func TestPipelinePostTestDocumentFixFailureFailsBeforePush(t *testing.T) {
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
+	recordReviewApproval(t, sctx, headSHA)
 	exec := pipeline.NewExecutor(sctx.DB, p, sctx.Config, ag, []pipeline.Step{&TestStep{}, &DocumentStep{}, &PushStep{}}, nil)
 
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir)
+		errCh <- exec.Execute(ctx, sctx.Run, sctx.Repo, dir)
 	}()
 	waitForStepStatusInStepsTest(t, sctx, types.StepDocument, types.StepStatusAwaitingApproval)
 	if err := exec.Respond(types.StepDocument, types.ActionFix, nil); err != nil {
@@ -61,8 +77,8 @@ func TestPipelinePostTestDocumentFixFailureFailsBeforePush(t *testing.T) {
 	if !strings.Contains(err.Error(), "final head verification failed") {
 		t.Fatalf("error = %v, want final-head verification failure", err)
 	}
-	if callCount != 2 {
-		t.Fatalf("document agent calls = %d, want initial plus fix round", callCount)
+	if callCount != 3 {
+		t.Fatalf("agent calls = %d, want Test evidence plus Document initial and fix rounds", callCount)
 	}
 
 	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
@@ -85,8 +101,8 @@ func TestPipelinePostTestDocumentFixFailureFailsBeforePush(t *testing.T) {
 	if err := json.Unmarshal([]byte(testFindings), &findings); err != nil {
 		t.Fatalf("parse findings: %v", err)
 	}
-	if len(findings.Tested) != 1 || findings.Tested[0] != "grep -q '^feature code$' feature.txt" {
-		t.Fatalf("tested = %#v, want configured test command", findings.Tested)
+	if len(findings.Tested) != 2 || findings.Tested[0] != "grep -q '^feature code$' feature.txt" || findings.Tested[1] != "read feature.txt" {
+		t.Fatalf("tested = %#v, want both the configured baseline and original live evidence preserved", findings.Tested)
 	}
 }
 
@@ -192,6 +208,10 @@ func waitForStepStatusInStepsTest(t *testing.T, sctx *pipeline.StepContext, step
 		steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 		if err == nil {
 			for _, step := range steps {
+				if step.Status == types.StepStatusFailed {
+					snapshot, _ := json.Marshal(steps)
+					t.Fatalf("waiting for %s %s, but %s failed; steps: %s", stepName, expected, step.StepName, snapshot)
+				}
 				if step.StepName == stepName && step.Status == expected {
 					return
 				}
@@ -199,7 +219,9 @@ func waitForStepStatusInStepsTest(t *testing.T, sctx *pipeline.StepContext, step
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("step %s did not reach status %q", stepName, expected)
+	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	snapshot, _ := json.Marshal(steps)
+	t.Fatalf("step %s did not reach status %q; steps: %s (read error: %v)", stepName, expected, snapshot, err)
 }
 
 func TestFinalHeadVerification_PostTestFixNoChangesDoesNotRerun(t *testing.T) {
@@ -527,10 +549,9 @@ func TestFinalHeadVerification_TestAgentFilesCommittedByPushDoNotReverify(t *tes
 	}
 }
 
-// In-repo evidence artifacts exist in the working tree while the tests run and
-// are only staged at the push boundary, so committing them changes nothing the
-// tests validated.
-func TestFinalHeadVerification_InRepoEvidenceStagingDoesNotReverify(t *testing.T) {
+// Upstream publishes evidence outside the worktree. Creating those artifacts
+// must not invalidate a green working-tree anchor or put them in the branch.
+func TestFinalHeadVerification_ExternalEvidenceDoesNotReverify(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
@@ -543,11 +564,8 @@ func TestFinalHeadVerification_InRepoEvidenceStagingDoesNotReverify(t *testing.T
 	sctx.Config.Test.Evidence.Dir = "docs/evidence"
 	sctx.Shared = &pipeline.RunShared{}
 
-	location := resolveTestEvidenceLocation(dir, sctx.Run.Branch, sctx.Run.ID, sctx.Config.Test.Evidence)
-	if !location.StoreInRepo {
-		t.Fatalf("evidence location %s is not in the repository", location.Dir)
-	}
-	evidenceDir := location.Dir
+	sctx.EvidenceDir = t.TempDir()
+	evidenceDir := sctx.EvidenceDir
 	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -570,12 +588,11 @@ func TestFinalHeadVerification_InRepoEvidenceStagingDoesNotReverify(t *testing.T
 	if _, err := os.Stat(rerunLog); !os.IsNotExist(err) {
 		t.Fatalf("verification re-ran tests for staged evidence, stat err = %v", err)
 	}
-	rel, err := filepath.Rel(dir, filepath.Join(evidenceDir, "screenshot.txt"))
-	if err != nil {
-		t.Fatal(err)
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("external evidence changed branch head: %s", got)
 	}
-	if tracked := gitCmd(t, dir, "ls-tree", "--name-only", "HEAD", filepath.ToSlash(rel)); tracked == "" {
-		t.Fatalf("evidence artifact %s was never committed, so the test proves nothing", rel)
+	if data, err := os.ReadFile(filepath.Join(evidenceDir, "screenshot.txt")); err != nil || string(data) != "evidence\n" {
+		t.Fatalf("external evidence lost: %q %v", data, err)
 	}
 }
 

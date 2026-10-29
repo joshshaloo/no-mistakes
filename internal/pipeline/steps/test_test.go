@@ -4,15 +4,879 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestTestStep_HangingEvidenceAgentParksForADecision(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "hanging-evidence-agent",
+		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			<-ctx.Done()
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"user runs the command","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"go"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked budget cut rather than a failed run", err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("outcome = %#v, want the Test step parked for a decision", outcome)
+	}
+	findings, parseErr := types.ParseFindingsJSON(outcome.Findings)
+	if parseErr != nil {
+		t.Fatalf("parse findings: %v", parseErr)
+	}
+	if len(findings.Items) != 1 || findings.Items[0].ID != types.FindingIDTestAgentTimeout {
+		t.Fatalf("findings = %#v, want the test-agent-timeout park", findings.Items)
+	}
+	if findings.Items[0].Action != types.ActionAskUser {
+		t.Fatalf("finding action = %q, want %q", findings.Items[0].Action, types.ActionAskUser)
+	}
+	got := findings.Items[0].Description
+	if !strings.Contains(got, "timed out after 20ms") {
+		t.Fatalf("finding = %q, want the expired test budget named", got)
+	}
+	if !strings.Contains(got, "produced no output at all") {
+		t.Fatalf("finding = %q, want the measured silence of a never-emitting agent", got)
+	}
+	if strings.Contains(got, "silent for 20ms") {
+		t.Fatalf("finding = %q, must not restate the budget as if it were a measurement", got)
+	}
+	if findings.Verdict == types.TestVerdictGo {
+		t.Fatal("late structured output after the deadline must not complete Test as a pass")
+	}
+}
+
+func TestTestStep_EvidenceAgentCallIsDeadlineBounded(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	var sawDeadline bool
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			_, sawDeadline = ctx.Deadline()
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"user runs the command","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"go"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawDeadline {
+		t.Fatal("evidence agent ran without a deadline")
+	}
+	if outcome == nil || outcome.NeedsApproval {
+		t.Fatalf("successful evidence gathering should still complete, got %+v", outcome)
+	}
+}
+
+func TestTestStep_NoStructuredOutputFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Text: "tests unavailable"}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "test analyzer") {
+		t.Fatalf("Execute() error = %v, want missing test analyzer output", err)
+	}
+	if outcome != nil {
+		t.Fatalf("Execute() outcome = %+v, want no outcome", outcome)
+	}
+}
+
+func TestTestStep_IncompleteStructuredOutputFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":""}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "missing tested array") {
+		t.Fatalf("Execute() error = %v, want missing test evidence fields", err)
+	}
+	if outcome != nil {
+		t.Fatalf("Execute() outcome = %+v, want no outcome", outcome)
+	}
+}
+
+func TestTestStep_EmptyEvidenceFails(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		output json.RawMessage
+	}{
+		{name: "empty array", output: json.RawMessage(`{"findings":[],"summary":"","tested":[],"testing_summary":"  ","artifacts":[]}`)},
+		{name: "whitespace entries", output: json.RawMessage(`{"findings":[],"summary":"","tested":[" \t"],"testing_summary":"tests passed","artifacts":[]}`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			ag := &mockAgent{
+				name: "test",
+				runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					return &agent.Result{Output: tc.output}, nil
+				},
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+			outcome, err := (&TestStep{}).Execute(sctx)
+			if err == nil || !strings.Contains(err.Error(), "empty tested array") {
+				t.Fatalf("Execute() error = %v, want empty tested array rejected", err)
+			}
+			if outcome != nil {
+				t.Fatalf("Execute() outcome = %+v, want no outcome", outcome)
+			}
+		})
+	}
+}
+
+func TestTestStep_BlankTestingSummaryFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["go test ./..."],"testing_summary":"","artifacts":[]}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "empty testing summary") {
+		t.Fatalf("Execute() error = %v, want blank testing summary rejected", err)
+	}
+	if outcome != nil {
+		t.Fatalf("Execute() outcome = %+v, want no outcome", outcome)
+	}
+}
+
+func TestTestStep_FixAgentTimeoutDoesNotCancelPostProcessing(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"summary":"fix tests","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+	sctx.Fixing = true
+	sctx.Config.TestAgentTimeout = time.Second
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("post-agent processing used agent context: %v", err)
+	}
+	if outcome == nil || outcome.NeedsApproval {
+		t.Fatalf("successful fix should complete, got %+v", outcome)
+	}
+	if got := gitCmd(t, dir, "status", "--porcelain"); got != "" {
+		t.Fatalf("fix was not committed: %s", got)
+	}
+	if got := gitCmd(t, dir, "show", "HEAD:fix.txt"); got != "fixed" {
+		t.Fatalf("committed fix = %q, want fixed", got)
+	}
+}
+
+func TestTestStep_FixAgentTimeoutParksWithoutCommit(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			<-ctx.Done()
+			return &agent.Result{Output: json.RawMessage(`{"summary":"fix tests","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+	sctx.Fixing = true
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked budget cut", err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("outcome = %#v, want the Test step parked for a decision", outcome)
+	}
+	if got := testFindingByID(t, outcome.Findings, types.FindingIDTestAgentTimeout).Description; !strings.Contains(got, "agent fix tests timed out after 20ms") || strings.Count(got, "agent fix tests") != 1 {
+		t.Fatalf("finding = %q, want the timeout named once", got)
+	}
+	work := testFindingByID(t, outcome.Findings, types.FindingIDTestAgentUnvalidatedWork).Description
+	if !strings.Contains(work, "uncommitted changes to fix.txt") || !strings.Contains(work, "git -C "+dir+" diff") {
+		t.Fatalf("finding = %q, want the leftover file named with how to inspect it", work)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("HEAD = %s, want unchanged %s", got, headSHA)
+	}
+	if got := gitCmd(t, dir, "status", "--porcelain", "--", "fix.txt"); got != "?? fix.txt" {
+		t.Fatalf("fix.txt status = %q, want uncommitted", got)
+	}
+}
+
+func TestTestStep_FixAgentTimeoutRecordsCommittedHead(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			gitCmd(t, dir, "add", "fix.txt")
+			gitCmd(t, dir, "commit", "-m", "timed-out repair")
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+	sctx.Fixing = true
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked budget cut", err)
+	}
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("outcome = %#v, want the Test step parked for a decision", outcome)
+	}
+	committed := gitCmd(t, dir, "rev-parse", "HEAD")
+	if committed == headSHA {
+		t.Fatal("timed-out agent commit was lost")
+	}
+	if sctx.Run.HeadSHA != committed {
+		t.Fatalf("run head = %s, want recorded committed head %s", sctx.Run.HeadSHA, committed)
+	}
+	work := testFindingByID(t, outcome.Findings, types.FindingIDTestAgentUnvalidatedWork).Description
+	if !strings.Contains(work, "recorded locally") || !strings.Contains(work, "log -p "+headSHA+".."+committed) {
+		t.Fatalf("finding = %q, want the committed head retained with how to inspect it", work)
+	}
+}
+
+func TestTestStep_EvidenceCutKeepsTheFailingConfiguredCommand(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	testCmd := "printf 'TestCheckout failed'; exit 3"
+	if runtime.GOOS == "windows" {
+		testCmd = "echo TestCheckout failed && exit /b 3"
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: testCmd})
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked budget cut", err)
+	}
+	if outcome.ExitCode != 3 {
+		t.Fatalf("ExitCode = %d, want the configured command's 3", outcome.ExitCode)
+	}
+	if parked, parseErr := types.ParseFindingsJSON(outcome.Findings); parseErr != nil || !strings.Contains(parked.Summary, "TestCheckout failed") {
+		t.Fatalf("park summary = %q (%v), want the failing command's output kept for the next repair", parked.Summary, parseErr)
+	}
+	if got := testFindingByID(t, outcome.Findings, types.FindingIDTestAgentTimeout).Description; strings.Contains(got, "not a code failure") {
+		t.Fatalf("finding = %q, must not call the cut harmless while the configured command failed", got)
+	}
+	persistTestStepFindings(t, sctx, outcome.ExitCode, outcome.Findings)
+	unresolved, err := (&TestStep{}).VerifyApprovalOverride(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unresolved != "configured test command failed with exit code 3" {
+		t.Fatalf("unresolved = %q, want approval to stay a configured-command waiver", unresolved)
+	}
+}
+
+func TestTestStep_RepairCutRecordsTheConfiguredCommandResult(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		calls++
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 4"})
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"findings":[{"id":"test-1","severity":"error","category":"test-command","description":"configured test command failed with exit code 4"}]}`
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked budget cut", err)
+	}
+	if calls != 1 {
+		t.Fatalf("agent calls = %d, want only the cut repair turn", calls)
+	}
+	if outcome.ExitCode != 4 {
+		t.Fatalf("ExitCode = %d, want the configured command's 4", outcome.ExitCode)
+	}
+	persistTestStepFindings(t, sctx, outcome.ExitCode, outcome.Findings)
+	unresolved, err := (&TestStep{}).VerifyApprovalOverride(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unresolved != "configured test command failed with exit code 4" {
+		t.Fatalf("unresolved = %q, want approval to stay a configured-command waiver", unresolved)
+	}
+	if pipeline.HasUnvalidatedWorkRefusal(outcome.Findings) {
+		t.Fatalf("findings = %s, a cut that changed nothing must stay approvable", outcome.Findings)
+	}
+}
+
+func TestTestStep_FixOfABudgetCutAloneRerunsOnlyValidation(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	var prompts []string
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		prompts = append(prompts, opts.Prompt)
+		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"findings":[{"id":"test-agent-timeout","severity":"warning","action":"ask-user","description":"budget cut"},{"id":"test-agent-unvalidated-work","severity":"error","action":"ask-user","description":"uncommitted changes"}]}`
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("outcome = %+v, want the re-run validation to pass", outcome)
+	}
+	if len(prompts) != 1 || strings.Contains(prompts[0], "Fix the failing tests") || !strings.Contains(prompts[0], "Derive the scenarios") {
+		t.Fatalf("prompts = %q, want exactly one evidence turn and no repair turn", prompts)
+	}
+	if outcome.FixSummary != NoChangesAppliedSummary {
+		t.Fatalf("fix summary = %q, want %q: a validation-only round fixes nothing", outcome.FixSummary, NoChangesAppliedSummary)
+	}
+}
+
+func TestTestStep_CutMidRebaseRecordsNoPartialHead(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		leaveConflictedRebase(t, dir)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked budget cut", err)
+	}
+	if sctx.Run.HeadSHA != headSHA {
+		t.Fatalf("run head = %s, want the partial rebase head left unrecorded", sctx.Run.HeadSHA)
+	}
+	if work := testFindingByID(t, outcome.Findings, types.FindingIDTestAgentUnvalidatedWork).Description; !strings.Contains(work, "unfinished rebase or merge") {
+		t.Fatalf("finding = %q, want the unfinished rebase named", work)
+	}
+}
+
+func noGoTestGateJSON(testedHead string) string {
+	return `{"findings":[{"id":"test-2","severity":"error","action":"auto-fix","description":"live validation verdict: no-go (1 of 1 scenarios were driven live against the product); failed: checkout"}],"summary":"checkout failed","verdict":"no-go","scenarios":[{"name":"checkout","result":"fail","live":true,"evidence":"checkout.png","reason":""}],"tested_head_sha":"` + testedHead + `"}`
+}
+
+func TestTestStep_RepeatedCutKeepsRefusingUnvalidatedWork(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		calls++
+		if calls == 1 {
+			if err := os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"summary":"fix checkout"}`)}, nil
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+	sctx.PreviousFindings = noGoTestGateJSON(headSHA)
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	first, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("repair round error = %v", err)
+	}
+	repaired := sctx.Run.HeadSHA
+	if repaired == headSHA || !pipeline.HasUnvalidatedWorkRefusal(first.Findings) {
+		t.Fatalf("repair round findings = %s, want the unvalidated repair commit refused", first.Findings)
+	}
+
+	parked, err := types.ParseFindingsJSON(first.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budgetCut, err := types.MarshalFindingsJSON(types.FilterFindings(parked, []string{types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.PreviousFindings = budgetCut
+	second, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("validation-only round error = %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("agent calls = %d, want the second round to run only the evidence turn", calls)
+	}
+	if !pipeline.HasUnvalidatedWorkRefusal(second.Findings) {
+		t.Fatalf("findings = %s, want the repeated cut to keep refusing the repair no evidence turn validated", second.Findings)
+	}
+	if work := testFindingByID(t, second.Findings, types.FindingIDTestAgentUnvalidatedWork).Description; !strings.Contains(work, "log -p "+headSHA+".."+repaired) {
+		t.Fatalf("finding = %q, want the range since the last validated head", work)
+	}
+}
+
+func TestTestStep_RepairCutKeepsTheFindingsItWasFixing(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+	sctx.PreviousFindings = noGoTestGateJSON(headSHA)
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked budget cut", err)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings.Verdict != types.TestVerdictNoGo || len(findings.Scenarios) != 1 || !strings.Contains(outcome.Findings, "failed: checkout") {
+		t.Fatalf("findings = %s, want the no-go the repair was fixing kept on the park", outcome.Findings)
+	}
+	if got := testFindingByID(t, outcome.Findings, types.FindingIDTestAgentTimeout).Description; strings.Contains(got, "not a code failure") {
+		t.Fatalf("finding = %q, must not call the cut harmless next to a no-go", got)
+	}
+	if pipeline.HasUnvalidatedWorkRefusal(outcome.Findings) {
+		t.Fatalf("findings = %s, a cut that changed nothing must stay approvable", outcome.Findings)
+	}
+
+	persistTestStepFindings(t, sctx, outcome.ExitCode, outcome.Findings)
+	if err := sctx.DB.SetTestApprovalReason(sctx.StepResultID, "accepted"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.CompleteStep(sctx.StepResultID, 0, 1, "test.log"); err != nil {
+		t.Fatal(err)
+	}
+	sr, err := sctx.DB.GetStepResult(sctx.StepResultID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sr.TestOverrideReason(); !strings.Contains(got, "live validation verdict: no-go") {
+		t.Fatalf("TestOverrideReason = %q, want approval recorded against the no-go", got)
+	}
+}
+
+// answerTestPark splits a parked Test gate the way the executor does for a fix
+// response selecting ids: the selection and the deferred rest.
+func answerTestPark(t *testing.T, raw string, ids ...string) (string, string) {
+	t.Helper()
+	parked, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parked = types.NormalizeFindings(parked, string(types.StepTest))
+	selected, err := types.MarshalFindingsJSON(types.FilterFindings(parked, ids))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deferred, err := types.MarshalFindingsJSON(types.ExcludeFindings(parked, ids))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selected, deferred
+}
+
+func TestTestStep_CutAfterAnEarlierStepCommittedStaysApprovable(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	reviewed := baseSHA
+	sctx.Run.ReviewApprovedHeadSHA = &reviewed
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked budget cut", err)
+	}
+	if pipeline.HasUnvalidatedWorkRefusal(outcome.Findings) {
+		t.Fatalf("findings = %s, commits made before Test started are not leftovers of the cut", outcome.Findings)
+	}
+}
+
+func TestTestStep_RepeatedCutKeepsRefusingBeforeAnyEvidenceCompletes(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		calls++
+		if calls == 1 {
+			if err := os.WriteFile(filepath.Join(dir, "setup.txt"), []byte("setup"), 0o644); err != nil {
+				return nil, err
+			}
+			gitCmd(t, dir, "add", "setup.txt")
+			gitCmd(t, dir, "commit", "-m", "evidence agent setup")
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	first, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("first round error = %v", err)
+	}
+	committed := sctx.Run.HeadSHA
+	if committed == headSHA || !pipeline.HasUnvalidatedWorkRefusal(first.Findings) {
+		t.Fatalf("first round findings = %s, want the agent's commit refused", first.Findings)
+	}
+
+	sctx.Fixing = true
+	sctx.PreviousFindings, sctx.DeferredFindings = answerTestPark(t, first.Findings, types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork)
+	second, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("validation-only round error = %v", err)
+	}
+	if work := testFindingByID(t, second.Findings, types.FindingIDTestAgentUnvalidatedWork).Description; !strings.Contains(work, "log -p "+headSHA+".."+committed) {
+		t.Fatalf("finding = %q, want the earlier cut's unvalidated commit still refused", work)
+	}
+}
+
+func TestTestStep_RepeatedCutReMeasuresLeftoversInsteadOfRepeatingThem(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		calls++
+		if calls == 1 {
+			if err := os.WriteFile(filepath.Join(dir, "foo_test.go"), []byte("package foo"), 0o644); err != nil {
+				return nil, err
+			}
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+	cutAgain := func(answered string) string {
+		t.Helper()
+		sctx.Fixing = true
+		sctx.PreviousFindings, sctx.DeferredFindings = answerTestPark(t, answered, types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork)
+		outcome, err := (&TestStep{}).Execute(sctx)
+		if err != nil {
+			t.Fatalf("validation-only round error = %v", err)
+		}
+		return outcome.Findings
+	}
+
+	first, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("first round error = %v", err)
+	}
+	second := cutAgain(first.Findings)
+	work := testFindingByID(t, second, types.FindingIDTestAgentUnvalidatedWork).Description
+	if strings.Count(work, "uncommitted changes to foo_test.go") != 1 || strings.Contains(work, "Since then") {
+		t.Fatalf("finding = %q, want the same leftover named once, not repeated as new work", work)
+	}
+
+	if err := os.Remove(filepath.Join(dir, "foo_test.go")); err != nil {
+		t.Fatal(err)
+	}
+	third := cutAgain(second)
+	if pipeline.HasUnvalidatedWorkRefusal(third) {
+		t.Fatalf("findings = %s, a worktree with the leftover gone and HEAD unmoved must be approvable again", third)
+	}
+}
+
+func TestTestStep_ValidationOnlyCutKeepsTheDeferredNoGo(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+	sctx.PreviousFindings = noGoTestGateJSON(headSHA)
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	first, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("repair round error = %v", err)
+	}
+	sctx.PreviousFindings, sctx.DeferredFindings = answerTestPark(t, first.Findings, types.FindingIDTestAgentTimeout)
+	second, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("validation-only round error = %v", err)
+	}
+	if !strings.Contains(second.Findings, "failed: checkout") {
+		t.Fatalf("findings = %s, want the deferred no-go kept on the park", second.Findings)
+	}
+	if second.FixSummary != NoChangesAppliedSummary {
+		t.Fatalf("fix summary = %q, want %q: a cut validation-only round fixes nothing", second.FixSummary, NoChangesAppliedSummary)
+	}
+	if got := testFindingByID(t, second.Findings, types.FindingIDTestAgentTimeout).Description; strings.Contains(got, "not a code failure") {
+		t.Fatalf("finding = %q, must not call the cut harmless next to a no-go", got)
+	}
+}
+
+func TestTestStep_BudgetCutInstructionsReachTheEvidenceTurn(t *testing.T) {
+	t.Parallel()
+	const guidance = "drive only the checkout scenario; do not run the full suite"
+	for _, tt := range []struct {
+		name      string
+		selection []string
+		repair    bool
+	}{
+		{"validation only", []string{types.FindingIDTestAgentTimeout}, false},
+		{"both budget-cut findings carry one note", []string{types.FindingIDTestAgentTimeout, types.FindingIDTestAgentUnvalidatedWork}, false},
+		{"with a repair finding", []string{types.FindingIDTestAgentTimeout, "test-2"}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			var prompts []string
+			ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				prompts = append(prompts, opts.Prompt)
+				if len(prompts) == 1 && tt.repair {
+					return &agent.Result{Output: json.RawMessage(`{"summary":"fix checkout"}`)}, nil
+				}
+				<-ctx.Done()
+				return nil, ctx.Err()
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+			sctx.Fixing = true
+			parked := `{"findings":[{"id":"` + types.FindingIDTestAgentTimeout + `","severity":"warning","action":"ask-user","description":"budget cut"},` +
+				`{"id":"` + types.FindingIDTestAgentUnvalidatedWork + `","severity":"warning","action":"ask-user","description":"approval is refused"},` +
+				strings.TrimPrefix(noGoTestGateJSON(headSHA), `{"findings":[`)
+			selected, deferred := answerTestPark(t, parked, tt.selection...)
+			answered, err := types.ParseFindingsJSON(selected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := range answered.Items {
+				if slices.Contains(testBudgetCutIDs, answered.Items[i].ID) {
+					answered.Items[i].UserInstructions = guidance
+				}
+			}
+			if sctx.PreviousFindings, err = types.MarshalFindingsJSON(answered); err != nil {
+				t.Fatal(err)
+			}
+			sctx.DeferredFindings = deferred
+
+			if _, err := (&TestStep{}).Execute(sctx); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			wantCalls := 1
+			if tt.repair {
+				wantCalls = 2
+			}
+			if len(prompts) != wantCalls {
+				t.Fatalf("agent calls = %d, want %d", len(prompts), wantCalls)
+			}
+			evidence := prompts[len(prompts)-1]
+			if !strings.Contains(evidence, "Operator guidance for this validation (from the decision on the Test agent budget cut):\n"+guidance+"\n") {
+				t.Fatalf("evidence prompt lacks the operator's budget-cut guidance:\n%s", evidence)
+			}
+			if n := strings.Count(evidence, guidance); n != 1 {
+				t.Fatalf("evidence prompt carries the operator's guidance %d times, want once:\n%s", n, evidence)
+			}
+		})
+	}
+}
+
+func TestTestStep_CutParkDoesNotRenderAnEarlierCyclesEvidence(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.TestAgentTimeout = 20 * time.Millisecond
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want a parked budget cut", err)
+	}
+	park := outcome.Findings
+	earlierCycle := liveValidatedFindingsJSON(t, []types.TestScenario{
+		{Name: "user reaches the success screen", Result: types.ScenarioResultPass, Live: true, Evidence: "checkout.png"},
+	}, types.TestVerdictGo, baseSHA)
+	steps := []*db.StepResult{{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &park}}
+	rounds := map[string][]*db.StepRound{"s1": {
+		{Round: 1, Trigger: "initial", FindingsJSON: &earlierCycle},
+		{Round: 2, Trigger: "initial", FindingsJSON: &park},
+	}}
+
+	md := BuildTestingSummary(steps, rounds)
+	for _, stale := range []string{"drove the checkout scenarios", "Live validation", "user reaches the success screen"} {
+		if strings.Contains(md, stale) {
+			t.Fatalf("Testing section renders an earlier cycle's evidence %q for a head it never validated:\n%s", stale, md)
+		}
+	}
+	if !strings.Contains(md, "before live validation completed") {
+		t.Fatalf("Testing section = %q, want it to say the cut left no evidence for this head", md)
+	}
+}
+
+func TestTestStep_RepairPromptLeavesOutTheBudgetCutFindings(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	var prompts []string
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		prompts = append(prompts, opts.Prompt)
+		if len(prompts) == 1 {
+			return &agent.Result{Output: json.RawMessage(`{"summary":"fix checkout"}`)}, nil
+		}
+		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+	sctx.PreviousFindings = `{"findings":[` +
+		`{"id":"test-agent-timeout","severity":"warning","action":"ask-user","description":"raise test_agent_timeout in global config"},` +
+		`{"id":"test-agent-unvalidated-work","severity":"error","action":"ask-user","description":"Approval is refused: leftover.txt"},` +
+		`{"id":"test-1","severity":"error","category":"test-command","description":"configured test command failed with exit code 1"}]}`
+
+	if _, err := (&TestStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) == 0 || !strings.Contains(prompts[0], "Fix the failing tests") {
+		t.Fatalf("prompts = %q, want a repair turn first", prompts)
+	}
+	repair := prompts[0]
+	if !strings.Contains(repair, "configured test command failed with exit code 1") {
+		t.Fatalf("repair prompt = %q, want the command failure to address", repair)
+	}
+	for _, operatorOnly := range []string{"raise test_agent_timeout in global config", "Approval is refused"} {
+		if strings.Contains(repair, operatorOnly) {
+			t.Fatalf("repair prompt carries the operator-only budget-cut text %q:\n%s", operatorOnly, repair)
+		}
+	}
+}
+
+func TestTestStep_EvidenceAgentCannotClaimAReservedBudgetCutID(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"test-agent-unvalidated-work","severity":"warning","action":"ask-user","description":"leftover build output"},{"id":"test-agent-timeout","severity":"warning","action":"ask-user","description":"slow suite"}],"summary":"ok","tested":["go test ./x"],"testing_summary":"drove it","artifacts":[],"scenarios":[{"name":"user runs it","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"go","unvalidated_since_sha":"deadbeef"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if findings.UnvalidatedSinceSHA != "" {
+		t.Fatalf("findings = %s, an agent payload must not set the park's measured head", outcome.Findings)
+	}
+	for _, item := range findings.Items {
+		if item.ID == types.FindingIDTestAgentUnvalidatedWork || item.ID == types.FindingIDTestAgentTimeout {
+			t.Fatalf("findings = %s, an agent finding must not claim a step-owned budget-cut ID", outcome.Findings)
+		}
+	}
+	if pipeline.HasUnvalidatedWorkRefusal(outcome.Findings) || !strings.Contains(outcome.Findings, "leftover build output") {
+		t.Fatalf("findings = %s, want the agent finding kept without refusing approval", outcome.Findings)
+	}
+}
+
+// leaveConflictedRebase stops a rebase on a conflict, leaving HEAD detached at
+// a partial result the way an agent cut mid-rebase does.
+func leaveConflictedRebase(t *testing.T, dir string) {
+	t.Helper()
+	start := gitCmd(t, dir, "rev-parse", "HEAD")
+	commitFile := func(content string) {
+		if err := os.WriteFile(filepath.Join(dir, "conflict.txt"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, dir, "add", "conflict.txt")
+		gitCmd(t, dir, "commit", "-m", content)
+	}
+	commitFile("theirs")
+	onto := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "reset", "--hard", start)
+	commitFile("ours")
+	cmd := exec.Command("git", "rebase", onto)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com", "GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com")
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("rebase unexpectedly applied cleanly: %s", out)
+	}
+}
+
+func testFindingByID(t *testing.T, raw, id string) types.Finding {
+	t.Helper()
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		t.Fatalf("parse findings: %v", err)
+	}
+	for _, item := range findings.Items {
+		if item.ID == id {
+			return item
+		}
+	}
+	t.Fatalf("findings = %#v, want %s", findings.Items, id)
+	return types.Finding{}
+}
 
 func TestTestStep_FixMode(t *testing.T) {
 	t.Parallel()
@@ -26,7 +890,7 @@ func TestTestStep_FixMode(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			callCount++
 			os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644)
-			return &agent.Result{Output: json.RawMessage(`{"summary":"  \"fix test failures.\"  "}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"summary":"  \"fix test failures.\"  ","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
@@ -41,8 +905,8 @@ func TestTestStep_FixMode(t *testing.T) {
 	if outcome.NeedsApproval {
 		t.Error("expected no approval after fix + passing tests")
 	}
-	if callCount != 1 {
-		t.Errorf("expected 1 agent call (fix), got %d", callCount)
+	if callCount != 2 {
+		t.Errorf("expected 2 agent calls (fix, then the unconditional evidence turn), got %d", callCount)
 	}
 	if len(ag.calls[0].JSONSchema) == 0 {
 		t.Error("expected fix call to request structured JSON output")
@@ -62,6 +926,11 @@ func TestTestStep_FixMode(t *testing.T) {
 	if !strings.Contains(ag.calls[0].Prompt, "smallest correct root-cause fix") {
 		t.Error("expected test fix prompt to prefer root-cause fixes over bandaids")
 	}
+	if !strings.Contains(ag.calls[0].Prompt, "When a problem can be solved by removing a code path that is not strictly required to satisfy the intent") ||
+		!strings.Contains(ag.calls[0].Prompt, "fix it by removing that path, not by validating, hardening, or documenting it") {
+		t.Error("expected test fix prompt to prefer removing unrequired paths")
+	}
+	assertTestQualityRulePrompt(t, ag.calls[0].Prompt)
 	if !strings.Contains(ag.calls[0].Prompt, "remove any transient artifacts your testing created in the working tree") {
 		t.Error("expected test fix prompt to ask the agent to clean up transient testing artifacts before finishing")
 	}
@@ -85,7 +954,7 @@ func TestTestStep_FixMode_UsesConfiguredCommitMessage(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644)
-			return &agent.Result{Output: json.RawMessage(`{"summary":"fix test failures"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"summary":"fix test failures","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
@@ -110,11 +979,19 @@ func TestTestStep_FixMode_UsesFallbackSummaryWhenStructuredSummaryMalformed(t *t
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
+	// Only the FIX turn returns the malformed payload this test is about; the
+	// unconditional evidence turn that follows answers the scenario contract
+	// normally, so the fallback-summary behaviour is what the test isolates.
+	fixTurnDone := false
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644)
-			return &agent.Result{Output: json.RawMessage(`{"not_summary":"oops"}`)}, nil
+			if !fixTurnDone {
+				fixTurnDone = true
+				os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644)
+				return &agent.Result{Output: json.RawMessage(`{"not_summary":"oops"}`)}, nil
+			}
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
@@ -145,7 +1022,7 @@ func TestTestStep_FixMode_AgentWritesNewTests_ProceedsAutomatically(t *testing.T
 			callCount++
 			// Simulate agent creating a new test file during fix in another supported language
 			os.WriteFile(filepath.Join(dir, "component.spec.tsx"), []byte("export {}\n"), 0o644)
-			return &agent.Result{Output: json.RawMessage(`{"summary":"add regression test"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"summary":"add regression test","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
@@ -161,8 +1038,8 @@ func TestTestStep_FixMode_AgentWritesNewTests_ProceedsAutomatically(t *testing.T
 	if outcome.NeedsApproval {
 		t.Error("expected no approval for an informational new-test-file finding when tests pass")
 	}
-	if callCount != 1 {
-		t.Errorf("expected 1 agent call in fix mode, got %d", callCount)
+	if callCount != 2 {
+		t.Errorf("expected 2 agent calls in fix mode (fix, then the unconditional evidence turn), got %d", callCount)
 	}
 
 	var f Findings
@@ -181,6 +1058,35 @@ func TestTestStep_FixMode_AgentWritesNewTests_ProceedsAutomatically(t *testing.T
 	}
 }
 
+func TestTestStep_ConfiguredCommandRunsEvidenceWithoutExtractedIntent(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+			calls++
+			return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
+
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("evidence agent calls = %d, want 1", calls)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings.Scenarios) == 0 || findings.Verdict != types.TestVerdictGo {
+		t.Fatalf("live findings = %+v, want scenarios and go verdict", findings)
+	}
+}
+
 func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -192,7 +1098,7 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			callCount++
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"evidence demonstrates intent","tested":["manual screenshot review"],"testing_summary":"captured screenshot evidence"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"evidence demonstrates intent","tested":["manual screenshot review"],"testing_summary":"captured screenshot evidence","artifacts":[],"scenarios":[{"name":"reviewer sees the new screen","result":"pass","live":true,"evidence":"manual screenshot review","reason":""}],"verdict":"go"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: testCmd})
@@ -219,25 +1125,27 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 	prompt := ag.calls[0].Prompt
 	for _, want := range []string{
 		"Show users a success screen after checkout",
-		"Decide what evidence or artifacts would clearly demonstrate the user intent is satisfied",
+		"Decide what evidence or artifacts would clearly demonstrate each scenario's result",
 		"Unit tests passing is not sufficient evidence by itself",
-		"Demonstrate the user intent working end-to-end in a way consistent with how an end user would actually experience it",
+		"drive each scenario end-to-end against that running product",
 		"Prefer product-level artifacts",
 		"Only use command output as an artifact when that output directly demonstrates the end-user experience or requested behavior",
 		"Configured test command already ran successfully as baseline",
 		testCmd,
-		"The \"testing_summary\" must account for the complete test step: baseline commands that already ran, automated tests, manual or evidence-producing checks, artifacts gathered, and the overall result",
+		"The \"testing_summary\" must account for the complete test step: baseline commands that already ran, scenarios driven, manual or evidence-producing checks, artifacts gathered, and the overall result",
 		"screenshots, GIFs, videos, rendered UI, CLI transcripts",
 		"For UI, HTML, CSS, Electron renderer, browser, visual layout, or copy-placement changes, attempt to capture reviewer-visible visual evidence",
 		"DOM snapshots, selector assertions, and text-only render summaries are not substitutes for visual evidence when a rendered surface is available",
 		"If a UI-facing change has no screenshot, image, video, GIF, or rendered HTML artifact, state why in testing_summary",
-		"Write new evidence files into this temporary evidence directory:",
-		filepath.Join(os.TempDir(), "no-mistakes-evidence", sctx.Run.ID),
+		"Write new evidence files into this evidence directory, never into the worktree:",
+		sctx.EvidenceDir,
 		"Do not move, commit, or modify source files only to make evidence linkable",
-		"If no existing test produces sufficient evidence, write or improve a focused test",
-		"If automated testing cannot produce the needed evidence, execute manual verification steps",
+		"if no existing check drives a scenario, write or improve a focused test",
+		"perform manual verification with evidence",
 		"Always include an \"artifacts\" array",
 		"If sufficient evidence is not possible, report a warning finding",
+		"When the blocker is a host capability or OS permission the agent's own process lacks",
+		"name the specific capability or permission and how to grant it",
 		"remove any transient artifacts your testing created in the working tree",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -247,7 +1155,7 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 	if strings.Contains(prompt, "will be available from the pushed commit") || strings.Contains(prompt, "files that already exist in the repository") {
 		t.Fatalf("expected prompt not to make the testing agent worry about committed evidence files, got:\n%s", prompt)
 	}
-	if _, err := os.Stat(filepath.Join(os.TempDir(), "no-mistakes-evidence", sctx.Run.ID)); err != nil {
+	if _, err := os.Stat(sctx.EvidenceDir); err != nil {
 		t.Fatalf("expected temporary evidence directory to exist: %v", err)
 	}
 
@@ -261,117 +1169,18 @@ func TestTestStep_UserIntentRunsConfiguredCommandThenEvidenceAgent(t *testing.T)
 	}
 }
 
-// TestTestStep_RefusesConfiguredCommandWhenRepositoryNodePinCannotBeHonored
-// covers the EBADENGINE defect: a repository that pins Node via .nvmrc must
-// have its configured test command refuse outright when no matching Node
-// install exists on the host, rather than silently running commands.test
-// under whatever Node the host happens to have.
-func TestTestStep_RefusesConfiguredCommandWhenRepositoryNodePinCannotBeHonored(t *testing.T) {
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	writeFile(t, filepath.Join(dir, ".nvmrc"), "20.19.0\n")
-
-	root := t.TempDir()
-	t.Setenv("MISE_DATA_DIR", filepath.Join(root, "mise"))
-	t.Setenv("NVM_DIR", filepath.Join(root, "nvm"))
-	t.Setenv("VOLTA_HOME", filepath.Join(root, "volta"))
-	t.Setenv("FNM_DIR", filepath.Join(root, "fnm"))
-	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
-	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	ranMarker := filepath.Join(dir, "test-ran.marker")
-	ag := &mockAgent{name: "test"}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "touch " + ranMarker})
-
-	step := &TestStep{}
-	outcome, err := step.Execute(sctx)
-	// This must be a hard step failure (non-nil error, nil outcome), not the
-	// softer "park for approval" shape TestStep uses for an ordinary failing
-	// test run (nil error, outcome.NeedsApproval=true). A parked outcome is
-	// still a form of "warn and let someone decide later"; refusing to run at
-	// all is the actual fix for the EBADENGINE defect.
-	if err == nil {
-		t.Fatalf("expected the step to refuse when the repository's Node pin cannot be honored, got outcome %+v", outcome)
-	}
-	if outcome != nil {
-		t.Fatalf("expected a nil outcome on hard refusal (not a parked/needs-approval outcome), got %+v", outcome)
-	}
-	if !strings.Contains(err.Error(), "20.19.0") {
-		t.Fatalf("expected error to name the unresolved pin, got: %v", err)
-	}
-	if len(ag.calls) != 0 {
-		t.Fatal("expected the evidence agent not to run once the Node pin check refuses")
-	}
-	if _, statErr := os.Stat(ranMarker); statErr == nil {
-		t.Fatal("expected the configured test command to never execute once the Node pin check refuses")
-	} else if !os.IsNotExist(statErr) {
-		t.Fatalf("unexpected error checking for test command side effect: %v", statErr)
-	}
-}
-
-// TestTestStep_RunsConfiguredCommandUnderPinnedNodeInstall covers the fix
-// path: when a matching Node install exists under a version manager
-// directory, the configured test command must run with that install's bin
-// directory first on PATH instead of the host's default Node.
-func TestTestStep_RunsConfiguredCommandUnderPinnedNodeInstall(t *testing.T) {
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	writeFile(t, filepath.Join(dir, ".nvmrc"), "20.19.0\n")
-
-	root := t.TempDir()
-	t.Setenv("MISE_DATA_DIR", root)
-	t.Setenv("NVM_DIR", filepath.Join(root, "no-nvm-here"))
-	t.Setenv("VOLTA_HOME", filepath.Join(root, "no-volta-here"))
-	t.Setenv("FNM_DIR", filepath.Join(root, "no-fnm-here"))
-	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "no-asdf-here"))
-	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	installBin := filepath.Join(root, "installs", "node", "20.19.0", "bin")
-	if err := os.MkdirAll(installBin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	fakeNode := filepath.Join(installBin, nodeBinaryName())
-	writeExecutable(t, fakeNode)
-
-	whichLog := filepath.Join(dir, "which-node.log")
-	testCmd := "command -v node > " + whichLog
-
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"tested":["evidence"]}`)}, nil
-		},
-	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: testCmd})
-
-	step := &TestStep{}
-	outcome, err := step.Execute(sctx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if outcome.NeedsApproval {
-		t.Fatalf("expected the resolvable pin to let the run proceed, got %+v", outcome)
-	}
-	resolved, err := os.ReadFile(whichLog)
-	if err != nil {
-		t.Fatalf("expected configured test command to run: %v", err)
-	}
-	if strings.TrimSpace(string(resolved)) != fakeNode {
-		t.Fatalf("configured test command resolved node to %q, want the pinned install %q", strings.TrimSpace(string(resolved)), fakeNode)
-	}
-}
-
-func TestTestStep_InRepoEvidenceFallsBackWhenConfiguredDirEscapesWorktree(t *testing.T) {
+func TestTestStep_EvidenceDirectoryIsAlwaysOutsideTheWorktree(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["manual evidence check"],"testing_summary":"checked evidence"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["manual evidence check"],"testing_summary":"checked evidence","artifacts":[],"scenarios":[{"name":"user sees the change","result":"pass","live":true,"evidence":"manual evidence check","reason":""}],"verdict":"go"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = "Show users a success screen after checkout"
-	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "../outside"}
 
 	step := &TestStep{}
 	if _, err := step.Execute(sctx); err != nil {
@@ -379,31 +1188,28 @@ func TestTestStep_InRepoEvidenceFallsBackWhenConfiguredDirEscapesWorktree(t *tes
 	}
 
 	prompt := ag.calls[0].Prompt
-	wantDir := filepath.Join(os.TempDir(), "no-mistakes-evidence", sctx.Run.ID)
-	if !strings.Contains(prompt, "Write new evidence files into this temporary evidence directory: "+wantDir) {
-		t.Fatalf("expected temporary evidence guidance for unsafe in-repo dir, got:\n%s", prompt)
+	wantDir := sctx.EvidenceDir
+	if !strings.Contains(prompt, "Write new evidence files into this evidence directory, never into the worktree: "+wantDir) {
+		t.Fatalf("expected evidence guidance to point outside the worktree, got:\n%s", prompt)
 	}
-	if strings.Contains(prompt, "in-repo evidence directory") || strings.Contains(prompt, "committed and pushed automatically") {
-		t.Fatalf("did not expect in-repo publishing promise for unsafe evidence dir, got:\n%s", prompt)
+	if _, err := os.Stat(filepath.Join(dir, ".no-mistakes")); err == nil {
+		t.Fatal("test step created an in-repo evidence directory")
 	}
 }
 
-func TestTestStep_InRepoEvidenceFallsBackWhenEvidenceDirIsIgnored(t *testing.T) {
+func TestTestStep_PublishedEvidenceGuidanceNamesTheEvidenceBranch(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("evidence/\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["manual evidence check"],"testing_summary":"checked evidence"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["manual evidence check"],"testing_summary":"checked evidence","artifacts":[],"scenarios":[{"name":"user sees the change","result":"pass","live":true,"evidence":"manual evidence check","reason":""}],"verdict":"go"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.UserIntent = "Show users a success screen after checkout"
-	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: "evidence"}
+	sctx.Config.Test.Evidence = config.Evidence{StoreInRepo: true, Dir: ".no-mistakes/evidence", Branch: "team/ci/evidence"}
 
 	step := &TestStep{}
 	if _, err := step.Execute(sctx); err != nil {
@@ -411,12 +1217,12 @@ func TestTestStep_InRepoEvidenceFallsBackWhenEvidenceDirIsIgnored(t *testing.T) 
 	}
 
 	prompt := ag.calls[0].Prompt
-	wantDir := filepath.Join(os.TempDir(), "no-mistakes-evidence", sctx.Run.ID)
-	if !strings.Contains(prompt, "Write new evidence files into this temporary evidence directory: "+wantDir) {
-		t.Fatalf("expected temporary evidence guidance for ignored in-repo dir, got:\n%s", prompt)
+	wantDir := sctx.EvidenceDir
+	if !strings.Contains(prompt, "published to the repository's team/ci/evidence branch automatically and linked from the PR: "+wantDir) {
+		t.Fatalf("expected evidence-branch publishing guidance, got:\n%s", prompt)
 	}
-	if strings.Contains(prompt, "in-repo evidence directory") || strings.Contains(prompt, "committed and pushed automatically") {
-		t.Fatalf("did not expect in-repo publishing promise for ignored evidence dir, got:\n%s", prompt)
+	if strings.Contains(prompt, "committed and pushed automatically") {
+		t.Fatalf("evidence must not be promised as a commit on the pushed branch, got:\n%s", prompt)
 	}
 }
 
@@ -431,7 +1237,7 @@ func TestTestStep_InitialAgent_TargetedValidationContract(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["go test ./internal/cli -run TestDoctor -count=1"],"testing_summary":"targeted check passed"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"","tested":["go test ./internal/cli -run TestDoctor -count=1"],"testing_summary":"targeted check passed","artifacts":[],"scenarios":[{"name":"doctor reports the new row","result":"pass","live":true,"evidence":"go test ./internal/cli -run TestDoctor -count=1","reason":""}],"verdict":"go"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
@@ -445,8 +1251,9 @@ func TestTestStep_InitialAgent_TargetedValidationContract(t *testing.T) {
 	}
 	prompt := ag.calls[0].Prompt
 
+	assertTestQualityRulePrompt(t, prompt)
 	for _, want := range []string{
-		"run the smallest relevant tests yourself",
+		"Derive the scenarios this change must satisfy, then run each one against the real running product",
 		"Do NOT run the complete repository test suite",
 		"Local Test is targeted validation of the requested intent",
 		"remote CI owns broad regression and remains mandatory before a PR is ready",
@@ -461,6 +1268,9 @@ func TestTestStep_InitialAgent_TargetedValidationContract(t *testing.T) {
 	for _, forbid := range []string{
 		"run the appropriate tests yourself",
 		"Run the tests, identify failures",
+		// Replaced by scenario derivation: "the smallest relevant tests" is
+		// what let a green unit-test run stand in for driving the product.
+		"run the smallest relevant tests yourself",
 	} {
 		if strings.Contains(prompt, forbid) {
 			t.Errorf("initial test prompt still carries open-ended suite language %q:\n%s", forbid, prompt)
@@ -480,7 +1290,7 @@ func TestTestStep_FixMode_TargetedVerificationContract(t *testing.T) {
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644)
-			return &agent.Result{Output: json.RawMessage(`{"summary":"fix targeted failure"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"summary":"fix targeted failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
@@ -531,7 +1341,7 @@ func TestTestStep_FixMode_DriverFullSuiteInstructionDoesNotOverrideContract(t *t
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			os.WriteFile(filepath.Join(dir, "fix.txt"), []byte("fixed"), 0o644)
-			return &agent.Result{Output: json.RawMessage(`{"summary":"fix focused failure"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"summary":"fix focused failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})
@@ -562,7 +1372,7 @@ func TestTestStep_InitialAgent_NoTargetedEvidenceRequiresHonestFinding(t *testin
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"no targeted test can prove the intent","action":"ask-user"}],"summary":"missing evidence","tested":["manual review of changed packages"],"testing_summary":"could not produce targeted evidence"}`)}, nil
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"no targeted test can prove the intent","action":"ask-user"}],"summary":"missing evidence","tested":["manual review of changed packages"],"testing_summary":"could not produce targeted evidence","artifacts":[],"scenarios":[{"name":"user exercises the changed behavior","result":"untested","live":false,"evidence":"","reason":"no targeted product driver is available"}],"verdict":"inconclusive"}`)}, nil
 		},
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})

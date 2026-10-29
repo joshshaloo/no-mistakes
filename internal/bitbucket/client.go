@@ -48,7 +48,8 @@ type CommitStatus struct {
 }
 
 type Pipeline struct {
-	UUID string `json:"uuid"`
+	UUID        string `json:"uuid"`
+	BuildNumber int    `json:"build_number"`
 }
 
 type PipelineStep struct {
@@ -131,19 +132,32 @@ func (c *Client) FindOpenPRBySourceBranch(ctx context.Context, repo RepoRef, bra
 	clauses = append(clauses, fmt.Sprintf(`state=%q`, "OPEN"))
 	query.Set("q", strings.Join(clauses, " AND "))
 
-	var response struct {
+	var response *struct {
 		Values []bitbucketPullRequest `json:"values"`
 	}
 	if err := c.doJSON(ctx, http.MethodGet, repoPRPath(repo), query, nil, &response); err != nil {
 		return nil, err
 	}
+	if response == nil || response.Values == nil {
+		return nil, fmt.Errorf("decode Bitbucket PR list: expected values array")
+	}
 	if len(response.Values) == 0 {
 		return nil, nil
+	}
+	for i := range response.Values {
+		candidate := &response.Values[i]
+		if candidate.ID <= 0 {
+			return nil, fmt.Errorf("decode Bitbucket PR list: entry %d missing positive id", i)
+		}
+		candidate.Links.HTML.Href = prURL(repo, candidate.ID, "")
+		if candidate.Links.HTML.Href == "" {
+			return nil, fmt.Errorf("decode Bitbucket PR list: entry %d missing configured repository identity", i)
+		}
 	}
 	return response.Values[0].toPullRequest(), nil
 }
 
-func (c *Client) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destBranch, title, body string) (*PullRequest, error) {
+func (c *Client) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destBranch, title, body string, draft bool) (*PullRequest, error) {
 	requestBody := map[string]any{
 		"title":       title,
 		"description": body,
@@ -154,6 +168,9 @@ func (c *Client) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destB
 			"branch": map[string]string{"name": destBranch},
 		},
 	}
+	if draft {
+		requestBody["draft"] = true
+	}
 	var response bitbucketPullRequest
 	if err := c.doJSON(ctx, http.MethodPost, repoPRPath(repo), nil, requestBody, &response); err != nil {
 		return nil, err
@@ -162,9 +179,9 @@ func (c *Client) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destB
 }
 
 func (c *Client) UpdatePR(ctx context.Context, repo RepoRef, prID int, title, body string) (*PullRequest, error) {
-	requestBody := map[string]any{
-		"title":       title,
-		"description": body,
+	requestBody := map[string]any{"description": body}
+	if title != "" {
+		requestBody["title"] = title
 	}
 	var response bitbucketPullRequest
 	if err := c.doJSON(ctx, http.MethodPut, fmt.Sprintf("%s/%d", repoPRPath(repo), prID), nil, requestBody, &response); err != nil {
@@ -535,8 +552,12 @@ func (c *Client) doJSONPathOrURLWithLimit(ctx context.Context, method, pathOrURL
 		}
 		return len(data), nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(responseBody); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(responseBody); err != nil {
 		return 0, fmt.Errorf("decode Bitbucket response: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return 0, fmt.Errorf("decode Bitbucket response: expected a single JSON value")
 	}
 	return 0, nil
 }

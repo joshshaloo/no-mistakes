@@ -13,7 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestExecutor_FixEmitsDiffAndFixReviewStatus(t *testing.T) {
+func TestExecutor_FixEmitsFixReviewStatusWithoutStreamingTheDiff(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 
 	// Create a real git repo as workDir so DiffHead works
@@ -52,21 +52,22 @@ func TestExecutor_FixEmitsDiffAndFixReviewStatus(t *testing.T) {
 	if initialEvent.Status == nil || *initialEvent.Status != string(types.StepStatusAwaitingApproval) {
 		t.Errorf("expected awaiting_approval status, got %v", initialEvent.Status)
 	}
-	if initialEvent.Diff != nil {
-		t.Error("expected no diff on initial approval")
-	}
 
 	// Send fix action
 	exec.Respond(types.StepReview, types.ActionFix, nil)
 
-	// Find the fix_review event
+	// The gate is announced by status alone. The working-tree diff is
+	// derived state served on demand (ipc.MethodGetStepDiff); it is
+	// deliberately not attached here, because it is unbounded and a single
+	// oversized frame would break the whole subscription.
 	fixEvent := waitForEvent(t, events, ipc.EventStepCompleted, string(types.StepStatusFixReview))
-
-	// Verify diff is included in the event
-	if fixEvent.Diff == nil || *fixEvent.Diff == "" {
-		t.Error("expected diff in fix_review event")
-	} else if !strings.Contains(*fixEvent.Diff, "fix.txt") {
-		t.Errorf("expected diff to mention fix.txt, got: %s", *fixEvent.Diff)
+	if fixEvent.StepName == nil || *fixEvent.StepName != types.StepReview {
+		t.Errorf("fix_review event step = %v, want review", fixEvent.StepName)
+	}
+	if encoded, err := json.Marshal(fixEvent); err != nil {
+		t.Fatal(err)
+	} else if len(encoded) > 4096 {
+		t.Errorf("fix_review frame is %d bytes; the gate event must stay small enough that no worktree change can overflow it", len(encoded))
 	}
 
 	// Approve to end
@@ -111,11 +112,33 @@ func TestExecutor_FixEmitsFixingStatusImmediately(t *testing.T) {
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	beforeFix, err := database.GetStepsByRun(run.ID)
+	if err != nil || len(beforeFix) != 1 || beforeFix[0].RoundStartedAt == nil {
+		t.Fatalf("read initial round start: steps=%+v err=%v", beforeFix, err)
+	}
+	initialRoundStartedAt := *beforeFix[0].RoundStartedAt
+	// DB clocks use whole seconds. Cross the next tick so this regression can
+	// prove the fix transition resets the round clock rather than retaining the
+	// enclosing step's start.
+	for time.Now().Unix() <= initialRoundStartedAt {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
 		t.Fatal(err)
 	}
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixing)
+	fixing, err := database.GetStepsByRun(run.ID)
+	if err != nil || len(fixing) != 1 || fixing[0].RoundStartedAt == nil {
+		close(releaseFix)
+		<-done
+		t.Fatalf("read fix round start: steps=%+v err=%v", fixing, err)
+	}
+	if *fixing[0].RoundStartedAt <= initialRoundStartedAt {
+		close(releaseFix)
+		<-done
+		t.Fatalf("fix round start = %d, want after initial round start %d", *fixing[0].RoundStartedAt, initialRoundStartedAt)
+	}
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
@@ -148,7 +171,7 @@ func TestExecutor_FixingEventIncludesFindingStats(t *testing.T) {
 	workDir := t.TempDir()
 	releaseFix := make(chan struct{})
 	callCount := 0
-	findings := `{"findings":[{"id":"r1","severity":"warning","description":"one","action":"auto-fix"},{"id":"r2","severity":"warning","description":"two","action":"auto-fix"}],"summary":"two"}`
+	findings := `{"findings":[{"id":"r1","severity":"warning","file":"one.go","description":"one","action":"auto-fix"},{"id":"r2","severity":"warning","file":"two.go","description":"two","action":"auto-fix"}],"summary":"two"}`
 	step := &adaptiveCallStep{
 		name: types.StepReview,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
@@ -157,7 +180,7 @@ func TestExecutor_FixingEventIncludesFindingStats(t *testing.T) {
 				return &StepOutcome{NeedsApproval: true, Findings: findings}, nil
 			}
 			<-releaseFix
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"one.go"}, ReviewablePaths: []string{"one.go"}}, nil
 		},
 	}
 
@@ -185,6 +208,10 @@ func TestExecutor_FixingEventIncludesFindingStats(t *testing.T) {
 	}
 
 	close(releaseFix)
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case err := <-done:
 		if err != nil {
@@ -223,10 +250,9 @@ func TestExecutor_FixReviewNoChanges(t *testing.T) {
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	exec.Respond(types.StepReview, types.ActionFix, nil)
 
-	// No changes made — diff should not be in event
 	fixEvent := waitForEvent(t, events, ipc.EventStepCompleted, string(types.StepStatusFixReview))
-	if fixEvent.Diff != nil {
-		t.Error("expected no diff when agent made no changes")
+	if fixEvent.Status == nil || *fixEvent.Status != string(types.StepStatusFixReview) {
+		t.Errorf("expected fix_review status, got %v", fixEvent.Status)
 	}
 
 	exec.Respond(types.StepReview, types.ActionApprove, nil)
@@ -258,7 +284,7 @@ func TestExecutor_FixSetsPreviousFindings(t *testing.T) {
 			}
 			// Second call (fix): capture PreviousFindings and pass
 			capturedFindings = sctx.PreviousFindings
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -271,6 +297,10 @@ func TestExecutor_FixSetsPreviousFindings(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	exec.Respond(types.StepReview, types.ActionFix, nil)
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
 
 	select {
 	case err := <-done:
@@ -364,11 +394,11 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"main.go","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","file":"other.go","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -381,8 +411,12 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	instructions := map[string]string{"review-1": "only touch parser.go, skip helpers"}
-	added := []types.Finding{{Severity: "warning", Description: "also audit logger init", Action: types.ActionAutoFix}}
-	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, instructions, added); err != nil {
+	added := []types.Finding{{Severity: "warning", File: "logger.go", Description: "also audit logger init", Action: types.ActionAutoFix}}
+	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, instructions, added, ""); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -459,11 +493,11 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"main.go","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","file":"other.go","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"other.go"}, ReviewablePaths: []string{"other.go"}}, nil
 		},
 	}
 
@@ -476,6 +510,10 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-2"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -509,10 +547,13 @@ func TestExecutor_FixClearsStoredFindingsAfterSuccessfulReRun(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"severity":"error","description":"first pass issue","action":"auto-fix"}],"summary":"1 issue"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"main.go","description":"first pass issue","action":"auto-fix"}],"summary":"1 issue"}`,
 				}, nil
 			}
-			return &StepOutcome{}, nil
+			// A selected finding leaves the outstanding set only on a positive
+			// coverage record: the rereview names the file it re-checked and no
+			// longer reports the defect. An empty rereview on its own clears nothing.
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -524,7 +565,7 @@ func TestExecutor_FixClearsStoredFindingsAfterSuccessfulReRun(t *testing.T) {
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -558,10 +599,10 @@ func TestExecutor_FixPersistsFollowUpRoundAsAutoFix(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"severity":"error","description":"first pass issue","action":"auto-fix"}],"summary":"1 issue"}`,
+					Findings:      `{"findings":[{"severity":"error","file":"main.go","description":"first pass issue","action":"auto-fix"}],"summary":"1 issue"}`,
 				}, nil
 			}
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 
@@ -574,6 +615,10 @@ func TestExecutor_FixPersistsFollowUpRoundAsAutoFix(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -622,11 +667,11 @@ func TestExecutor_FixSelectedFindingsRewritesSummary(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"main.go","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","file":"other.go","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
 				}, nil
 			}
 			capturedFindings = sctx.PreviousFindings
-			return &StepOutcome{}, nil
+			return &StepOutcome{ReviewedPaths: []string{"other.go"}, ReviewablePaths: []string{"other.go"}}, nil
 		},
 	}
 
@@ -639,6 +684,10 @@ func TestExecutor_FixSelectedFindingsRewritesSummary(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-2"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -678,10 +727,10 @@ func TestExecutor_UserFixRecordsSelectedFindingIDsAndFixSummary(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					NeedsApproval: true,
-					Findings:      `{"findings":[{"id":"review-1","severity":"error","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
+					Findings:      `{"findings":[{"id":"review-1","severity":"error","file":"main.go","description":"first","action":"auto-fix"},{"id":"review-2","severity":"warning","file":"other.go","description":"second","action":"auto-fix"}],"summary":"2 findings"}`,
 				}, nil
 			}
-			return &StepOutcome{FixSummary: "fix the warning"}, nil
+			return &StepOutcome{FixSummary: "fix the warning", ReviewedPaths: []string{"other.go"}, ReviewablePaths: []string{"other.go"}}, nil
 		},
 	}
 
@@ -694,6 +743,10 @@ func TestExecutor_UserFixRecordsSelectedFindingIDsAndFixSummary(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-2"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -750,17 +803,21 @@ func TestExecutor_AutoFixRecordsSelectedFindingIDs(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					AutoFixable: true,
-					Findings:    `{"findings":[{"id":"review-1","severity":"warning","description":"a","action":"auto-fix"},{"id":"review-2","severity":"warning","description":"b","action":"ask-user"}],"summary":"2"}`,
+					Findings:    `{"findings":[{"id":"review-1","severity":"warning","file":"main.go","description":"a","action":"auto-fix"},{"id":"review-2","severity":"warning","file":"other.go","description":"b","action":"ask-user"}],"summary":"2"}`,
 				}, nil
 			}
-			return &StepOutcome{FixSummary: "apply cheap fix"}, nil
+			return &StepOutcome{FixSummary: "apply cheap fix", ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 
 	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
-	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
-		t.Fatalf("execute: %v", err)
-	}
+	done, _ := startExecutor(t, exec, run, repo, workDir)
+
+	// The auto-fix round dispatched only the auto-fixable selection. The
+	// ask-user finding was never decided by anyone, so the append-only carry
+	// keeps it outstanding and the gate parks for the operator instead of the
+	// run completing: nothing leaves the outstanding set by silence.
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
 
 	dbSteps, err := database.GetStepsByRun(run.ID)
 	if err != nil {
@@ -786,6 +843,14 @@ func TestExecutor_AutoFixRecordsSelectedFindingIDs(t *testing.T) {
 	if rounds[1].FixSummary == nil || *rounds[1].FixSummary != "apply cheap fix" {
 		t.Fatalf("expected fix_summary persisted on round 2, got %v", rounds[1].FixSummary)
 	}
+	if dbSteps[0].FindingsJSON == nil || !strings.Contains(*dbSteps[0].FindingsJSON, "review-2") {
+		t.Fatalf("expected the undecided ask-user finding to stay outstanding, got %v", dbSteps[0].FindingsJSON)
+	}
+
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("respond: %v", err)
+	}
+	waitExecutorDone(t, done)
 }
 
 func TestRoundInsertIDClearsOnInsertFailure(t *testing.T) {

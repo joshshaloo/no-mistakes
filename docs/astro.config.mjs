@@ -30,6 +30,10 @@ export default defineConfig({
             { label: "The Gate Model", slug: "concepts/gate-model" },
             { label: "Pipeline", slug: "concepts/pipeline" },
             { label: "Auto-Fix Loop", slug: "concepts/auto-fix" },
+            {
+              label: "The Review Conversation",
+              slug: "concepts/review-conversation",
+            },
             { label: "Daemon & Worktrees", slug: "concepts/daemon" },
           ],
         },
@@ -48,6 +52,7 @@ export default defineConfig({
           label: "Reference",
           items: [
             { label: "CLI Commands", slug: "reference/cli" },
+            { label: "Evaluation toolkit", slug: "reference/eval" },
             { label: "Pipeline Steps", slug: "reference/pipeline-steps" },
             { label: "Global Config", slug: "reference/global-config" },
             { label: "Repo Config", slug: "reference/repo-config" },

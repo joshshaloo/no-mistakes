@@ -10,12 +10,12 @@ import (
 	"io"
 	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
-	"github.com/kunchenguid/no-mistakes/internal/notices"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
-	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // CmdFactory builds an exec.Cmd in the caller's workdir with the caller's env.
@@ -23,10 +23,11 @@ type CmdFactory func(ctx context.Context, name string, args ...string) *exec.Cmd
 
 // Host talks to GitLab through the glab CLI.
 type Host struct {
-	cmd          CmdFactory
+	cmd          scm.CommandFactory
 	cliAvailable func() bool
 	host         string // repo's GitLab hostname; scopes the auth check
 	projectPath  string // repo's "group/project" path; enables REST job reads
+	draft        bool   // open created MRs as drafts (glab mr create --draft)
 }
 
 // New builds a Host. cliAvailable reports whether the glab binary is
@@ -40,11 +41,19 @@ type Host struct {
 // are optional; empty reproduces the legacy unscoped behavior.
 func New(cmd CmdFactory, cliAvailable func() bool, host, projectPath string) *Host {
 	return &Host{
-		cmd:          cmd,
+		cmd:          scm.SuperviseCommands(cmd),
 		cliAvailable: cliAvailable,
 		host:         strings.TrimSpace(host),
 		projectPath:  strings.TrimSpace(projectPath),
 	}
+}
+
+// NewWithDraft builds a Host that opens created MRs as drafts when draft is
+// true (glab mr create --draft). See New for the other parameters.
+func NewWithDraft(cmd CmdFactory, cliAvailable func() bool, host, projectPath string, draft bool) *Host {
+	h := New(cmd, cliAvailable, host, projectPath)
+	h.draft = draft
+	return h
 }
 
 // ProjectPath extracts the "group/project" path (no host, no trailing .git)
@@ -134,22 +143,64 @@ func (h *Host) Available(ctx context.Context) error {
 	if h.host != "" {
 		authArgs = append(authArgs, "--hostname", h.host)
 	}
-	if err := shellenv.RunShellCommand(h.cmd(ctx, "glab", authArgs...)); err != nil {
+	if err := h.cmd(ctx, "glab", authArgs...).Run(); err != nil {
 		return errors.New("glab CLI is not authenticated")
 	}
 	return nil
 }
 
+func parseMergeRequestURL(raw, expectedHost, expectedProject string) (int, error) {
+	trimmed := strings.TrimSpace(raw)
+	parsed, err := url.Parse(trimmed)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return 0, errors.New("expected absolute GitLab merge request URL")
+	}
+	if !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https") {
+		return 0, errors.New("expected HTTP GitLab merge request URL")
+	}
+	if expectedHost != "" && !strings.EqualFold(parsed.Hostname(), expectedHost) {
+		return 0, fmt.Errorf("URL host %q does not match GitLab host %q", parsed.Hostname(), expectedHost)
+	}
+	segments := strings.Split(strings.Trim(parsed.Path, "/"), "/")
+	if len(segments) < 5 || segments[len(segments)-3] != "-" || segments[len(segments)-2] != "merge_requests" {
+		return 0, errors.New("expected GitLab /group/project/-/merge_requests/number URL")
+	}
+	projectSegments := segments[:len(segments)-3]
+	for _, segment := range projectSegments {
+		if segment == "" || segment == "." || segment == ".." {
+			return 0, errors.New("expected unambiguous GitLab project path")
+		}
+	}
+	actualProject := strings.Join(projectSegments, "/")
+	expectedProject = strings.Trim(strings.TrimSpace(expectedProject), "/")
+	if expectedProject != "" && !strings.EqualFold(actualProject, expectedProject) {
+		return 0, fmt.Errorf("URL project %q does not match GitLab project %q", actualProject, expectedProject)
+	}
+	number, err := strconv.Atoi(segments[len(segments)-1])
+	if err != nil || number <= 0 {
+		return 0, errors.New("expected positive GitLab merge request number")
+	}
+	escapedSegments := strings.Split(strings.Trim(parsed.EscapedPath(), "/"), "/")
+	if len(escapedSegments) != len(segments) || escapedSegments[len(escapedSegments)-1] != strconv.Itoa(number) {
+		return 0, errors.New("expected canonical GitLab merge request number path")
+	}
+	if parsed.ForceQuery || parsed.RawQuery != "" || strings.Contains(trimmed, "#") {
+		return 0, errors.New("expected GitLab merge request URL without query or fragment")
+	}
+	return number, nil
+}
+
 type mrPayload struct {
-	Title               string `json:"title"`
-	Description         string `json:"description"`
-	IID                 int    `json:"iid"`
-	WebURL              string `json:"web_url"`
-	URL                 string `json:"url"`
-	State               string `json:"state"`
-	HasConflicts        bool   `json:"has_conflicts"`
-	DetailedMergeStatus string `json:"detailed_merge_status"`
-	MergeStatus         string `json:"merge_status"`
+	Description         *string `json:"description"`
+	IID                 int     `json:"iid"`
+	Title               string  `json:"title"`
+	WebURL              string  `json:"web_url"`
+	URL                 string  `json:"url"`
+	State               string  `json:"state"`
+	HasConflicts        bool    `json:"has_conflicts"`
+	DetailedMergeStatus string  `json:"detailed_merge_status"`
+	MergeStatus         string  `json:"merge_status"`
+	TargetBranch        string  `json:"target_branch"`
 }
 
 func (p mrPayload) toPR() *scm.PR {
@@ -157,7 +208,7 @@ func (p mrPayload) toPR() *scm.PR {
 	if url == "" {
 		url = strings.TrimSpace(p.URL)
 	}
-	pr := &scm.PR{URL: url}
+	pr := &scm.PR{URL: url, BaseBranch: strings.TrimSpace(p.TargetBranch)}
 	if p.IID > 0 {
 		pr.Number = fmt.Sprintf("%d", p.IID)
 	}
@@ -175,34 +226,64 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 	// whole command. Rely on the open-by-default behavior.
 	args = append(args, "--output", "json")
 	cmd := h.cmd(ctx, "glab", args...)
-	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("glab mr list: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	trimmed := bytesTrimToJSON(out)
 	if len(trimmed) == 0 {
-		return nil, nil
+		return nil, errors.New("parse glab mr list JSON: no JSON found")
 	}
 	var mrs []mrPayload
-	if err := json.Unmarshal(trimmed, &mrs); err != nil || len(mrs) == 0 {
+	if err := json.Unmarshal(trimmed, &mrs); err != nil {
+		return nil, fmt.Errorf("parse glab mr list JSON: %w", err)
+	}
+	if mrs == nil {
+		return nil, errors.New("parse glab mr list JSON: expected array")
+	}
+	if len(mrs) == 0 {
 		return nil, nil
+	}
+	for i, candidate := range mrs {
+		url := strings.TrimSpace(candidate.WebURL)
+		if url == "" {
+			url = strings.TrimSpace(candidate.URL)
+		}
+		if url == "" {
+			return nil, fmt.Errorf("parse glab mr list JSON: entry %d missing merge request URL", i)
+		}
+		number, err := parseMergeRequestURL(url, h.host, h.projectPath)
+		if err != nil {
+			return nil, fmt.Errorf("parse glab mr list JSON: entry %d invalid merge request URL: %w", i, err)
+		}
+		if candidate.IID != 0 && candidate.IID != number {
+			return nil, fmt.Errorf("parse glab mr list JSON: entry %d IID %d does not match URL number %d", i, candidate.IID, number)
+		}
 	}
 	pr := mrs[0].toPR()
-	if pr.URL == "" {
-		return nil, nil
-	}
 	return pr, nil
 }
 
 func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PRContent) (*scm.PR, error) {
-	cmd := h.cmd(ctx, "glab", "mr", "create",
+	effectiveTitle := content.Title
+	if h.draft && !isDraftTitle(effectiveTitle) {
+		effectiveTitle = "Draft: " + effectiveTitle
+	}
+	if err := validateMRTitle(effectiveTitle); err != nil {
+		return nil, fmt.Errorf("glab mr create: %w", err)
+	}
+	args := []string{"mr", "create",
 		"--source-branch", branch,
 		"--target-branch", base,
 		"--title", content.Title,
 		"--description", content.Body,
 		"--yes",
-	)
-	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	}
+	if h.draft {
+		args = append(args, "--draft")
+	}
+	cmd := h.cmd(ctx, "glab", args...)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("glab mr create: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -224,83 +305,78 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 	if id == "" && pr != nil {
 		id = pr.URL
 	}
-	cmd := h.cmd(ctx, "glab", "mr", "update", id,
-		"--title", content.Title,
-		"--description", content.Body,
-		"--yes",
-	)
-	if out, err := shellenv.CombinedOutputShellCommand(cmd); err != nil {
+	// Unlike `glab mr create`, `glab mr update` (glab v1.5x) has no
+	// -y/--yes confirmation-skip flag at all; passing it fails the whole
+	// command with "unknown flag: --yes", so every UpdatePR call errored.
+	//
+	// GitLab has no separate draft field: an MR is a draft because its title
+	// carries a draft marker. Updating with a plain title would silently mark a
+	// draft MR ready for review, so read the live title first and re-apply the
+	// marker. Preserve only: a non-draft MR never gains one. A failed read fails
+	// the update closed rather than risk toggling draft state.
+	args := []string{"mr", "update", id}
+	// Body-only updates must omit title, not read then resend it: doing so
+	// would overwrite a concurrent title/draft edit.
+	if content.Title != "" {
+		mr, err := h.viewMR(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(mr.Title) == "" {
+			return nil, errors.New("glab mr view: missing merge request title")
+		}
+		title := content.Title
+		if isDraftTitle(mr.Title) && !isDraftTitle(title) {
+			title = "Draft: " + title
+		}
+		if err := validateMRTitle(title); err != nil {
+			return nil, fmt.Errorf("glab mr update: %w", err)
+		}
+		args = append(args, "--title", title)
+	}
+	args = append(args, "--description", content.Body)
+	cmd := h.cmd(ctx, "glab", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("glab mr update: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return pr, nil
 }
 
-func (h *Host) PublishPRNotice(ctx context.Context, pr *scm.PR, body string) error {
-	id := pr.Number
-	if id == "" {
-		var err error
-		id, err = scm.ExtractPRNumber(pr.URL)
-		if err != nil {
-			return err
+func (h *Host) SetPRBaseBranch(ctx context.Context, pr *scm.PR, baseBranch string) error {
+	id := ""
+	if pr != nil {
+		id = pr.Number
+		if id == "" {
+			if num, err := scm.ExtractPRNumber(pr.URL); err == nil {
+				id = num
+			}
+		}
+		if id == "" {
+			id = pr.URL
 		}
 	}
-	cmd := h.cmd(ctx, "glab", "mr", "note", id, "--message", body)
-	if out, err := shellenv.CombinedOutputShellCommand(cmd); err != nil {
-		return fmt.Errorf("glab mr note: %s: %w", strings.TrimSpace(string(out)), err)
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("merge request identity is required to retarget")
+	}
+	cmd := h.cmd(ctx, "glab", "mr", "update", id, "--target-branch", baseBranch)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("glab mr update --target-branch: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
 
-func (h *Host) ListPRNotices(ctx context.Context, pr *scm.PR) ([]string, error) {
-	if h.projectPath == "" {
-		return nil, errors.New("glab API MR notes: missing project path")
+// isDraftTitle reports whether an MR title carries a marker GitLab treats as
+// draft: "Draft:", "[Draft]", or "(Draft)", all case-insensitive.
+func isDraftTitle(title string) bool {
+	t := strings.ToLower(strings.TrimSpace(title))
+	return strings.HasPrefix(t, "draft:") || strings.HasPrefix(t, "[draft]") || strings.HasPrefix(t, "(draft)")
+}
+
+func validateMRTitle(title string) error {
+	if utf8.RuneCountInString(title) > 255 {
+		return errors.New("GitLab merge request title must not exceed 255 characters")
 	}
-	id := pr.Number
-	if id == "" {
-		var err error
-		id, err = scm.ExtractPRNumber(pr.URL)
-		if err != nil {
-			return nil, err
-		}
-	}
-	segments := strings.Split(h.projectPath, "/")
-	for i, segment := range segments {
-		segments[i] = url.PathEscape(segment)
-	}
-	baseEndpoint := fmt.Sprintf("projects/%s/merge_requests/%s/notes?order_by=created_at&sort=asc&per_page=100", strings.Join(segments, "%2F"), id)
-	var bodies []string
-	totalBytes := 0
-	for page := 1; ; page++ {
-		if err := notices.ValidateAggregate(page-1, len(bodies), totalBytes, true); err != nil {
-			return nil, fmt.Errorf("read GitLab MR notices: %w", err)
-		}
-		endpoint := fmt.Sprintf("%s&page=%d", baseEndpoint, page)
-		out, err := notices.RunCommandLimit(h.cmd(ctx, "glab", "api", "--include", endpoint), "read GitLab MR notices", notices.MaxResponseBytes-totalBytes)
-		if err != nil {
-			return nil, err
-		}
-		totalBytes += len(out)
-		headers, payload, err := notices.SplitIncludedResponse(out)
-		if err != nil {
-			return nil, fmt.Errorf("parse glab MR notes response: %w", err)
-		}
-		var notes []struct {
-			Body string `json:"body"`
-		}
-		if err := json.Unmarshal(payload, &notes); err != nil {
-			return nil, fmt.Errorf("parse glab MR notes: %w", err)
-		}
-		hasNext := strings.TrimSpace(headers["x-next-page"]) != ""
-		if err := notices.ValidateAggregate(page, len(bodies)+len(notes), totalBytes, hasNext); err != nil {
-			return nil, fmt.Errorf("read GitLab MR notices: %w", err)
-		}
-		for _, note := range notes {
-			bodies = append(bodies, note.Body)
-		}
-		if !hasNext {
-			return bodies, nil
-		}
-	}
+	return nil
 }
 
 func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
@@ -338,7 +414,7 @@ func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.Mergeable
 
 func (h *Host) viewMR(ctx context.Context, id string) (mrPayload, error) {
 	cmd := h.cmd(ctx, "glab", "mr", "view", id, "--output", "json")
-	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return mrPayload{}, fmt.Errorf("glab mr view: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -353,7 +429,7 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	// glab ci status --mr <id> --output json lists jobs for the MR's latest pipeline.
 	// Not all glab versions support --mr; fall back to listing pipelines by branch via view.
 	cmd := h.cmd(ctx, "glab", "ci", "status", "--mr", pr.Number, "--output", "json")
-	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if !isUnsupportedMRFlagError(out) {
 			return nil, fmt.Errorf("glab ci status: %s: %w", strings.TrimSpace(string(out)), err)
@@ -390,7 +466,7 @@ func isUnsupportedMRFlagError(out []byte) bool {
 func (h *Host) getChecksFallback(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	// Try fetching the MR's pipeline and listing its jobs.
 	cmd := h.cmd(ctx, "glab", "mr", "view", pr.Number, "--output", "json")
-	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("glab mr view: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -410,43 +486,82 @@ func (h *Host) getChecksFallback(ctx context.Context, pr *scm.PR) ([]scm.Check, 
 		return nil, nil
 	}
 	jobsCmd := h.cmd(ctx, "glab", h.pipelineJobsArgs(payload.HeadPipeline.ID)...)
-	jobsOut, err := shellenv.CombinedOutputShellCommand(jobsCmd)
+	jobsOut, err := jobsCmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("glab pipeline jobs: %s: %w", strings.TrimSpace(string(jobsOut)), err)
 	}
 	return parseGitlabJobs(jobsOut)
 }
 
-func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, _ string, _ string, failingNames []string) (string, error) {
-	if len(failingNames) == 0 {
-		return "", nil
+func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, branch, headSHA string, failingNames []string) (string, error) {
+	targets := make([]scm.CheckTarget, 0, len(failingNames))
+	for _, name := range failingNames {
+		targets = append(targets, scm.CheckTarget{Name: name})
 	}
-	// Get the MR's pipeline jobs, find a failed one whose name matches, trace it.
-	viewCmd := h.cmd(ctx, "glab", "mr", "view", pr.Number, "--output", "json")
-	viewOut, err := shellenv.CombinedOutputShellCommand(viewCmd)
+	logs, err := h.FetchFailedCheckTargetLogs(ctx, pr, branch, headSHA, targets)
 	if err != nil {
-		return "", nil
+		return "", err
+	}
+	return scm.CombineFailedCheckLogs(logs)
+}
+
+func (h *Host) FetchFailedCheckTargetLogs(ctx context.Context, pr *scm.PR, _ string, _ string, targets []scm.CheckTarget) ([]scm.FailedCheckLog, error) {
+	if len(targets) == 0 {
+		return nil, nil
+	}
+	// Get the MR's pipeline jobs and trace the selected failures.
+	viewCmd := h.cmd(ctx, "glab", "mr", "view", pr.Number, "--output", "json")
+	viewOut, err := viewCmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("resolve GitLab merge request for selected logs: %w", err)
 	}
 	var payload struct {
 		HeadPipeline struct {
 			ID int `json:"id"`
 		} `json:"head_pipeline"`
 	}
-	if trimmed := bytesTrimToJSON(viewOut); len(trimmed) == 0 || json.Unmarshal(trimmed, &payload) != nil || payload.HeadPipeline.ID == 0 {
-		return "", nil
+	trimmed := bytesTrimToJSON(viewOut)
+	if len(trimmed) == 0 {
+		return nil, errors.New("resolve GitLab pipeline for selected logs: response contained no JSON")
+	}
+	if err := json.Unmarshal(trimmed, &payload); err != nil {
+		return nil, fmt.Errorf("resolve GitLab pipeline for selected logs: %w", err)
+	}
+	if payload.HeadPipeline.ID == 0 {
+		return nil, errors.New("resolve GitLab pipeline for selected logs: pipeline ID is empty")
 	}
 	jobsCmd := h.cmd(ctx, "glab", h.pipelineJobsArgs(payload.HeadPipeline.ID)...)
-	jobsOut, err := shellenv.CombinedOutputShellCommand(jobsCmd)
+	jobsOut, err := jobsCmd.CombinedOutput()
 	if err != nil {
-		return "", nil
+		return nil, fmt.Errorf("list GitLab jobs for selected logs: %w", err)
 	}
-	jobID := findFailedJobID(jobsOut, failingNames)
-	if jobID == 0 {
-		return "", nil
+	results := make([]scm.FailedCheckLog, 0, len(targets))
+	for _, target := range targets {
+		result := scm.FailedCheckLog{Target: target}
+		jobIDs := findFailedJobTargetIDs(jobsOut, []scm.CheckTarget{target})
+		if len(jobIDs) == 0 {
+			result.Err = fmt.Errorf("selected GitLab check %q was not found", target.Identity())
+			results = append(results, result)
+			continue
+		}
+		var outputs []string
+		var errs []error
+		for _, jobID := range jobIDs {
+			traceCmd := h.cmd(ctx, "glab", "ci", "trace", fmt.Sprintf("%d", jobID))
+			traceOut, err := traceCmd.Output()
+			if err != nil {
+				errs = append(errs, fmt.Errorf("fetch GitLab job %d trace: %w", jobID, err))
+				continue
+			}
+			if log := strings.TrimSpace(string(traceOut)); log != "" {
+				outputs = append(outputs, log)
+			}
+		}
+		result.Output = strings.Join(outputs, "\n\n")
+		result.Err = errors.Join(errs...)
+		results = append(results, result)
 	}
-	traceCmd := h.cmd(ctx, "glab", "ci", "trace", fmt.Sprintf("%d", jobID))
-	traceOut, _ := shellenv.OutputShellCommand(traceCmd)
-	return strings.TrimSpace(string(traceOut)), nil
+	return results, nil
 }
 
 func parseMRPayload(out []byte) (mrPayload, bool) {
@@ -553,40 +668,45 @@ func parseGitlabJobs(out []byte) ([]scm.Check, error) {
 func jobsToChecks(jobs []gitlabJob) []scm.Check {
 	checks := make([]scm.Check, 0, len(jobs))
 	for _, job := range jobs {
-		attemptID := ""
-		if job.ID > 0 {
-			attemptID = fmt.Sprintf("job:%d", job.ID)
+		providerID := ""
+		if job.ID != 0 {
+			providerID = fmt.Sprintf("gitlab-job:%d", job.ID)
 		}
 		checks = append(checks, scm.Check{
 			Name:        job.Name,
+			ProviderID:  providerID,
 			Bucket:      gitlabStatusBucket(job.Status),
-			AttemptID:   attemptID,
 			CompletedAt: job.completedAt(),
 		})
 	}
 	return checks
 }
 
-func findFailedJobID(out []byte, failingNames []string) int {
-	targets := map[string]struct{}{}
-	for _, name := range failingNames {
-		name = strings.TrimSpace(name)
-		if name != "" {
-			targets[name] = struct{}{}
+func findFailedJobTargetIDs(out []byte, checkTargets []scm.CheckTarget) []int {
+	names := map[string]struct{}{}
+	ids := map[string]struct{}{}
+	for _, target := range checkTargets {
+		if id := strings.TrimSpace(target.ProviderID); id != "" {
+			ids[id] = struct{}{}
+		} else if name := strings.TrimSpace(target.Name); name != "" {
+			names[name] = struct{}{}
 		}
 	}
 	// Best effort: scan whatever jobs parsed; a corrupt later page does not
 	// prevent locating a failed job that already decoded.
 	jobs, _ := decodeGitlabJobs(out)
+	var matched []int
 	for _, job := range jobs {
 		if !strings.EqualFold(job.Status, "failed") {
 			continue
 		}
-		if _, ok := targets[job.Name]; ok || len(targets) == 0 {
-			return job.ID
+		_, nameMatch := names[job.Name]
+		_, idMatch := ids[fmt.Sprintf("gitlab-job:%d", job.ID)]
+		if nameMatch || idMatch || len(names)+len(ids) == 0 {
+			matched = append(matched, job.ID)
 		}
 	}
-	return 0
+	return matched
 }
 
 func gitlabStatusBucket(state string) scm.CheckBucket {

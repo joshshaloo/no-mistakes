@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
@@ -27,7 +28,7 @@ func TestStartServerWithPort_StampsRunMarkerIntoServerEnvironment(t *testing.T) 
 
 	// The fake server dumps its child's environment and exits, so startup fails
 	// on the early-exit path instead of waiting out the health deadline.
-	srv, err := startServerWithPort(ctx, "test", bin, nil, dir, "/healthcheck", 1)
+	srv, err := startServerWithPort(ctx, "test", bin, nil, dir, "/healthcheck", 1, runenv.Overlay{})
 	if err == nil {
 		srv.shutdown()
 		t.Fatal("expected startup to fail when the fake server exits immediately")
@@ -48,7 +49,7 @@ func TestStartServerWithPort_LeavesEnvironmentUnmarkedOutsideARun(t *testing.T) 
 	envPath := filepath.Join(dir, "child.env")
 	bin := writeEnvDumpingServerBin(t, dir, envPath)
 
-	srv, err := startServerWithPort(context.Background(), "test", bin, nil, dir, "/healthcheck", 1)
+	srv, err := startServerWithPort(context.Background(), "test", bin, nil, dir, "/healthcheck", 1, runenv.Overlay{})
 	if err == nil {
 		srv.shutdown()
 		t.Fatal("expected startup to fail when the fake server exits immediately")

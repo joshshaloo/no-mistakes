@@ -24,7 +24,10 @@ func TestMain(m *testing.M) {
 	switch os.Getenv("NM_DAEMON_HELPER_PROCESS") {
 	case "1":
 		if capturePath := os.Getenv("NM_CAPTURE_NM_HOME_FILE"); capturePath != "" {
-			_ = os.WriteFile(capturePath, []byte(os.Getenv("NM_HOME")), 0o644)
+			// Atomic rename so a poller that treats "file exists" as "content
+			// ready" cannot observe the empty create-before-write window that
+			// os.WriteFile leaves open (TestStartDetachedDaemonUsesProvidedRootViaNMHome).
+			_ = writeFileAtomic(capturePath, []byte(os.Getenv("NM_HOME")), 0o644)
 		}
 		// Stay alive long enough for tests with a synthetic health transition
 		// to distinguish launch from readiness. The production exit regression
@@ -81,8 +84,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// startTestDaemon starts RunWithResources in a goroutine with a temp root.
-// Returns paths, db, and a cleanup function that stops the daemon.
+// startTestDaemon starts a daemon with a temp root and registers shutdown cleanup.
 func startTestDaemon(t *testing.T) (*paths.Paths, *db.DB) {
 	t.Helper()
 
@@ -104,35 +106,79 @@ func startTestDaemon(t *testing.T) (*paths.Paths, *db.DB) {
 	}
 	t.Cleanup(func() { d.Close() })
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- RunWithResources(p, d)
-	}()
+	runTestDaemon(t, p, d, nil, 3*time.Second)
+	return p, d
+}
 
-	// Wait for socket to appear.
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(p.Socket()); err == nil {
-			break
+// TestRunTestDaemonStartupError exercises the helper through a failed daemon
+// startup in a child test process, so its fatal diagnostic can be asserted.
+func TestRunTestDaemonStartupError(t *testing.T) {
+	const childEnv = "NM_TEST_DAEMON_STARTUP_ERROR"
+	if os.Getenv(childEnv) == "1" {
+		p := paths.WithRoot(t.TempDir())
+		if err := p.EnsureDirs(); err != nil {
+			t.Fatal(err)
 		}
-		time.Sleep(20 * time.Millisecond)
+		if err := os.WriteFile(p.ConfigFile(), []byte("agent: [invalid\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		d, err := db.Open(p.DB())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = d.Close() })
+		runTestDaemon(t, p, d, nil, time.Second)
+		t.Fatal("daemon unexpectedly became ready")
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestRunTestDaemonStartupError$")
+	cmd.Env = append(os.Environ(), childEnv+"=1")
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("failed startup did not stop the readiness wait: %v", ctx.Err())
+	}
+	if err == nil {
+		t.Fatalf("expected failed daemon startup, got success: %s", output)
+	}
+	if !strings.Contains(string(output), "load config:") {
+		t.Fatalf("startup error was not surfaced: %s", output)
+	}
+}
+
+// runTestDaemon runs RunWithOptions for the rest of the test and returns only
+// once the daemon answers a health probe. Startup recovery (stale runs, orphan
+// processes, orphan worktrees) completes before the IPC socket is bound, so a
+// returned call is a barrier after which recovery results can be asserted, and
+// the registered cleanup can reach a daemon that is still serving. The
+// cleanup asks the daemon to shut down when reachable and waits for
+// RunWithOptions to return. stopWithin only bounds how long a daemon that
+// never exits can stall the test. Register cleanup for resources that must
+// outlive the daemon (d and its root) before calling this.
+func runTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, sf StepFactory, stopWithin time.Duration) {
+	t.Helper()
+
+	stopped := make(chan struct{})
+	exited := make(chan error, 1)
+	go func() {
+		exited <- RunWithOptions(p, d, sf)
+		close(stopped)
+	}()
+
 	t.Cleanup(func() {
-		// Ensure daemon stops.
-		client, err := ipc.Dial(p.Socket())
-		if err == nil {
-			client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+		if client, err := ipc.Dial(p.Socket()); err == nil {
+			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
 			client.Close()
 		}
 		select {
-		case <-errCh:
-		case <-time.After(3 * time.Second):
-			t.Error("daemon did not stop within 3s")
+		case <-stopped:
+		case <-time.After(stopWithin):
+			t.Errorf("daemon did not stop within %s", stopWithin)
 		}
 	})
 
-	return p, d
+	waitForDaemonReadyOrExit(t, p, exited)
 }
 
 // --- Mock steps and helpers for RunManager tests ---
@@ -211,32 +257,10 @@ func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.D
 	}
 	t.Cleanup(func() { d.Close() })
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- RunWithOptions(p, d, sf)
-	}()
-
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(p.Socket()); err == nil {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	t.Cleanup(func() {
-		client, err := ipc.Dial(p.Socket())
-		if err == nil {
-			client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
-			client.Close()
-		}
-		select {
-		case <-errCh:
-		case <-time.After(3 * time.Second):
-			t.Error("daemon did not stop within 3s")
-		}
-	})
-
+	// A run reaches its terminal DB state before its goroutine finishes git
+	// worktree cleanup. On process-spawn-bound Windows that cleanup can take
+	// longer than three seconds, so give graceful shutdown its own budget.
+	runTestDaemon(t, p, d, sf, 15*time.Second)
 	return p, d
 }
 
@@ -357,7 +381,7 @@ func writeMockGHState(t *testing.T, dir, state string) (string, string) {
 	logPath := filepath.Join(dir, "gh.log")
 	if runtime.GOOS == "windows" {
 		path := filepath.Join(dir, "gh.bat")
-		script := "@echo off\r\necho %*>>\"" + logPath + "\"\r\necho %* | findstr /C:\"auth status\" >nul && exit /b 0\r\necho %* | findstr /C:\"pr view 42\" >nul && (echo " + state + "& exit /b 0)\r\nexit /b 1\r\n"
+		script := "@echo off\r\nset TOKENSTATE=\r\nif defined GH_TOKEN set TOKENSTATE=set\r\necho env:%GH_CONFIG_DIR% token:%TOKENSTATE%>>\"" + logPath + "\"\r\necho %*>>\"" + logPath + "\"\r\necho %* | findstr /C:\"auth status\" >nul && exit /b 0\r\necho %* | findstr /C:\"pr view 42\" >nul && (echo " + state + "& exit /b 0)\r\nexit /b 1\r\n"
 		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -365,6 +389,7 @@ func writeMockGHState(t *testing.T, dir, state string) (string, string) {
 	}
 	path := filepath.Join(dir, "gh")
 	script := `#!/bin/sh
+printf 'env:%s token:%s\n' "$GH_CONFIG_DIR" "${GH_TOKEN:+set}" >>` + shellQuoteForTest(logPath) + `
 printf '%s\n' "$*" >>` + shellQuoteForTest(logPath) + `
 case "$*" in
   "auth status"*|"auth status --hostname "*) exit 0 ;;
@@ -376,6 +401,40 @@ exit 1
 		t.Fatal(err)
 	}
 	return dir, logPath
+}
+
+// writeMockGHNoPR puts a gh on PATH that authenticates and reports that the
+// branch has no open pull request.
+//
+// Every push now writes a pipeline attestation for the head it is about to
+// publish, which asks the forge whether a PR exists (see the Pre-Push Pipeline
+// Attestation contract). Without a stub, that lookup leaves the test process:
+// on a developer machine with an authenticated gh it reaches github.com and
+// fails against the placeholder test/repo slug, so a push-behaviour test would
+// pass or fail depending on whose machine ran it. An empty PR list is the
+// honest answer for a repository this test never opened a PR on.
+func writeMockGHNoPR(t *testing.T, dir string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		path := filepath.Join(dir, "gh.bat")
+		script := "@echo off\r\necho %* | findstr /C:\"auth status\" >nul && exit /b 0\r\necho %* | findstr /C:\"pr list\" >nul && (echo []& exit /b 0)\r\nexit /b 1\r\n"
+		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	path := filepath.Join(dir, "gh")
+	script := `#!/bin/sh
+case "$*" in
+  "auth status"*) exit 0 ;;
+  "pr list"*) printf '%s\n' '[]'; exit 0 ;;
+esac
+exit 1
+`
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func shellQuoteForTest(value string) string {
@@ -406,7 +465,15 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"structured
 func waitForRunTerminalState(t *testing.T, d *db.DB, runID string) *db.Run {
 	t.Helper()
 
-	deadline := time.Now().Add(5 * time.Second)
+	timeout := 5 * time.Second
+	if runtime.GOOS == "windows" {
+		// Git-backed daemon runs routinely take about 10x longer on Windows,
+		// especially while the git-heavy CI shard runs several packages at once.
+		// Keep the assertion bounded without treating normal process-spawn load as
+		// a pipeline failure.
+		timeout = time.Minute
+	}
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		run, err := d.GetRun(runID)
 		if err != nil {
@@ -419,4 +486,75 @@ func waitForRunTerminalState(t *testing.T, d *db.DB, runID string) *db.Run {
 	}
 	t.Fatalf("run %s did not reach terminal state", runID)
 	return nil
+}
+
+// waitForDaemonReady blocks until the daemon started by RunWithOptions answers a
+// health probe. The singleton lock orders stale-run recovery (which performs
+// startup PR reconciliation) strictly before the socket bind and the first
+// health response, so a healthy daemon has already finished reconciling. Tests
+// that launch RunWithOptions in a goroutine and then wait for a recovered run to
+// go terminal must gate on this first: otherwise their terminal-state deadline
+// has to absorb the entire cold daemon startup, which is far slower on the
+// process-spawn-bound Windows runner and made the wait flaky.
+func waitForDaemonReady(t *testing.T, p *paths.Paths) {
+	t.Helper()
+	waitForDaemonReadyOrExit(t, p, nil)
+}
+
+func waitForDaemonReadyOrExit(t *testing.T, p *paths.Paths, exited <-chan error) {
+	t.Helper()
+
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		client, err := ipc.Dial(p.Socket())
+		if err == nil {
+			var result ipc.HealthResult
+			callErr := client.Call(ipc.MethodHealth, &ipc.HealthParams{}, &result)
+			_ = client.Close()
+			if callErr == nil && result.Status == "ok" {
+				return
+			}
+		}
+		select {
+		case err := <-exited:
+			if err != nil {
+				t.Fatalf("daemon at %s exited before ready: %v", p.Socket(), err)
+			}
+			t.Fatalf("daemon at %s exited before ready without error", p.Socket())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	t.Fatalf("daemon at %s never became ready", p.Socket())
+}
+
+// shutdownTestDaemonAndWaitForCleanup turns daemon shutdown into a lifecycle
+// barrier for tests that inspect its filesystem. A run's terminal DB status is
+// persisted before its owner goroutine removes the worktree, while shutdown
+// waits for every run goroutine before removing the socket.
+func shutdownTestDaemonAndWaitForCleanup(t *testing.T, p *paths.Paths) {
+	t.Helper()
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatalf("dial daemon for shutdown: %v", err)
+	}
+	if err := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil); err != nil {
+		client.Close()
+		t.Fatalf("shut down daemon: %v", err)
+	}
+	client.Close()
+
+	// Worktree removal is process-spawn-bound and runs before the socket
+	// disappears, so match the graceful-shutdown budget the run-goroutine
+	// cleanup above already needs on Windows.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(p.Socket()); os.IsNotExist(err) {
+			return
+		} else if err != nil {
+			t.Fatalf("stat daemon socket during shutdown: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("daemon did not finish cleanup within 15s")
 }

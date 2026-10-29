@@ -57,7 +57,7 @@ func TestRunCleanupReapsEscapedProcessDiscoveredInWorktree(t *testing.T) {
 	step := &escapedProcessStep{pidDir: pidDir, started: make(chan string, 1), release: make(chan struct{})}
 	mgr := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
 
-	runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "")
+	runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "", "", false, "")
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestOrphanWorktreeCleanupReapsEscapedProcess(t *testing.T) {
 	}
 	otherRun := adoptEscapedProcess(t, otherPidPath)
 
-	cleanupOrphanWorktrees(database, p)
+	cleanupOrphanWorktrees(database, p, nil)
 
 	if _, err := os.Stat(worktree); !os.IsNotExist(err) {
 		t.Fatalf("orphaned worktree should have been removed, stat err: %v", err)
@@ -151,7 +151,7 @@ func TestRunCleanupReapsEscapedProcessThatLeftTheWorktree(t *testing.T) {
 	step := &escapedProcessStep{pidDir: pidDir, escapeDir: "/", started: make(chan string, 1), release: make(chan struct{})}
 	mgr := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
 
-	runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "")
+	runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "", "", false, "")
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}

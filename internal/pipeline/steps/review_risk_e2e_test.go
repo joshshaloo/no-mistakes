@@ -39,6 +39,19 @@ func seedLowReview(t *testing.T, sctx *pipeline.StepContext) *db.StepResult {
 	return sr
 }
 
+// driveRiskCI supplies a discoverable existing PR, then follows the shared
+// executor's observation/fix-round contract rather than expecting Execute to
+// repair inside its first monitoring turn.
+func driveRiskCI(t *testing.T, step *CIStep, sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	t.Helper()
+	sctx.Env = append(sctx.Env,
+		"FAKE_CLI_PR_BASE=main",
+		`FAKE_CLI_PR_LIST_JSON=[{"number":42,"url":"https://github.com/test/repo/pull/42","baseRefName":"main"}]`,
+		"FAKE_CLI_PR_BODY=human-authored summary",
+	)
+	return driveCI(t, step, sctx)
+}
+
 func TestCIStep_RepairInvalidatesPublishedReviewRisk(t *testing.T) {
 	for _, failPR := range []bool{false, true} {
 		t.Run(fmt.Sprintf("publish_failure=%v", failPR), func(t *testing.T) {
@@ -75,7 +88,7 @@ func TestCIStep_RepairInvalidatesPublishedReviewRisk(t *testing.T) {
 			defer cancel()
 			sctx.Ctx = ctx
 			step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { cancel(); return ctx.Err() }}
-			_, err := step.Execute(sctx)
+			_, err := driveRiskCI(t, step, sctx)
 			if failPR {
 				if !errors.Is(err, errPublishStaleRisk) {
 					t.Fatalf("must fail instead of reporting green after notice failure: %v", err)
@@ -122,7 +135,7 @@ func TestCIStep_RepairInvalidatesPublishedReviewRisk(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			summary, risk := BuildPipelineSummary(steps, map[string][]*db.StepRound{review.ID: rounds})
+			summary, risk := BuildPipelineSummary(steps, map[string][]*db.StepRound{review.ID: rounds}, sctx.Run.HeadSHA)
 			if !strings.Contains(strings.ToLower(risk), "stale") || strings.Contains(risk, "Test-only") {
 				t.Fatalf("current risk describes old diff: %s", risk)
 			}
@@ -177,7 +190,7 @@ func TestCIStep_StaleRiskAllowsRepairButRefusesUnverifiedReadyClaim(t *testing.T
 	}
 	step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }}
 
-	_, err := step.Execute(sctx)
+	_, err := driveRiskCI(t, step, sctx)
 	if !errors.Is(err, errPublishStaleRisk) || !strings.Contains(err.Error(), "not an authoritative GitHub Actions job") {
 		t.Fatalf("unverified green observation did not refuse readiness: %v", err)
 	}
@@ -243,7 +256,7 @@ func TestCIStep_ValidationEvidenceReadFailureFailsClosed(t *testing.T) {
 		},
 	}
 
-	if _, err := step.Execute(sctx); !errors.Is(err, errPublishStaleRisk) {
+	if _, err := driveRiskCI(t, step, sctx); !errors.Is(err, errPublishStaleRisk) {
 		t.Fatalf("expected fail-closed evidence error, got %v", err)
 	}
 	if _, err := os.Stat(bodyPath); !errors.Is(err, os.ErrNotExist) {
@@ -262,7 +275,7 @@ func TestCIStep_ValidationEvidenceReadFailureFailsClosed(t *testing.T) {
 	t.Logf("FAIL-CLOSED push: notices=0 remote=%s CIReady=false", head)
 
 	step.buildValidationNotice = nil
-	if _, err := step.pushUpdatedHeadSHA(sctx, sctx.Run.HeadSHA); err != nil {
+	if _, err := step.publishRepair(sctx, gitCmd(t, dir, "rev-parse", "HEAD")); err != nil {
 		t.Fatalf("restored evidence read did not permit CI repair push: %v", err)
 	}
 	body, err := os.ReadFile(bodyPath)
@@ -463,7 +476,7 @@ func TestCIStep_SameHeadRerunBetweenPollsPublishesCurrentAttempt(t *testing.T) {
 	sctx.Run.PRURL = &prURL
 	sctx.Config.CITimeout = time.Minute
 	firstLink := "https://github.com/test/repo/actions/runs/123/job/456"
-	secondLink := firstLink
+	secondLink := "https://github.com/test/repo/actions/runs/123/job/789"
 	firstID, err := ciAttemptIdentity([]scm.Check{{Name: "github", AttemptID: "github:test/repo:run:123:attempt:1"}})
 	if err != nil {
 		t.Fatal(err)
@@ -487,12 +500,13 @@ func TestCIStep_SameHeadRerunBetweenPollsPublishesCurrentAttempt(t *testing.T) {
 			cancel()
 			return ctx.Err()
 		}
+		sctx.Env = append(sctx.Env, "FAKE_CLI_ACTIONS_ATTEMPT=2")
 		return nil
 	}}
 	if _, err := step.Execute(sctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected cancellation after second ready attempt, got %v", err)
 	}
-	body, err := os.ReadFile(bodyPath)
+	body, err := os.ReadFile(bodyPath + ".jsonl")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +579,7 @@ func TestLaterCommit_ReviewRiskClassification(t *testing.T) {
 				gitCmd(t, dir, "update-index", "--chmod=+x", tt.path)
 			}
 			gitCmd(t, dir, "commit", "-m", "later edit")
-			if err := publishPipelineHead(sctx, gitCmd(t, dir, "rev-parse", "HEAD")); err != nil {
+			if err := recordAgentFixHead(sctx, types.StepDocument, gitCmd(t, dir, "rev-parse", "HEAD")); err != nil {
 				t.Fatal(err)
 			}
 			steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)

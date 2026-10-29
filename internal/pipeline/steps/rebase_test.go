@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
 func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
@@ -89,6 +91,68 @@ func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 	status := gitStatusPorcelain(t, dir)
 	if status != "" {
 		t.Fatalf("expected clean worktree, got: %s", status)
+	}
+}
+
+func TestRebaseStep_UsesConfiguredPRBaseBranch(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "base")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(dir, "main.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "main integration")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "develop", "HEAD~1")
+	if err := os.WriteFile(filepath.Join(dir, "develop.txt"), []byte("develop\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "develop integration")
+	developSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "develop")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, developSHA, headSHA, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Config.PR.BaseBranch = "develop"
+
+	outcome, err := (&RebaseStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.NeedsApproval {
+		t.Fatalf("unexpected approval: %s", outcome.Findings)
+	}
+	if got := gitCmd(t, dir, "merge-base", "HEAD", "origin/develop"); got != developSHA {
+		t.Fatalf("merge-base with configured base = %s, want develop %s", got, developSHA)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "main.txt")); !os.IsNotExist(err) {
+		t.Fatal("rebase used forge default main instead of configured develop")
 	}
 }
 
@@ -180,6 +244,10 @@ func TestRebaseStep_FixModeCallsAgent(t *testing.T) {
 	if !strings.Contains(ag.calls[0].Prompt, "user wanted conflict resolution to preserve the extracted intent") {
 		t.Fatalf("expected agent prompt to include extracted user intent, got: %s", ag.calls[0].Prompt)
 	}
+	if !strings.Contains(ag.calls[0].Prompt, dir) || !strings.Contains(ag.calls[0].Prompt, "Path contract:") {
+		t.Fatalf("expected agent prompt to include execution context with workdir, got: %s", ag.calls[0].Prompt)
+	}
+	assertTestQualityRulePrompt(t, ag.calls[0].Prompt)
 	// Verify rebase completed - feature is now ahead of origin/main
 	mergeBase := gitCmd(t, dir, "merge-base", "HEAD", "origin/main")
 	originMain := gitCmd(t, dir, "rev-parse", "origin/main")
@@ -264,6 +332,10 @@ func TestRebaseStep_FixModeNonConflictFailureReturnsError(t *testing.T) {
 	gitCmd(t, dir, "init")
 	gitCmd(t, dir, "config", "user.name", "test")
 	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	// The test's premise is that a dirty worktree makes the rebase fail. An
+	// ambient global rebase.autoStash=true would silently stash and proceed,
+	// so pin it false in this repo regardless of the machine's git config.
+	gitCmd(t, dir, "config", "rebase.autoStash", "false")
 	gitCmd(t, dir, "checkout", "-b", "main")
 	gitCmd(t, dir, "remote", "add", "origin", upstream)
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("base\n"), 0o644)
@@ -314,6 +386,9 @@ func TestRebaseStep_NonConflictFailureWithRebaseMetadataReturnsError(t *testing.
 	gitCmd(t, dir, "init")
 	gitCmd(t, dir, "config", "user.name", "test")
 	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	// See TestRebaseStep_FixModeNonConflictFailureReturnsError: an ambient
+	// global rebase.autoStash=true would defeat the dirty-worktree premise.
+	gitCmd(t, dir, "config", "rebase.autoStash", "false")
 	gitCmd(t, dir, "checkout", "-b", "main")
 	gitCmd(t, dir, "remote", "add", "origin", upstream)
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("base\n"), 0o644)
@@ -416,5 +491,263 @@ func TestRebaseStep_LogFileNotVisibleToUser(t *testing.T) {
 	}
 	if !hasFileWarning {
 		t.Error("expected fetch warning in file logs")
+	}
+}
+
+func TestRebaseStep_RemapsUncertifiedRangeWhenHeadRewritten(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "base commit")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	os.WriteFile(filepath.Join(dir, "author.txt"), []byte("author\n"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "author")
+	fromSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	os.WriteFile(filepath.Join(dir, "fixer.txt"), []byte("fixer\n"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "fixer")
+	toSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	gitCmd(t, dir, "checkout", "main")
+	os.WriteFile(filepath.Join(dir, "other.txt"), []byte("main update\n"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "main non-conflicting update")
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "feature")
+
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, toSHA, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+	if err := sctx.DB.UpsertUncertifiedPipelineRange(sctx.Repo.ID, sctx.Run.Branch, fromSHA, toSHA, sctx.Run.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	newHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	if newHead == toSHA {
+		t.Fatal("rebase did not rewrite the uncertified head")
+	}
+
+	got, err := sctx.DB.GetUncertifiedPipelineRange(sctx.Repo.ID, sctx.Run.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.FromSHA == fromSHA || got.ToSHA == toSHA {
+		t.Fatalf("updateHeadSHA left old uncertified SHAs: %#v (old from=%s to=%s)", got, fromSHA, toSHA)
+	}
+	if got.ToSHA != newHead || got.SourceRunID != sctx.Run.ID {
+		t.Fatalf("remapped range = %#v, want to=%s source=%s", got, newHead, sctx.Run.ID)
+	}
+
+	bind := &pipeline.StepContext{
+		Ctx:     sctx.Ctx,
+		DB:      sctx.DB,
+		Repo:    sctx.Repo,
+		Run:     sctx.Run,
+		WorkDir: dir,
+	}
+	pipeline.BindUncertifiedPipelineRange(bind)
+	if bind.UncertifiedFromSHA != got.FromSHA || bind.UncertifiedToSHA != got.ToSHA {
+		t.Fatalf("bind after rebase remap from=%q to=%q, want from=%q to=%q", bind.UncertifiedFromSHA, bind.UncertifiedToSHA, got.FromSHA, got.ToSHA)
+	}
+}
+
+func TestRebaseStep_HangingConflictAgentFailsAfterTimeout(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("base\n"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "base commit")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("feature-origin\n"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature origin change")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	gitCmd(t, dir, "reset", "--soft", "HEAD~1")
+	os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("feature-local\n"), 0o644)
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature local change")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	ag := &mockAgent{
+		name: "hanging-rebase-agent",
+		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			<-ctx.Done()
+			return &agent.Result{Output: json.RawMessage(`{"summary":"resolve conflicts"}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Fixing = true
+	sctx.Config.AgentTimeout = 20 * time.Millisecond
+
+	if _, err := (&RebaseStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "timed out after 20ms") {
+		t.Fatalf("hanging rebase agent error = %v, want timeout", err)
+	}
+}
+
+func TestRebaseStep_BaseFetchFailureFailsBeforeRewritingHead(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare", "-b", "main")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "clone", upstream, ".")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "symbolic-ref", "HEAD", "refs/heads/main")
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "base")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	if err := os.WriteFile(filepath.Join(dir, "cached.txt"), []byte("cached\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "unverified cached base")
+	gitCmd(t, dir, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+	gitCmd(t, dir, "checkout", "-b", "feature", baseSHA)
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = filepath.Join(t.TempDir(), "does-not-exist")
+	sctx.Repo.URLsVerified = true
+
+	if _, err := (&RebaseStep{}).Execute(sctx); err == nil {
+		t.Fatal("rebase step succeeded, want the base-branch fetch failure to fail the step")
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("HEAD = %s, want %s untouched: rebased onto an unverified cached base", got, headSHA)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != headSHA {
+		t.Fatalf("persisted head = %s, want %s untouched", run.HeadSHA, headSHA)
+	}
+}
+
+func TestRebaseStep_BaseUnreachableAfterRebaseStillCompletesTheStep(t *testing.T) {
+	t.Parallel()
+	upstreamParent := t.TempDir()
+	upstream := filepath.Join(upstreamParent, "upstream.git")
+	gitCmd(t, upstreamParent, "init", "--bare", upstream)
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("base content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "base commit")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("feature change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature change")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	gitCmd(t, dir, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("main change\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "main conflict")
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "checkout", "feature")
+
+	// The agent resolves the conflict, then the upstream becomes unreachable:
+	// any base-branch fetch after the rebase rewrote HEAD would now fail.
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if err := os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("resolved content\n"), 0o644); err != nil {
+				return nil, err
+			}
+			gitCmd(t, dir, "add", "shared.txt")
+			cmd := exec.Command("git", "rebase", "--continue")
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(),
+				"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+				"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+				"GIT_EDITOR=true",
+			)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				return nil, fmt.Errorf("git rebase --continue: %s: %w", out, err)
+			}
+			if err := os.Rename(upstream, upstream+".gone"); err != nil {
+				return nil, err
+			}
+			return &agent.Result{Output: json.RawMessage(`{"summary":"resolve conflict"}`)}, nil
+		},
+	}
+
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Fixing = true
+
+	if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
+		t.Fatalf("rebase step failed after HEAD was rewritten and persisted: %v", err)
+	}
+	rebased := gitCmd(t, dir, "rev-parse", "HEAD")
+	if rebased == headSHA {
+		t.Fatal("HEAD was not rebased")
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != rebased {
+		t.Fatalf("persisted head = %s, want rebased head %s", run.HeadSHA, rebased)
 	}
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/bitbucket"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestCIStep_BitbucketPassesWhenStatusesPass(t *testing.T) {
@@ -42,7 +43,7 @@ func TestCIStep_BitbucketPassesWhenStatusesPass(t *testing.T) {
 			return ctx.Err()
 		},
 	}
-	_, err := step.Execute(sctx)
+	_, err := driveCI(t, step, sctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected Bitbucket CI pass to keep monitoring while PR is open, got %v", err)
 	}
@@ -90,7 +91,7 @@ func TestCIStep_BitbucketUsesProcessEnvWhenStepEnvIsNil(t *testing.T) {
 			return ctx.Err()
 		},
 	}
-	_, err := step.Execute(sctx)
+	_, err := driveCI(t, step, sctx)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected Bitbucket CI pass to keep monitoring while PR is open, got %v", err)
 	}
@@ -102,7 +103,7 @@ func TestCIStep_BitbucketUsesProcessEnvWhenStepEnvIsNil(t *testing.T) {
 func TestCIStep_BitbucketFailureNeedsApproval(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","state":"FAILED"}]}`)
+	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","key":"build-linux","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"}]}`)
 
 	prURL := "https://bitbucket.org/test/repo/pull-requests/42"
 	ag := &mockAgent{name: "test"}
@@ -114,7 +115,7 @@ func TestCIStep_BitbucketFailureNeedsApproval(t *testing.T) {
 	sctx.Config.AutoFix = config.AutoFix{CI: 0}
 
 	step := &CIStep{}
-	outcome, err := step.Execute(sctx)
+	outcome, err := driveCI(t, step, sctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,9 +133,17 @@ func TestCIStep_BitbucketFailureNeedsApproval(t *testing.T) {
 	if len(findings.Items) == 0 || !strings.Contains(findings.Items[0].Description, "build") {
 		t.Fatalf("expected failing Bitbucket check finding, got %+v", findings.Items)
 	}
+	if findings.Items[0].CheckID != "bitbucket-status:build-linux" {
+		t.Fatalf("Bitbucket finding CheckID = %q, want exact status identity", findings.Items[0].CheckID)
+	}
 }
 
-func TestCIStep_BitbucketStoppedDoesNotNeedApproval(t *testing.T) {
+// A stopped Bitbucket pipeline is terminal in the same way a cancelled GitHub
+// check is: Bitbucket will not move it to SUCCESSFUL or FAILED on its own. It
+// is not a job failure either, so it parks for a decision rather than entering
+// the fix loop - and never by continuing to poll a result that has stopped
+// changing.
+func TestCIStep_BitbucketStoppedCheckParksForADecision(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","state":"STOPPED"}]}`)
@@ -151,15 +160,36 @@ func TestCIStep_BitbucketStoppedDoesNotNeedApproval(t *testing.T) {
 	defer cancel()
 	sctx.Ctx = ctx
 
+	polls := 0
 	step := &CIStep{
 		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
-			cancel()
-			return ctx.Err()
+			polls++
+			if polls >= 5 {
+				cancel()
+				return ctx.Err()
+			}
+			return nil
 		},
 	}
-	_, err := step.Execute(sctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected stopped Bitbucket CI to keep monitoring without failure handling, got %v", err)
+	outcome, err := driveCI(t, step, sctx)
+	if err != nil {
+		t.Fatalf("expected an approval outcome, got error: %v", err)
+	}
+	if !outcome.NeedsApproval {
+		t.Fatal("expected a stopped Bitbucket pipeline to park for a decision")
+	}
+	var findings Findings
+	if err := json.Unmarshal([]byte(outcome.Findings), &findings); err != nil {
+		t.Fatalf("unmarshal findings: %v", err)
+	}
+	if len(findings.Items) != 1 || !strings.Contains(findings.Items[0].Description, "build") {
+		t.Fatalf("findings = %+v, want the stopped check named", findings.Items)
+	}
+	if findings.Items[0].Action != types.ActionAskUser {
+		t.Fatalf("finding action = %q, want ask-user", findings.Items[0].Action)
+	}
+	if len(ag.calls) != 0 {
+		t.Fatalf("expected no fix-agent round for a stopped pipeline, got %d", len(ag.calls))
 	}
 }
 
@@ -187,8 +217,8 @@ func TestCIStep_BitbucketAutoFixIncludesPipelineLogs(t *testing.T) {
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "feature")
 
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"test","state":"FAILED"}]}`)
-	api.pipelinesJSON = `{"values":[{"uuid":"{pipeline-1}"}]}`
+	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"test","key":"test","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"}]}`)
+	api.pipelinesJSON = `{"values":[{"uuid":"{pipeline-1}","build_number":1}]}`
 	api.stepsJSON = `{"values":[{"uuid":"{step-1}","state":{"name":"COMPLETED","result":{"name":"FAILED"}}}]}`
 	api.stepLog = "error log output"
 
@@ -210,6 +240,7 @@ func TestCIStep_BitbucketAutoFixIncludesPipelineLogs(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Config.CITimeout = 30 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 1}
+	sctx.Config.CI.RevalidateRepairs = true
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -221,10 +252,8 @@ func TestCIStep_BitbucketAutoFixIncludesPipelineLogs(t *testing.T) {
 			return ctx.Err()
 		},
 	}
-	_, err := step.Execute(sctx)
-	if err == nil || !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context cancellation after auto-fix poll, got %v", err)
-	}
+	outcome, err := driveCI(t, step, sctx)
+	assertCIRestartsValidation(t, outcome, err)
 	if capturedPrompt == "" {
 		t.Fatal("expected Bitbucket auto-fix to call the agent")
 	}
@@ -264,8 +293,8 @@ func TestCIStep_BitbucketAutoFixUsesLivePRHeadSHAForLogs(t *testing.T) {
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "feature")
 
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"test","state":"FAILED"}]}`)
-	api.pipelinesJSON = `{"values":[{"uuid":"{pipeline-1}"}]}`
+	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"test","key":"test","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"}]}`)
+	api.pipelinesJSON = `{"values":[{"uuid":"{pipeline-1}","build_number":1}]}`
 	api.stepsJSON = `{"values":[{"uuid":"{step-1}","state":{"name":"COMPLETED","result":{"name":"FAILED"}}}]}`
 	api.stepLog = "error log output"
 	api.prSourceSHA = headSHA
@@ -293,6 +322,7 @@ func TestCIStep_BitbucketAutoFixUsesLivePRHeadSHAForLogs(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Config.CITimeout = 30 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 1}
+	sctx.Config.CI.RevalidateRepairs = true
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -304,10 +334,8 @@ func TestCIStep_BitbucketAutoFixUsesLivePRHeadSHAForLogs(t *testing.T) {
 			return ctx.Err()
 		},
 	}
-	_, err := step.Execute(sctx)
-	if err == nil || !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context cancellation after auto-fix poll, got %v", err)
-	}
+	outcome, err := driveCI(t, step, sctx)
+	assertCIRestartsValidation(t, outcome, err)
 	if capturedPrompt == "" {
 		t.Fatal("expected Bitbucket auto-fix to call the agent")
 	}
@@ -319,7 +347,7 @@ func TestCIStep_BitbucketAutoFixUsesLivePRHeadSHAForLogs(t *testing.T) {
 	}
 }
 
-func TestCIStep_BitbucketAutoFixUsesMatchingPipelineLogs(t *testing.T) {
+func TestCIStep_BitbucketAutoFixAggregatesSelectedPipelineLogs(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -347,15 +375,15 @@ func TestCIStep_BitbucketAutoFixUsesMatchingPipelineLogs(t *testing.T) {
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "feature")
 
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"test","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/pipeline-2"}]}`)
-	api.pipelinesJSON = `{"values":[{"uuid":"{pipeline-1}"},{"uuid":"{pipeline-2}"}]}`
+	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"},{"name":"test","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/2"}]}`)
+	api.pipelinesJSON = `{"values":[{"uuid":"{pipeline-1}","build_number":1},{"uuid":"{pipeline-2}","build_number":2}]}`
 	api.stepsByPath = map[string]string{
 		"/2.0/repositories/test/repo/pipelines/{pipeline-1}/steps": `{"values":[{"uuid":"{step-1}","state":{"name":"COMPLETED","result":{"name":"FAILED"}}}]}`,
 		"/2.0/repositories/test/repo/pipelines/{pipeline-2}/steps": `{"values":[{"uuid":"{step-2}","state":{"name":"COMPLETED","result":{"name":"FAILED"}}}]}`,
 	}
 	api.stepLogsByPath = map[string]string{
-		"/2.0/repositories/test/repo/pipelines/{pipeline-1}/steps/{step-1}/log": "wrong pipeline log",
-		"/2.0/repositories/test/repo/pipelines/{pipeline-2}/steps/{step-2}/log": "matching pipeline log",
+		"/2.0/repositories/test/repo/pipelines/{pipeline-1}/steps/{step-1}/log": "build pipeline log",
+		"/2.0/repositories/test/repo/pipelines/{pipeline-2}/steps/{step-2}/log": "test pipeline log",
 	}
 	api.prSourceSHA = headSHA
 
@@ -379,6 +407,7 @@ func TestCIStep_BitbucketAutoFixUsesMatchingPipelineLogs(t *testing.T) {
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Config.CITimeout = 30 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 1}
+	sctx.Config.CI.RevalidateRepairs = true
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -390,21 +419,16 @@ func TestCIStep_BitbucketAutoFixUsesMatchingPipelineLogs(t *testing.T) {
 			return ctx.Err()
 		},
 	}
-	_, err := step.Execute(sctx)
-	if err == nil || !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context cancellation after auto-fix poll, got %v", err)
-	}
+	outcome, err := driveCI(t, step, sctx)
+	assertCIRestartsValidation(t, outcome, err)
 	if capturedPrompt == "" {
 		t.Fatal("expected Bitbucket auto-fix to call the agent")
 	}
-	if !strings.Contains(capturedPrompt, "matching pipeline log") {
-		t.Fatalf("expected prompt to include matching pipeline log, got:\n%s", capturedPrompt)
+	if !strings.Contains(capturedPrompt, "build pipeline log") || !strings.Contains(capturedPrompt, "test pipeline log") {
+		t.Fatalf("expected prompt to include both selected pipeline logs, got:\n%s", capturedPrompt)
 	}
-	if strings.Contains(capturedPrompt, "wrong pipeline log") {
-		t.Fatalf("expected prompt to exclude unrelated pipeline log, got:\n%s", capturedPrompt)
-	}
-	if api.stepLogCalls != 1 {
-		t.Fatalf("expected exactly one Bitbucket step log fetch, got %d", api.stepLogCalls)
+	if api.stepLogCalls != 2 {
+		t.Fatalf("expected both Bitbucket step logs to be fetched, got %d", api.stepLogCalls)
 	}
 }
 
@@ -478,13 +502,13 @@ func TestLatestBitbucketStatusesDeduplicatesByKeyBeforeName(t *testing.T) {
 func TestCIStep_GetCIChecksBitbucketFallsBackToKeyWhenNameMissing(t *testing.T) {
 	t.Parallel()
 
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"key":"build","state":"FAILED"}]}`)
+	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"key":"build","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/42"}]}`)
 	client, err := bitbucket.NewClientFromEnv(fakeBitbucketEnv(api.server.URL))
 	if err != nil {
 		t.Fatalf("new bitbucket client: %v", err)
 	}
 
-	host := bitbucket.NewHost(client, bitbucket.RepoRef{Workspace: "test", RepoSlug: "repo"})
+	host := bitbucket.NewHost(client, bitbucket.RepoRef{Workspace: "test", RepoSlug: "repo"}, false)
 	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "42"})
 	if err != nil {
 		t.Fatalf("GetChecks returned error: %v", err)
@@ -497,5 +521,8 @@ func TestCIStep_GetCIChecksBitbucketFallsBackToKeyWhenNameMissing(t *testing.T) 
 	}
 	if checks[0].Bucket != "fail" {
 		t.Fatalf("checks[0].Bucket = %q, want fail", checks[0].Bucket)
+	}
+	if checks[0].ExecutionID != "42" {
+		t.Fatalf("checks[0].ExecutionID = %q, want pipeline build number", checks[0].ExecutionID)
 	}
 }

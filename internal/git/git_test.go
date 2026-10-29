@@ -5,8 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
 
 func TestMain(m *testing.M) {
@@ -73,6 +76,24 @@ func TestRun(t *testing.T) {
 	}
 	if out != "" {
 		t.Fatalf("expected clean status, got: %q", out)
+	}
+}
+
+func TestRunAppliesContextEnvironmentToGitSubprocesses(t *testing.T) {
+	dir := initTestRepo(t)
+	run(t, dir, "git", "config", "alias.show-forge", "!printf 'config:%s token:%s' \"$GH_CONFIG_DIR\" \"${GH_TOKEN:+set}\"")
+	t.Setenv("GH_TOKEN", "ambient-must-not-leak")
+	ctx := WithEnvironment(context.Background(), runenv.Overlay{
+		Set:   map[string]string{"GH_CONFIG_DIR": "/profiles/personal"},
+		Unset: []string{"GH_TOKEN"},
+	})
+
+	out, err := Run(ctx, dir, "show-forge")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out != "config:/profiles/personal token:" {
+		t.Fatalf("git subprocess environment = %q", out)
 	}
 }
 
@@ -245,6 +266,33 @@ func TestHasUncommittedChangesUntrackedFile(t *testing.T) {
 	}
 	if !dirty {
 		t.Fatal("expected dirty repo with untracked file")
+	}
+}
+
+func TestUntrackedFilesPreservesRawPaths(t *testing.T) {
+	dir := initTestRepo(t)
+	ctx := context.Background()
+
+	names := []string{"café.txt", "name with space.txt"}
+	if runtime.GOOS != "windows" {
+		names = []string{" plain ", "café.txt", "name with space.txt", "tab\tname"}
+	}
+	for _, name := range names {
+		writeFile(t, filepath.Join(dir, name), "new\n")
+	}
+
+	files, err := UntrackedFiles(ctx, dir)
+	if err != nil {
+		t.Fatalf("UntrackedFiles failed: %v", err)
+	}
+	want := names
+	if len(files) != len(want) {
+		t.Fatalf("UntrackedFiles = %#v, want %#v", files, want)
+	}
+	for i, path := range files {
+		if path != want[i] {
+			t.Fatalf("UntrackedFiles[%d] = %q, want %q", i, path, want[i])
+		}
 	}
 }
 

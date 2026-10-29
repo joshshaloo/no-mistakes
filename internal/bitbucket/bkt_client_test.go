@@ -291,7 +291,7 @@ func TestBKTClientPRDiscoveryCreateAndUpdateUseExplicitSelectors(t *testing.T) {
 		t.Fatalf("found PR = %#v, want #42 at abc123", found)
 	}
 
-	created, err := client.CreatePR(context.Background(), repo, "feature", "main", "feat: ship", "body")
+	created, err := client.CreatePR(context.Background(), repo, "feature", "main", "feat: ship", "body", false)
 	if err != nil || created == nil || created.ID != 42 {
 		t.Fatalf("CreatePR() = %#v, %v", created, err)
 	}

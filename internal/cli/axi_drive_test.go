@@ -17,6 +17,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -80,7 +81,7 @@ func TestDriveRun_HealthyWaitStaysWithinRequestBudget(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
 	defer cancel()
-	_, _, err := driveRun(ctx, io.Discard, client, socketPath, "run-1", false, nil)
+	_, _, err := driveRun(ctx, io.Discard, client, socketPath, "run-1", false)
 	if err == nil || err != context.DeadlineExceeded {
 		t.Fatalf("driveRun error = %v, want context deadline", err)
 	}
@@ -136,7 +137,7 @@ func TestDriveRunDetectsTerminalStateAfterReconnect(t *testing.T) {
 	reconciler := newRunReconciler(source, "run-1")
 	defer reconciler.Close()
 
-	run, ciReady, err := driveRunWithReconciler(context.Background(), io.Discard, nil, reconciler, "run-1", false, nil)
+	run, ciReady, err := driveRunWithReconciler(context.Background(), io.Discard, nil, reconciler, "run-1", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +281,7 @@ type scriptedRunStateSource struct {
 	reconcileErr  error
 }
 
-func (s *scriptedRunStateSource) Subscribe(string) (<-chan ipc.Event, func(), error) {
+func (s *scriptedRunStateSource) Subscribe(context.Context, string) (<-chan ipc.Event, func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.operations = append(s.operations, "subscribe")
@@ -315,49 +316,143 @@ func (s *scriptedRunStateSource) Reconcile(context.Context, string) (*ipc.RunInf
 }
 
 func TestCIReadyToMerge(t *testing.T) {
-	passedLogs := []string{
-		"monitoring CI for PR #42 (timeout: 4h)...",
-		cimonitor.ChecksPassedMsg,
-	}
-	runningLogs := []string{"monitoring CI for PR #42 (timeout: 4h)..."}
-
 	tests := []struct {
 		name     string
 		rv       runView
-		ciLogs   []string
+		ciReady  bool
 		wantStop bool
 	}{
 		{
 			name:     "ci running and checks passed",
 			rv:       ciRunView(types.StepStatusRunning),
-			ciLogs:   passedLogs,
+			ciReady:  true,
 			wantStop: true,
 		},
 		{
 			name:     "ci running but checks not passed yet",
 			rv:       ciRunView(types.StepStatusRunning),
-			ciLogs:   runningLogs,
 			wantStop: false,
 		},
 		{
 			name:     "checks passed but ci step already completed",
 			rv:       ciRunView(types.StepStatusCompleted),
-			ciLogs:   passedLogs,
 			wantStop: false,
 		},
 		{
 			name:     "no ci step in run",
 			rv:       runView{Status: string(types.RunRunning), Steps: []stepView{{Name: string(types.StepPR), Status: string(types.StepStatusCompleted)}}},
-			ciLogs:   passedLogs,
+			wantStop: false,
+		},
+		{
+			name:     "declared no_ci with zero checks is ready",
+			rv:       ciRunView(types.StepStatusRunning),
+			ciReady:  true,
+			wantStop: true,
+		},
+		{
+			name:     "ready-looking agent output is ignored without persisted readiness",
+			rv:       ciRunView(types.StepStatusRunning),
+			wantStop: false,
+		},
+		{
+			name:     "PR 607 generic empty checks never ready",
+			rv:       ciRunView(types.StepStatusRunning),
 			wantStop: false,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := ciReadyToMerge(tt.rv, tt.ciLogs); got != tt.wantStop {
+			tt.rv.CIReady = tt.ciReady
+			if got := ciReadyToMerge(tt.rv); got != tt.wantStop {
 				t.Errorf("ciReadyToMerge() = %v, want %v", got, tt.wantStop)
 			}
 		})
+	}
+}
+
+func TestDriveRun_YesLeavesRefusalGatesAwaitingResponse(t *testing.T) {
+	socketPath := filepath.Join(makeSocketSafeTempDir(t), "refusal.sock")
+	srv := ipc.NewServer()
+	var responses atomic.Int32
+	srv.Handle(ipc.MethodRespond, func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+		responses.Add(1)
+		return nil, errors.New("unexpected automatic response to a refusal gate")
+	})
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(socketPath) }()
+	t.Cleanup(func() {
+		srv.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("IPC server did not stop")
+		}
+	})
+	var client *ipc.Client
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		client, err = ipc.Dial(socketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if client == nil {
+		t.Fatal("IPC server did not become ready")
+	}
+	defer client.Close()
+
+	protectedPath := pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "package.lock", Rule: "*.lock"}).Findings
+	unvalidatedWork := findingsJSON(t, []types.Finding{
+		{ID: types.FindingIDTestAgentTimeout, Severity: "warning", Action: types.ActionAskUser, Description: "budget cut"},
+		{ID: types.FindingIDTestAgentUnvalidatedWork, Severity: "error", Action: types.ActionAskUser, Description: "uncommitted changes to fix_test.go"},
+	}, "Test agent exceeded its invocation budget")
+	for _, refusal := range []struct {
+		step     types.StepName
+		findings string
+		awaiting string
+		want     string
+	}{
+		{types.StepCI, protectedPath, "1 awaiting", "package.lock"},
+		{types.StepTest, unvalidatedWork, "2 awaiting", "fix_test.go"},
+	} {
+		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+			t.Run(string(refusal.step)+"/"+string(status), func(t *testing.T) {
+				parked := &ipc.RunInfo{
+					ID: "run-1", Status: types.RunRunning,
+					Steps: []ipc.StepResultInfo{{StepName: refusal.step, Status: status, FindingsJSON: &refusal.findings}},
+				}
+				source := &scriptedRunStateSource{
+					subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
+					runs:          []*ipc.RunInfo{parked},
+				}
+				reconciler := newRunReconciler(source, parked.ID)
+				defer reconciler.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				var progress bytes.Buffer
+				run, ciReady, err := driveRunWithReconciler(ctx, &progress, client, reconciler, parked.ID, true)
+				if err != nil || run != parked || ciReady || responses.Load() != 0 {
+					t.Fatalf("--yes resolved a refusal gate: run=%+v ciReady=%v responses=%d err=%v", run, ciReady, responses.Load(), err)
+				}
+				if !strings.Contains(progress.String(), "explicit response") {
+					t.Fatalf("missing explicit-response guidance: %s", progress.String())
+				}
+				var output bytes.Buffer
+				cmd := &cobra.Command{}
+				cmd.SetOut(&output)
+				if err := renderDriveResult(cmd, run, ciReady); err != nil {
+					t.Fatal(err)
+				}
+				for _, want := range []string{"gate:", refusal.awaiting, refusal.want, string(status)} {
+					if !strings.Contains(output.String(), want) {
+						t.Errorf("parked output missing %q: %s", want, output.String())
+					}
+				}
+				t.Logf("AXI output with --yes (automatic IPC responses: %d):\n%s%s", responses.Load(), progress.String(), output.String())
+			})
+		}
 	}
 }
 
@@ -469,6 +564,7 @@ func TestRenderDriveResult_ChecksPassed(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"outcome: checks-passed",
+		"CI checks passed",
 		"https://github.com/user/repo/pull/42",
 		"merge",
 		"Summarize this pipeline run for the user",
@@ -480,12 +576,63 @@ func TestRenderDriveResult_ChecksPassed(t *testing.T) {
 	if strings.Contains(got, "outcome: passed\n") {
 		t.Errorf("checks-passed must not report a terminal passed outcome:\n%s", got)
 	}
+	if strings.Contains(got, "declares no CI") {
+		t.Errorf("all-green path must not claim no_ci declaration:\n%s", got)
+	}
 	// No fixes were applied, so neither the fixes table nor the
 	// acknowledge-your-misses instruction should appear.
 	for _, reject := range []string{"fixes[", "acknowledge"} {
 		if strings.Contains(got, reject) {
 			t.Errorf("checks-passed output without fixes must not contain %q:\n%s", reject, got)
 		}
+	}
+}
+
+func TestRenderDriveResult_DeclaredNoCIChecksPassed(t *testing.T) {
+	run := &ipc.RunInfo{
+		ID:          "run-1",
+		Branch:      "feature/x",
+		Status:      types.RunRunning,
+		HeadSHA:     "abcdef1234567890",
+		PRURL:       strptr("https://github.com/user/repo/pull/42"),
+		CIReadyNoCI: true,
+		Steps: []ipc.StepResultInfo{
+			{StepName: types.StepCI, Status: types.StepStatusRunning},
+		},
+	}
+
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+
+	// PR 607-shaped empty generic marker is not an authoritative readiness state.
+	pr607Logs := []string{
+		"monitoring CI for PR #607 (timeout: 4h0m0s)...",
+		"mergeable state still pending: PENDING",
+		"mergeable state still pending: PENDING",
+		"no CI checks reported - still monitoring until merged or closed",
+	}
+	if cimonitor.ChecksPassed(pr607Logs) || ciReadyToMerge(runViewFromIPC(run)) {
+		t.Fatal("PR 607 empty-checks sequence must not be agent-facing ready")
+	}
+
+	run.CIReady = true
+	if err := renderDriveResult(cmd, run, true); err != nil {
+		t.Fatalf("declared no_ci checks-passed must exit 0, got error: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"outcome: checks-passed",
+		"declares no CI",
+		"no_ci: true",
+		"https://github.com/user/repo/pull/42",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("declared no_ci output missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "CI checks passed - the PR is ready") {
+		t.Errorf("declared no_ci path must not silently equate empty results with green:\n%s", got)
 	}
 }
 
@@ -516,7 +663,7 @@ func TestRenderDriveResult_ChecksPassedWithFixes(t *testing.T) {
 		"outcome: checks-passed",
 		"fixes[2]{step,summary}:",
 		"review,handle nil pointer in executor",
-		"test,fix applied (no summary recorded)",
+		"test,fix attempted (no result recorded)",
 		"Summarize this pipeline run for the user",
 		"acknowledge the misses and list each fix so the user can review them",
 	} {
@@ -579,6 +726,31 @@ func TestRenderDriveResult_TerminalPassedWithFixes(t *testing.T) {
 	}
 }
 
+func TestRenderDriveResult_NoChangeFixRoundIsNotReportedAsAFix(t *testing.T) {
+	run := &ipc.RunInfo{
+		ID:     "run-1",
+		Branch: "feature/x",
+		Status: types.RunCompleted,
+		Steps: []ipc.StepResultInfo{
+			{StepName: types.StepTest, Status: types.StepStatusCompleted, FixSummaries: []string{"no changes applied"}},
+			{StepName: types.StepCI, Status: types.StepStatusCompleted},
+		},
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+
+	if err := renderDriveResult(cmd, run, false); err != nil {
+		t.Fatalf("terminal passed must exit 0, got error: %v", err)
+	}
+	got := out.String()
+	for _, unwanted := range []string{"fixes[", "acknowledge the misses"} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf("a round that changed nothing must not be reported as a fix, found %q in:\n%s", unwanted, got)
+		}
+	}
+}
+
 func TestRenderDriveResult_FailedHasNoSummarizeInstruction(t *testing.T) {
 	run := &ipc.RunInfo{
 		ID:     "run-1",
@@ -599,5 +771,256 @@ func TestRenderDriveResult_FailedHasNoSummarizeInstruction(t *testing.T) {
 	got := out.String()
 	if strings.Contains(got, "Summarize this pipeline run for the user") {
 		t.Errorf("failed outcome must not carry the success summary instruction:\n%s", got)
+	}
+}
+
+// A stream gap is state-bearing for the reconciler: it forces exactly one
+// authoritative read, which is how a transition the daemon had to coalesce
+// away reaches AXI. Subscribe-first behaviour and the single-read budget are
+// unchanged.
+func TestRunReconciler_StreamGapForcesOneAuthoritativeRead(t *testing.T) {
+	events := make(chan ipc.Event, 4)
+	source := &scriptedRunStateSource{
+		subscriptions: []scriptedSubscription{{events: events}},
+		runs: []*ipc.RunInfo{
+			{ID: "run-1", Status: types.RunRunning, StateRev: 3},
+			{ID: "run-1", Status: types.RunCompleted, StateRev: 71},
+		},
+	}
+	reconciler := newRunReconciler(source, "run-1")
+	defer reconciler.Close()
+	// Disable the slow lost-event backstop so only the gap can wake the
+	// reconciler; otherwise the heartbeat would mask a missing gap route.
+	reconciler.heartbeatInterval = time.Hour
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	first, err := reconciler.Next(ctx)
+	if err != nil || first.Status != types.RunRunning {
+		t.Fatalf("initial Next = %#v, %v", first, err)
+	}
+	events <- ipc.Event{Type: ipc.EventStreamGap, RunID: "run-1", StateRev: 71}
+	after, err := reconciler.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != types.RunCompleted {
+		t.Fatalf("post-gap status = %q, want the authoritative terminal state", after.Status)
+	}
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if got := strings.Join(source.operations, ","); got != "subscribe,reconcile,reconcile" {
+		t.Fatalf("operations = %s, want exactly one extra reconciliation for the gap", got)
+	}
+}
+
+// An event type this build does not recognise must be treated as state-bearing
+// rather than ignored, so a future producer cannot strand a consumer.
+func TestRunReconciler_UnknownEventTypeIsTreatedAsStateBearing(t *testing.T) {
+	events := make(chan ipc.Event, 2)
+	source := &scriptedRunStateSource{
+		subscriptions: []scriptedSubscription{{events: events}},
+		runs: []*ipc.RunInfo{
+			{ID: "run-1", Status: types.RunRunning},
+			{ID: "run-1", Status: types.RunCompleted},
+		},
+	}
+	reconciler := newRunReconciler(source, "run-1")
+	defer reconciler.Close()
+	reconciler.heartbeatInterval = time.Hour
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := reconciler.Next(ctx); err != nil {
+		t.Fatal(err)
+	}
+	events <- ipc.Event{Type: ipc.EventType("some_future_event"), RunID: "run-1"}
+	after, err := reconciler.Next(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status != types.RunCompleted {
+		t.Fatalf("status after unknown event = %q, want a reconciliation", after.Status)
+	}
+}
+
+// TestDriveRun_YesLeavesAnOpenReviewQuestionAwaitingAnAnswer is the regression
+// for the hole --yes used to open in the review conversation.
+//
+// An open question is an ask-user warning on the ordinary findings channel, so
+// HasActionableFindings counted it and gateResolution selected its id like any
+// other finding and returned ActionFix. The fixer was then handed "Review
+// question awaiting an answer: ..." as work, guessed an answer and edited code;
+// the rereview re-emitted the still-open question and the second gate was
+// approved as already-fixed. The stated property that no verdict can release a
+// gate with questions open held only for the explicit answer path.
+//
+// Asserting zero IPC responses is the whole point: any response at all - fix or
+// approve - is the bug, because a question is resolved by an answer.
+func TestDriveRun_YesLeavesAnOpenReviewQuestionAwaitingAnAnswer(t *testing.T) {
+	socketPath := filepath.Join(makeSocketSafeTempDir(t), "review-question.sock")
+	srv := ipc.NewServer()
+	var responses atomic.Int32
+	srv.Handle(ipc.MethodRespond, func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+		responses.Add(1)
+		return nil, errors.New("unexpected automatic response to an open review question")
+	})
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(socketPath) }()
+	t.Cleanup(func() {
+		srv.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("IPC server did not stop")
+		}
+	})
+	var client *ipc.Client
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		client, err = ipc.Dial(socketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if client == nil {
+		t.Fatal("IPC server did not become ready")
+	}
+	defer client.Close()
+
+	// One open question beside an ordinary auto-fixable finding, which is the
+	// mixed gate the reviewer actually produces: the presence of other
+	// actionable work must not let --yes resolve the question with it.
+	findings := `{"findings":[` +
+		`{"id":"question-q1","severity":"warning","description":"Review question awaiting an answer: keep the legacy route?","action":"ask-user","category":"review-question"},` +
+		`{"id":"f1","severity":"warning","description":"ordinary finding","action":"auto-fix"}` +
+		`],"summary":"one open question"}`
+	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+		t.Run(string(status), func(t *testing.T) {
+			parked := &ipc.RunInfo{
+				ID: "run-1", Status: types.RunRunning,
+				Steps: []ipc.StepResultInfo{{StepName: types.StepReview, Status: status, FindingsJSON: &findings}},
+			}
+			source := &scriptedRunStateSource{
+				subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
+				runs:          []*ipc.RunInfo{parked},
+			}
+			reconciler := newRunReconciler(source, parked.ID)
+			defer reconciler.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var progress bytes.Buffer
+			run, ciReady, err := driveRunWithReconciler(ctx, &progress, client, reconciler, parked.ID, true)
+			if err != nil || run != parked || ciReady || responses.Load() != 0 {
+				t.Fatalf("--yes resolved a gate with an open review question: run=%+v ciReady=%v responses=%d err=%v", run, ciReady, responses.Load(), err)
+			}
+			// The operator has to be told what to do instead, or --yes just
+			// looks like it hung.
+			for _, want := range []string{"explicit answer", "axi answer"} {
+				if !strings.Contains(progress.String(), want) {
+					t.Fatalf("progress missing %q: %s", want, progress.String())
+				}
+			}
+		})
+	}
+}
+
+// A gate with no review question is unaffected: --yes still resolves ordinary
+// ask-user findings as standing consent, which is what it is for.
+func TestDriveRun_YesStillResolvesAGateWithoutAReviewQuestion(t *testing.T) {
+	findings := `{"findings":[{"id":"f1","severity":"warning","description":"ordinary finding","action":"ask-user"}],"summary":"one issue"}`
+	parsed, err := types.ParseFindingsJSON(findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if types.HasReviewQuestion(parsed) {
+		t.Fatal("an ordinary ask-user finding was mistaken for a review question")
+	}
+	// The ID prefix alone must never trigger the carve-out; only the category.
+	prefixed := `{"findings":[{"id":"question-q1","severity":"warning","description":"agent named it that way","action":"ask-user"}],"summary":"one issue"}`
+	parsed, err = types.ParseFindingsJSON(prefixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if types.HasReviewQuestion(parsed) {
+		t.Fatal("a finding was treated as a review question on its ID prefix alone")
+	}
+}
+
+// TestDriveRun_YesLeavesAnUnreadableQuestionHistoryAwaitingAHuman covers the
+// gate the review step parks when the reviewer's question history could not be
+// read in full. That marker deliberately carries no review-question category -
+// an answer is exactly what the daemon refuses for such a conversation - so the
+// carve-out above does not reach it, and without its own predicate
+// gateResolution selected its id, returned ActionFix, and handed the fixer
+// "Decide this gate yourself" as work; the rereview re-emitted the identical
+// marker and the fix_review gate was then approved as already-fixed, so the
+// possibly-dropped major question reached nobody.
+func TestDriveRun_YesLeavesAnUnreadableQuestionHistoryAwaitingAHuman(t *testing.T) {
+	socketPath := filepath.Join(makeSocketSafeTempDir(t), "unreadable-history.sock")
+	srv := ipc.NewServer()
+	var responses atomic.Int32
+	srv.Handle(ipc.MethodRespond, func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+		responses.Add(1)
+		return nil, errors.New("unexpected automatic response to an unreadable question history")
+	})
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(socketPath) }()
+	t.Cleanup(func() {
+		srv.Close()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("IPC server did not stop")
+		}
+	})
+	var client *ipc.Client
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		var err error
+		client, err = ipc.Dial(socketPath)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if client == nil {
+		t.Fatal("IPC server did not become ready")
+	}
+	defer client.Close()
+
+	findings := `{"findings":[` +
+		`{"id":"review-questions-unreadable","severity":"warning","description":"The reviewer's question history could not be read in full. Decide this gate yourself.","action":"ask-user"},` +
+		`{"id":"f1","severity":"warning","description":"ordinary finding","action":"auto-fix"}` +
+		`],"summary":"unreadable question history"}`
+	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+		t.Run(string(status), func(t *testing.T) {
+			parked := &ipc.RunInfo{
+				ID: "run-1", Status: types.RunRunning,
+				Steps: []ipc.StepResultInfo{{StepName: types.StepReview, Status: status, FindingsJSON: &findings}},
+			}
+			source := &scriptedRunStateSource{
+				subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
+				runs:          []*ipc.RunInfo{parked},
+			}
+			reconciler := newRunReconciler(source, parked.ID)
+			defer reconciler.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			var progress bytes.Buffer
+			run, ciReady, err := driveRunWithReconciler(ctx, &progress, client, reconciler, parked.ID, true)
+			if err != nil || run != parked || ciReady || responses.Load() != 0 {
+				t.Fatalf("--yes resolved a gate parked on an unreadable question history: run=%+v ciReady=%v responses=%d err=%v", run, ciReady, responses.Load(), err)
+			}
+			// It must NOT be sold as an answer: the daemon refuses one here.
+			if strings.Contains(progress.String(), "axi answer") {
+				t.Fatalf("progress told the operator to answer a conversation the daemon refuses: %s", progress.String())
+			}
+			if !strings.Contains(progress.String(), "could not be read in full") {
+				t.Fatalf("progress does not name the cause: %s", progress.String())
+			}
+		})
 	}
 }

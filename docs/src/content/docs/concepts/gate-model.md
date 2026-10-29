@@ -57,22 +57,22 @@ That is a core design choice, not an implementation detail.
 3. Git writes an admitted push into the local bare gate repo.
 4. The gate repo's `post-receive` hook notifies the daemon.
 5. The daemon creates a detached worktree for this run.
-6. The pipeline runs in order: `intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci`.
+6. The nine core steps run in order: `intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci`. Repository gates, when configured, run immediately after their anchors.
 7. If a step pauses, you can attach with the TUI or use `no-mistakes axi respond` to approve, fix, or skip.
    Use `no-mistakes axi abort` only when you mean to cancel the whole run.
    AXI run objects show `awaiting_agent: parked <duration>` while a non-terminal run is parked at that gate, so a supervising agent can distinguish a waiting run from active work in one status read.
    While a step is actively running or fixing, AXI run objects can also show `active_steps` with the active duration, latest activity, native agent PID, and current execution or fix round.
-8. After local checks pass, the push step forwards the branch to the configured push target only after verifying that the update will not discard unincorporated commits already on that target. The PR step creates a pull request or reuses an existing one without rewriting its title or description; detailed status goes into validation notices in the PR conversation.
+8. After local checks pass, the push step forwards the branch to the configured push target only after verifying that the update will not discard unincorporated commits already on that target, and the PR step creates or reuses the pull request. Existing author content is preserved by default while validation notices and machine attestations are refreshed; the [PR reference](/no-mistakes/reference/pipeline-steps/#pr) owns the template and provider exceptions.
    For GitHub fork routing, the push target is the fork and the PR base repository is the parent from `origin`.
 9. The CI step keeps watching the open PR until it is merged, closed, or its configured idle timeout elapses with no base-branch movement, and can auto-fix failures or merge conflicts when supported.
-   While it watches, the TUI and terminal title surface a `Checks passed` signal once checks are green and the PR is mergeable, and `no-mistakes axi` returns `outcome: checks-passed` with instructions to summarize the run and list any pipeline fixes. If post-review changes made the risk assessment stale, AXI and the TUI say so rather than presenting the previous rating as merge authority; the [pipeline reference](/no-mistakes/reference/pipeline-steps/#risk-assessment-freshness) owns that contract.
+   While it watches, the TUI and terminal title surface a `Checks passed` signal once checks are green and the PR is mergeable (or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) and no checks are registered), and `no-mistakes axi` returns `outcome: checks-passed` with instructions to summarize the run and list any pipeline fixes, so agents stop and ask you to review and merge it. An empty forge response without that declaration stays not-ready. A stale review rating is never renewed by green CI; see [Risk assessment freshness](/no-mistakes/reference/pipeline-steps/#risk-assessment-freshness).
 
 **Key design decisions:**
 
 - **Named remote** - `origin` is never hijacked. You push to `no-mistakes` on purpose, so regular `git push` still works normally.
 - **Recursive-run containment** - managed gate identity and authenticated daemon peer ancestry prevent active validation steps from starting or controlling another pipeline. `NO_MISTAKES_GATE` is diagnostic evidence only, not authorization.
-- **Disposable worktrees** - each run happens in its own detached worktree under `~/.no-mistakes/worktrees/`. The daemon can safely modify files, run tests, and commit fixes without touching your working directory.
-- **Fixed pipeline** - the step order is opinionated and not configurable: `intent → rebase → review → test → document → lint → push → pr → ci`. What you _can_ configure is the commands each step runs, how many auto-fix attempts are allowed, and whether transcript-based intent extraction is used when intent is not supplied directly.
+- **Disposable worktrees** - each run happens in its own detached worktree, under `~/.no-mistakes/worktrees/` by default or under the directory [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) names for that repository. The daemon can safely modify files, run tests, and commit fixes without touching your working directory.
+- **Fixed pipeline** - the step order is opinionated and not configurable: `intent → rebase → review → test → document → lint → push → pr → ci`. What you _can_ configure is the commands each step runs, how many auto-fix attempts are allowed, whether transcript-based intent extraction is used when intent is not supplied directly, and extra [`gates`](/no-mistakes/reference/repo-config/#gates) that run after a core step - additions only, never a removal or a reordering.
 - **Remote data-loss guard** - force-pushes are checked against the live push target and refused when they would discard commits the run did not incorporate.
 
 ## Why it is built this way
@@ -92,6 +92,56 @@ Git operations on the gate name the bare repo explicitly with `--git-dir`
 instead of relying on working-directory discovery, so hardened environments
 that set `safe.bareRepository=explicit` (common in agent harnesses and CI)
 work unchanged.
+
+### Private mirror reconciliation
+
+A rebase can leave the gate branch on an older history that rejects the next
+ordinary push. Reconciliation compares exact commit heads and per-file
+`git patch-id --stable` identities; commit messages are not evidence. Historical
+patch matches also require a clean three-way merge of the private head into the
+live head whose resulting tree equals the live tree. This prevents changes
+discarded by a merge or revert from being counted as surviving content. If that
+survival check cannot prove preservation, the private-only range is reported
+as at risk.
+
+**Accepted Decision 41-A (issue #983):** pipeline publication may replace a
+private mirror head that is **exactly equal to a head the publishing run itself
+placed on the mirror** without patch-ID or tree-survival proof: its
+`Run.SubmittedHeadSHA`, or, once it has published, its durable
+`Run.LastPushedSHA`. The last pushed head is recorded only after a verified push to the configured
+push target and mirror settlement, so it is never an external or newer head.
+This narrow policy exception permits reviewed rebases and conflict resolutions
+to change the submitted patch, including a CI merge-conflict repair that is
+revalidated from Review after the run has already published. The replacement
+head must still be review-approved, and the force push to the configured target
+stays leased on the same last pushed head. Ownership is not containment evidence. The
+exception does not extend to another recorded head, an agent-created head, an
+abbreviated SHA, or an external, newer, or divergent private head. Fresh AXI
+submissions do not receive this exception.
+
+Reconciliation requires direct private branch and archive refs; symbolic refs,
+including dangling symbolic refs, are refused before containment checks. Ref
+creation and deletion use exact names without dereferencing and expected old
+values. Before deleting a reconciled branch ref, the gate archives its exact
+head at `refs/tags/no-mistakes-abandoned/<branch>/<sha>`. Outside Decision 41-A,
+unproven private content refuses before upstream publication, leaves the
+private branch untouched, and names every at-risk commit. An ancestor already
+supports an ordinary fast-forward. A gate head that is a newer descendant of
+the published head stays untouched, including through the detached worktree's
+shared branch refs.
+
+Correction and CI-repair recording persist the agent-created worktree head in
+the run and database without moving a branch ref shared with the gate. Repairs
+awaiting review retain their uncertified range. Publication reconciliation
+therefore still sees any intervening private head; ordinary worktrees with
+separate ref storage retain their local branch bookkeeping.
+
+Publication plans reconciliation before pushing and applies it only after
+verifying the upstream head. If mirror settlement then fails or is cancelled,
+it restores the archived branch when no intervening ref has appeared, so a
+retry can still resolve the branch. AXI reconciles before its ordinary submission
+push and restores an archived ref after a failed submission if no intervening
+ref has appeared. Neither path forces the private mirror.
 
 ### Daemon
 
@@ -160,8 +210,8 @@ branch, marking the remaining steps as skipped.
 
 1. Execute the step
 2. If the step finds `action: auto-fix` findings, the step result is auto-fixable, and auto-fix is enabled, loop back with the agent to fix them (up to the configured limit)
-3. If blocking findings remain, or any finding has `action: ask-user`, pause and wait for user action
-4. `action: no-op` findings are informational only; the user can approve, fix selected findings, skip, or cancel the run when the step pauses
+3. If blocking findings remain, any finding has `action: ask-user`, or Review has a selected finding still awaiting positive rereview verification, pause and wait for user action. The Review carry-forward rule is detailed in the [pipeline-step reference](/no-mistakes/reference/pipeline-steps/#review).
+4. `action: no-op` findings are informational only unless a Review finding was selected for fixing and remains outstanding; the user can approve, fix selected findings, skip, or cancel the run when the step pauses
 
 While the executor is paused at an approval or fix-review gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
 That timestamp is observability only and does not alter approval behavior.
@@ -183,10 +233,13 @@ Intent stores the summary, source, session ID, and match score on each run when 
 An agent-supplied AXI intent is stored directly on the run.
 Raw transcript text is not stored in this database.
 Legacy `user_fix` rounds are still read as `auto-fix` for backward compatibility.
-Run records also store the nullable `awaiting_agent_since` timestamp used only to render the AXI parked signal while a gate is waiting for the driving agent, plus accumulated `parked_ms` for local performance reporting.
+Run records also store the nullable `awaiting_agent_since` timestamp used only to render the AXI parked signal while a gate is waiting for the driving agent, plus accumulated `parked_ms` for local performance reporting. For version-specific debugging, inspect `runs.no_mistakes_version` and `runs.no_mistakes_build_sha`: each new run records the version returned by `internal/buildinfo.CurrentVersion()` and the `internal/buildinfo.Commit` build SHA embedded through release `-ldflags`, the same identity shown by `no-mistakes --version`. Historical rows remain `NULL`.
 Each agent invocation records local-only purpose, provider/model metadata, session mode and a truncated session-identity hash, timing, failure category, and token usage; prompts, outputs, diffs, and credentials are never stored there.
 Use `no-mistakes stats --agents` for aggregates or `no-mistakes stats --run <id>` for a run timeline and parked time.
 Repo records store the parent `upstream_url` and an optional `fork_url`; branch pushes use `fork_url` when present, while PR and CI provider context stays anchored to the parent.
+At the start of each run, no-mistakes best-effort refreshes those URLs from the working clone without changing any clone or gate remote.
+`origin` is the upstream authority, and an existing fork registration is refreshed only when exactly one other clone remote identifies the same fork repository.
+The two registered URLs are replaced atomically after validation; an unreadable, invalid, credential-bearing, or ambiguous remote, or a database failure, leaves the exact prior registration in place and does not stop the run.
 
 ## Local state
 
@@ -199,12 +252,11 @@ Everything lives under `~/.no-mistakes/` by default. Set `NM_HOME` to relocate i
 | `daemon.pid`                     | Daemon identity record                                                                                                  |
 | `daemon.lock`                    | Singleton lock; the OS lock a live daemon holds so a second daemon for the same root cannot start                       |
 | `config.yaml`                    | Global configuration                                                                                                    |
-| `telemetry-gate.json`            | Persistent read-only telemetry dedupe state                                                                             |
 | `update-check.json`              | Cached update check result                                                                                              |
 | `servers/`                       | PID-tracking records for managed agent servers                                                                          |
 | `repos/<id>.git`                 | Bare gate repos                                                                                                         |
 | `repos/<id>.git/notify-push.log` | Persistent hook notification failure log                                                                                |
-| `worktrees/<repoID>/<runID>/`    | Disposable worktrees (cleaned up after each run)                                                                        |
+| `worktrees/<repoID>/<runID>/`    | Run worktrees, subject to [cleanup and retention rules](/no-mistakes/concepts/daemon/#what-it-does); [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) can place a repository's elsewhere |
 | `logs/<runID>/<step>.log`        | Per-step log files                                                                                                      |
 | `logs/daemon.log`                | Bounded daemon lifecycle log                                                                                            |
 | `logs/daemon-bootstrap.log`      | Bounded pre-logger bootstrap and direct crash output                                                                    |

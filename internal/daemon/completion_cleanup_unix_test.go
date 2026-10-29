@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,10 +19,10 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-type unrecordedHeadStep struct{}
+type unrecordedHeadStep struct{ breakArchive bool }
 
 func (*unrecordedHeadStep) Name() types.StepName { return types.StepLint }
-func (*unrecordedHeadStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+func (s *unrecordedHeadStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	if err := os.WriteFile(filepath.Join(sctx.WorkDir, "unrecorded.txt"), []byte("preserve this work\n"), 0o644); err != nil {
 		return nil, err
 	}
@@ -30,6 +31,15 @@ func (*unrecordedHeadStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOu
 	}
 	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "unrecorded head"); err != nil {
 		return nil, err
+	}
+	if s.breakArchive {
+		head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "symbolic-ref", git.ArchiveHeadRef(sctx.Run.ID, head), "refs/heads/main"); err != nil {
+			return nil, err
+		}
 	}
 	return &pipeline.StepOutcome{}, nil
 }
@@ -72,12 +82,21 @@ func TestStartupTerminalPRCompletionReapsOwnedProcesses(t *testing.T) {
 			}
 
 			mgr := NewRunManager(database, p, nil)
-			events, unsubscribe := mgr.Subscribe(run.ID)
-			defer unsubscribe()
+			events, err := mgr.Subscribe(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer events.Close()
+			if _, ok := events.Next(context.Background()); !ok {
+				t.Fatal("missing initial reconciliation gap")
+			}
 			if count := reconcileTerminalPRRuns(database, p, mgr); count != 1 {
 				t.Fatalf("reconciled runs = %d, want 1", count)
 			}
-			event := <-events
+			event, ok := events.Next(context.Background())
+			if !ok {
+				t.Fatal("completion event missing")
+			}
 			if event.Type != ipc.EventRunCompleted || event.Status == nil || *event.Status != string(types.RunCompleted) {
 				t.Fatalf("completion event = %#v", event)
 			}
@@ -133,29 +152,40 @@ func newTerminalPRCleanupFixture(t *testing.T) (*paths.Paths, *db.DB, *db.Repo, 
 	return p, database, repo, run, workDir
 }
 
-func TestRunCompletionFailsWhenCleanupRetainsWorktree(t *testing.T) {
-	p, database, repo, head := newRunCleanupFixture(t)
-	mgr := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{&unrecordedHeadStep{}} })
-	runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	waitForRunDone(t, mgr, runID)
-	run, err := database.GetRun(runID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, errWorktreeRetainedForCustody.Error()) {
-		t.Fatalf("retained run = %+v, want failed with custody diagnostic", run)
-	}
-	workDir := p.WorktreeDir(repo.ID, runID)
-	if data, err := os.ReadFile(filepath.Join(workDir, "unrecorded.txt")); err != nil || string(data) != "preserve this work\n" {
-		t.Fatalf("retained work = %q, %v", data, err)
-	}
-	if pinned, err := git.ResolveRef(context.Background(), p.RepoDir(repo.ID), git.RunHeadRef(runID)); err != nil || pinned != head {
-		t.Fatalf("recorded head = %q, %v", pinned, err)
-	}
-	if crash, err := git.ResolveRef(context.Background(), p.RepoDir(repo.ID), git.CrashHeadRef(runID)); err != nil || crash == head || crash == "" {
-		t.Fatalf("crash head = %q, %v", crash, err)
+func TestRunCompletionWaitsForArchivedCleanup(t *testing.T) {
+	for _, broken := range []bool{false, true} {
+		t.Run(fmt.Sprint("archive_failure=", broken), func(t *testing.T) {
+			p, database, repo, head := newRunCleanupFixture(t)
+			mgr := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{&unrecordedHeadStep{breakArchive: broken}} })
+			runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "", "", false, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitForRunDone(t, mgr, runID)
+			run, err := database.GetRun(runID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workDir := p.WorktreeDir(repo.ID, runID)
+			if broken {
+				if run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, errWorktreeRetainedForCustody.Error()) {
+					t.Fatalf("retained run = %+v", run)
+				}
+				if data, err := os.ReadFile(filepath.Join(workDir, "unrecorded.txt")); err != nil || string(data) != "preserve this work\n" {
+					t.Fatalf("retained work = %q, %v", data, err)
+				}
+			} else {
+				if run.Status != types.RunCompleted {
+					t.Fatalf("archived run = %+v", run)
+				}
+				if _, err := os.Stat(workDir); !os.IsNotExist(err) {
+					t.Fatalf("completed with retained worktree: %v", err)
+				}
+				ref := git.ArchiveHeadRef(runID, run.HeadSHA)
+				if pinned, err := git.ResolveRef(context.Background(), p.RepoDir(repo.ID), ref); err != nil || pinned != run.HeadSHA || pinned == head {
+					t.Fatalf("archive = %q, %v", pinned, err)
+				}
+			}
+		})
 	}
 }

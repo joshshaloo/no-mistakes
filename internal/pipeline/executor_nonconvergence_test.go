@@ -62,13 +62,15 @@ func twoRoundReviewStep(calls *int) Step {
 				return &StepOutcome{
 					NeedsApproval: true,
 					AutoFixable:   true,
-					Findings:      `{"findings":[{"id":"f1","severity":"error","description":"leaks grandchildren","action":"auto-fix"}],"summary":"1 issue"}`,
+					Findings:      `{"findings":[{"id":"f1","file":"process.go","severity":"error","description":"leaks grandchildren","action":"auto-fix"}],"summary":"1 issue"}`,
 				}, nil
 			}
 			return &StepOutcome{
-				AutoFixable: true,
-				FixSummary:  "add process group",
-				Findings:    `{"findings":[{"id":"f2","severity":"error","description":"still leaks at a sibling site","action":"no-op"}],"summary":"1 issue"}`,
+				AutoFixable:     true,
+				FixSummary:      "add process group",
+				ReviewedPaths:   []string{"process.go", "sibling.go"},
+				ReviewablePaths: []string{"process.go", "sibling.go"},
+				Findings:        `{"findings":[{"id":"f2","file":"sibling.go","severity":"info","description":"possible sibling issue to investigate","action":"no-op"}],"summary":"1 advisory"}`,
 			}, nil
 		},
 	}
@@ -169,7 +171,12 @@ func runTwoRoundReview(t *testing.T, detector *convergence.Detector) (runSnapsho
 	exec := NewExecutor(database, p, cfg, nil, []Step{twoRoundReviewStep(&calls), newPassStep(types.StepTest)}, nil)
 	exec.SetConvergenceDetector(detector)
 
-	execErr := exec.Execute(context.Background(), run, repo, workDir)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	execErr := exec.Execute(ctx, run, repo, workDir)
+	if execErr != nil {
+		t.Fatalf("two-round fixture did not complete: %v", execErr)
+	}
 	snap := snapshotRun(t, database, run.ID, execErr, calls)
 	finished, err := database.GetRun(run.ID)
 	if err != nil {

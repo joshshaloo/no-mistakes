@@ -9,9 +9,12 @@ import (
 
 func TestMerge_GlobalOnly(t *testing.T) {
 	global := &GlobalConfig{
-		Agent:     types.AgentClaude,
-		CITimeout: 4 * time.Hour,
-		LogLevel:  "info",
+		Agent:              types.AgentClaude,
+		CITimeout:          4 * time.Hour,
+		ReviewAgentTimeout: 2 * time.Hour,
+		AgentTimeout:       15 * time.Minute,
+		TestAgentTimeout:   45 * time.Minute,
+		LogLevel:           "info",
 	}
 	repo := &RepoConfig{}
 
@@ -21,6 +24,30 @@ func TestMerge_GlobalOnly(t *testing.T) {
 	}
 	if cfg.CITimeout != 4*time.Hour {
 		t.Errorf("ci_timeout = %v", cfg.CITimeout)
+	}
+	if cfg.ReviewAgentTimeout != 2*time.Hour {
+		t.Errorf("review_agent_timeout = %v", cfg.ReviewAgentTimeout)
+	}
+	if cfg.AgentTimeout != 15*time.Minute {
+		t.Errorf("agent_timeout = %v", cfg.AgentTimeout)
+	}
+	if cfg.TestAgentTimeout != 45*time.Minute {
+		t.Errorf("test_agent_timeout = %v", cfg.TestAgentTimeout)
+	}
+}
+
+func TestMergeLeavesEvalProvenanceDisabledUntilExplicitlyEnabled(t *testing.T) {
+	global := &GlobalConfig{SourceYAML: []byte("agent: claude\n"), Agent: types.AgentClaude}
+	repo := &RepoConfig{IgnorePatterns: []string{"vendor/**"}}
+	cfg := Merge(global, repo)
+	if cfg.CaptureEvalProvenance || len(cfg.ReplayGlobalYAML) != 0 || len(cfg.ReplayRepoYAML) != 0 {
+		t.Fatalf("ordinary merged config contains eval provenance: %#v", cfg)
+	}
+	if err := cfg.EnableEvalProvenance(global, repo); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.CaptureEvalProvenance || string(cfg.ReplayGlobalYAML) != "agent: claude\n" || len(cfg.ReplayRepoYAML) == 0 {
+		t.Fatalf("enabled eval provenance = %#v", cfg)
 	}
 }
 
@@ -149,6 +176,83 @@ func TestMerge_AutoFixRepoOverridesGlobal(t *testing.T) {
 	}
 	if cfg.AutoFix.Test != 3 {
 		t.Errorf("test = %d, want 3 (default, no override)", cfg.AutoFix.Test)
+	}
+}
+
+func TestLoadRepoFromBytes_ParsesProvidersDraft(t *testing.T) {
+	repo, err := LoadRepoFromBytes([]byte("providers:\n  github:\n    draft_pull_requests: true\n"))
+	if err != nil {
+		t.Fatalf("LoadRepoFromBytes() error = %v", err)
+	}
+	if repo.Providers.GitHub.DraftPullRequests == nil || !*repo.Providers.GitHub.DraftPullRequests {
+		t.Errorf("draft_pull_requests = %v, want true", repo.Providers.GitHub.DraftPullRequests)
+	}
+}
+
+func TestMerge_ProvidersDraftDefaultsFalse(t *testing.T) {
+	cfg := Merge(&GlobalConfig{}, &RepoConfig{})
+	if cfg.Providers.GitHub.DraftPullRequests {
+		t.Error("draft_pull_requests = true, want false (default)")
+	}
+}
+
+func TestMerge_ProvidersRepoOverridesGlobalDraft(t *testing.T) {
+	truthy := true
+	falsy := false
+	global := &GlobalConfig{Providers: ProvidersRaw{GitHub: GitHubProviderRaw{DraftPullRequests: &truthy}}}
+
+	if cfg := Merge(global, &RepoConfig{}); !cfg.Providers.GitHub.DraftPullRequests {
+		t.Error("draft_pull_requests = false, want true (global)")
+	}
+
+	repo := &RepoConfig{Providers: ProvidersRaw{GitHub: GitHubProviderRaw{DraftPullRequests: &falsy}}}
+	if cfg := Merge(global, repo); cfg.Providers.GitHub.DraftPullRequests {
+		t.Error("draft_pull_requests = true, want false (repo override)")
+	}
+}
+
+func TestMerge_ProvidersRepoOverridesGlobalGitLabDraft(t *testing.T) {
+	truthy := true
+	falsy := false
+	global := &GlobalConfig{Providers: ProvidersRaw{GitLab: GitLabProviderRaw{DraftPullRequests: &truthy}}}
+
+	if cfg := Merge(global, &RepoConfig{}); !cfg.Providers.GitLab.DraftPullRequests {
+		t.Error("gitlab draft_pull_requests = false, want true (global)")
+	}
+
+	repo := &RepoConfig{Providers: ProvidersRaw{GitLab: GitLabProviderRaw{DraftPullRequests: &falsy}}}
+	if cfg := Merge(global, repo); cfg.Providers.GitLab.DraftPullRequests {
+		t.Error("gitlab draft_pull_requests = true, want false (repo override)")
+	}
+}
+
+func TestMerge_ProvidersRepoOverridesGlobalBitbucketDraft(t *testing.T) {
+	truthy := true
+	falsy := false
+	global := &GlobalConfig{Providers: ProvidersRaw{Bitbucket: BitbucketProviderRaw{DraftPullRequests: &truthy}}}
+
+	if cfg := Merge(global, &RepoConfig{}); !cfg.Providers.Bitbucket.DraftPullRequests {
+		t.Error("bitbucket draft_pull_requests = false, want true (global)")
+	}
+
+	repo := &RepoConfig{Providers: ProvidersRaw{Bitbucket: BitbucketProviderRaw{DraftPullRequests: &falsy}}}
+	if cfg := Merge(global, repo); cfg.Providers.Bitbucket.DraftPullRequests {
+		t.Error("bitbucket draft_pull_requests = true, want false (repo override)")
+	}
+}
+
+func TestMerge_ProvidersRepoOverridesGlobalAzureDevOpsDraft(t *testing.T) {
+	truthy := true
+	falsy := false
+	global := &GlobalConfig{Providers: ProvidersRaw{AzureDevOps: AzureDevOpsProviderRaw{DraftPullRequests: &truthy}}}
+
+	if cfg := Merge(global, &RepoConfig{}); !cfg.Providers.AzureDevOps.DraftPullRequests {
+		t.Error("azuredevops draft_pull_requests = false, want true (global)")
+	}
+
+	repo := &RepoConfig{Providers: ProvidersRaw{AzureDevOps: AzureDevOpsProviderRaw{DraftPullRequests: &falsy}}}
+	if cfg := Merge(global, repo); cfg.Providers.AzureDevOps.DraftPullRequests {
+		t.Error("azuredevops draft_pull_requests = true, want false (repo override)")
 	}
 }
 

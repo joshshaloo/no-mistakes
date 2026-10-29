@@ -75,6 +75,7 @@ func (s *wizardAgentSuggester) ensure(ctx context.Context) error {
 		}
 		ag, err := s.new(s.cfg.Agent, s.cfg.AgentPath(), s.cfg.AgentArgs(), agent.Options{
 			ACPRegistryOverrides: s.cfg.ACPRegistryOverrides,
+			Profile:              s.cfg.AgentProfile(),
 		})
 		if err != nil {
 			s.err = fmt.Errorf("create agent: %w", err)
@@ -239,7 +240,7 @@ func runWizardWithMode(ctx context.Context, p *paths.Paths, state *repoState, sk
 			return git.CommitAll(ctx, workDir, msg)
 		},
 		Push: func(ctx context.Context, branch string) error {
-			return git.PushWithOptions(ctx, workDir, gate.RemoteName, "refs/heads/"+branch, "", false, formatSkipPushOptions(skipSteps))
+			return git.PushWithOptionsSkippingHooks(ctx, workDir, gate.RemoteName, "refs/heads/"+branch, "", false, formatSkipPushOptions(skipSteps))
 		},
 		SuggestBranch: func(ctx context.Context) (string, error) {
 			return suggester.suggestBranch(ctx)

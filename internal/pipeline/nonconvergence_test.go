@@ -7,8 +7,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 )
 
-func strPtr(s string) *string { return &s }
-
 func TestConvergenceRoundCarriesFindingsFixSummaryAndSelection(t *testing.T) {
 	round := &db.StepRound{
 		Round:              2,

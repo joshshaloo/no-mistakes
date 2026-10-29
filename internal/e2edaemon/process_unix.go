@@ -67,7 +67,16 @@ func FindDaemonsForRoot(nmHome string) ([]int, error) {
 func processAliveOS(pid int) (bool, error) {
 	err := syscall.Kill(pid, 0)
 	if err == nil {
-		return true, nil
+		cmd := exec.Command(psPath(), "-p", strconv.Itoa(pid), "-o", "stat=")
+		cmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
+		out, stateErr := cmd.Output()
+		if stateErr != nil {
+			if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+				return false, nil
+			}
+			return false, stateErr
+		}
+		return !strings.HasPrefix(strings.TrimSpace(string(out)), "Z"), nil
 	}
 	if errors.Is(err, syscall.ESRCH) {
 		return false, nil
@@ -96,4 +105,26 @@ func terminateDaemonPID(pid int) error {
 		return nil
 	}
 	return fmt.Errorf("pid %d still alive after SIGKILL", pid)
+}
+
+func terminateProcessTree(pid int) error {
+	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	if waitProcessExit(pid, 2*time.Second) {
+		return nil
+	}
+	if command, err := processCommandLine(pid); err != nil || strings.Contains(command, "<defunct>") {
+		return nil
+	}
+	if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	if waitProcessExit(pid, 2*time.Second) {
+		return nil
+	}
+	if command, err := processCommandLine(pid); err != nil || strings.Contains(command, "<defunct>") {
+		return nil
+	}
+	return fmt.Errorf("process group %d still alive after SIGKILL", pid)
 }

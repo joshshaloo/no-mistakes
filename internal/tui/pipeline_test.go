@@ -50,6 +50,21 @@ func TestStepLabel(t *testing.T) {
 	}
 }
 
+func TestRenderPipelineView_LabelsCombinedHousekeepingDuration(t *testing.T) {
+	run := testRun()
+	run.Steps = []ipc.StepResultInfo{{
+		StepName:   types.StepDocument,
+		Status:     types.StepStatusCompleted,
+		DurationMS: ptr(int64(173_000)),
+		WorkScope:  ipc.WorkScopeDocumentLintHousekeeping,
+	}}
+
+	out := stripANSI(renderPipelineView(run, run.Steps, 80, 0, 40))
+	if !strings.Contains(out, "Document + Lint housekeeping  173.0s") {
+		t.Fatalf("combined housekeeping duration was not explicit:\n%s", out)
+	}
+}
+
 func TestRenderPipelineView_NilRun(t *testing.T) {
 	out := renderPipelineView(nil, nil, 80, 0, 40)
 	if out != "No active run." {
@@ -274,7 +289,7 @@ func TestRenderPipelineView_FixingStatusOmitsAgentFixingLabel(t *testing.T) {
 }
 
 func TestRenderApprovalActions_FormatWithSeparator(t *testing.T) {
-	out := stripANSI(renderApprovalActions(true, true, false, 5, 5, false, true))
+	out := stripANSI(renderApprovalActions(true, true, false, 5, 5, false, true, true, false))
 	// Keys should not be bracket-wrapped - design uses "a approve" not "[a] approve".
 	if strings.Contains(out, "[a]") {
 		t.Error("expected bare key format 'a approve', not '[a] approve'")
@@ -290,7 +305,7 @@ func TestRenderApprovalActions_FormatWithSeparator(t *testing.T) {
 }
 
 func TestRenderApprovalActions_NoSelectionActions(t *testing.T) {
-	out := stripANSI(renderApprovalActions(false, true, false, 5, 5, false, true))
+	out := stripANSI(renderApprovalActions(false, true, false, 5, 5, false, true, true, false))
 	// Without selection actions, no │ separator should appear.
 	if strings.Contains(out, "│") {
 		t.Error("expected no │ separator when no selection actions")
@@ -305,7 +320,7 @@ func TestRenderPipelineView_HidesFixActionWhenDisabled(t *testing.T) {
 	run.Steps[0].Status = types.StepStatusAwaitingApproval
 
 	// Action bar is now rendered outside the pipeline box per DESIGN.md.
-	out := stripANSI(renderActionBar(run.Steps, true, false, false, 0, 5, false, true))
+	out := stripANSI(renderActionBar(run.Steps, true, false, false, 0, 5, false, true, true, false))
 	if strings.Contains(out, "f fix") {
 		t.Fatal("expected fix action to be hidden when disabled")
 	}
