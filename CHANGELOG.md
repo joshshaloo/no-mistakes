@@ -1,5 +1,715 @@
 # Changelog
 
+## [1.84.0](https://github.com/kunchenguid/no-mistakes/compare/v1.83.2...v1.84.0) (2026-09-26)
+
+
+### Features
+
+* **cli:** attach verification plans to new runs ([#1186](https://github.com/kunchenguid/no-mistakes/issues/1186)) ([f95ff57](https://github.com/kunchenguid/no-mistakes/commit/f95ff57a29c1ede8cbde54b7456b5a603a5eb37a))
+* **pipeline:** let the reviewer ask questions behind review.conversation ([#1104](https://github.com/kunchenguid/no-mistakes/issues/1104)) ([0e46580](https://github.com/kunchenguid/no-mistakes/commit/0e46580f4202547903d0c6e2470c11063818dfa1))
+* **pipeline:** prepare dependencies for agent-only tests ([#1216](https://github.com/kunchenguid/no-mistakes/issues/1216)) ([28b4833](https://github.com/kunchenguid/no-mistakes/commit/28b48335efc1b92ae4bf355248594c8761e25eb8))
+
+
+### Bug Fixes
+
+* **pipeline:** preserve human decisions in later step prompts ([#1224](https://github.com/kunchenguid/no-mistakes/issues/1224)) ([178e678](https://github.com/kunchenguid/no-mistakes/commit/178e67844cdb407dd0457099f71f48eb4d943049))
+* **pipeline:** prevent recorded-decision revalidation loops ([#1206](https://github.com/kunchenguid/no-mistakes/issues/1206)) ([677b2f5](https://github.com/kunchenguid/no-mistakes/commit/677b2f5177479647ddfb94a367ac2ba4e125009c))
+* **pipeline:** remove decision revalidation and unblock file-less review findings ([#1221](https://github.com/kunchenguid/no-mistakes/issues/1221)) ([7e00a9d](https://github.com/kunchenguid/no-mistakes/commit/7e00a9d200c5300317ea40120812bb031d5a8bb1))
+* **shellenv:** fail only the step that runs out of memory, not the daemon ([#1199](https://github.com/kunchenguid/no-mistakes/issues/1199)) ([1740b30](https://github.com/kunchenguid/no-mistakes/commit/1740b30ab3a7fab0f3297a11000adca1deeb8b90))
+
+## [1.83.2](https://github.com/kunchenguid/no-mistakes/compare/v1.83.1...v1.83.2) (2026-09-25)
+
+
+### Bug Fixes
+
+* **pipeline:** reconcile mirrors from a run's last published head ([#1193](https://github.com/kunchenguid/no-mistakes/issues/1193)) ([fd89fe8](https://github.com/kunchenguid/no-mistakes/commit/fd89fe842a6bdc4bf731e8f20599436581b274e6))
+* **pipeline:** require workarounds before marking Test scenarios untested ([#1201](https://github.com/kunchenguid/no-mistakes/issues/1201)) ([e15cfad](https://github.com/kunchenguid/no-mistakes/commit/e15cfad17e91fbdcc2864ac641f568598eacb336))
+* **pipeline:** review memory-file changes without blocking them ([#1203](https://github.com/kunchenguid/no-mistakes/issues/1203)) ([844ac2f](https://github.com/kunchenguid/no-mistakes/commit/844ac2fe2d2115f66ab9617e0ab191a837b4280a))
+
+## [1.83.1](https://github.com/kunchenguid/no-mistakes/compare/v1.83.0...v1.83.1) (2026-09-24)
+
+
+### Bug Fixes
+
+* **paths:** resolve gate hook helpers' NM_HOME from the gate, not the environment ([#1187](https://github.com/kunchenguid/no-mistakes/issues/1187)) ([416215c](https://github.com/kunchenguid/no-mistakes/commit/416215ce03ef5bd93b3e685d79ff76a8dacb0a9c))
+* **pipeline:** keep agent memory files out of automated edits ([#1189](https://github.com/kunchenguid/no-mistakes/issues/1189)) ([a2ba538](https://github.com/kunchenguid/no-mistakes/commit/a2ba538bfd28b597b47aad0a309726e095d55722))
+
+## [1.83.0](https://github.com/kunchenguid/no-mistakes/compare/v1.82.0...v1.83.0) (2026-09-24)
+
+
+### Features
+
+* **config:** per-repository machine-local commit and title overrides ([#1179](https://github.com/kunchenguid/no-mistakes/issues/1179)) ([15a6204](https://github.com/kunchenguid/no-mistakes/commit/15a62047b61d6dee0532823a79b987f29671ce5f))
+
+
+### Bug Fixes
+
+* **gate:** detect fork-as-origin layout and refuse with --fork-url guidance ([#1183](https://github.com/kunchenguid/no-mistakes/issues/1183)) ([a7ab68b](https://github.com/kunchenguid/no-mistakes/commit/a7ab68b144de59baf11595b8a463370072aaf62a))
+* **pipeline:** resolve branch base against freshly fetched base-branch tip ([#1147](https://github.com/kunchenguid/no-mistakes/issues/1147)) ([de50789](https://github.com/kunchenguid/no-mistakes/commit/de5078977e24f8752d88b8527221d8e15a1b9bcf))
+* **scm:** read jobless action_required workflow runs as awaiting maintainer approval ([#1185](https://github.com/kunchenguid/no-mistakes/issues/1185)) ([95c1ec7](https://github.com/kunchenguid/no-mistakes/commit/95c1ec78a8df491283196ae7dd6c648e7a3b521f)), closes [#1182](https://github.com/kunchenguid/no-mistakes/issues/1182)
+
+## [1.82.0](https://github.com/kunchenguid/no-mistakes/compare/v1.81.0...v1.82.0) (2026-09-23)
+
+
+### Features
+
+* **agent:** support Devin CLI as an ACP alias ([#1168](https://github.com/kunchenguid/no-mistakes/issues/1168)) ([6b4a55b](https://github.com/kunchenguid/no-mistakes/commit/6b4a55b9dc9552589243f8129202b9ec220047f0))
+
+
+### Bug Fixes
+
+* **daemon:** atomically write NM_HOME capture for detached-start test ([#1172](https://github.com/kunchenguid/no-mistakes/issues/1172)) ([7051487](https://github.com/kunchenguid/no-mistakes/commit/705148782644f1a74ff6f703e40a9a21e1465efa))
+* **pipeline:** retire the Jev review pre-brief and its excerpt option ([#1165](https://github.com/kunchenguid/no-mistakes/issues/1165)) ([d66e3b3](https://github.com/kunchenguid/no-mistakes/commit/d66e3b3721b1476f13eea951c866578bd6642bc3))
+
+## [1.81.0](https://github.com/kunchenguid/no-mistakes/compare/v1.80.1...v1.81.0) (2026-09-22)
+
+
+### Features
+
+* **branchsync:** recover published rebased gate lanes ([#1053](https://github.com/kunchenguid/no-mistakes/issues/1053)) ([718ab85](https://github.com/kunchenguid/no-mistakes/commit/718ab852f253fc3b5539d6629e6b063510ac57f7))
+* **pipeline:** add opt-in bounded candidate excerpts to Jev review pre-brief ([#1160](https://github.com/kunchenguid/no-mistakes/issues/1160)) ([11a95ad](https://github.com/kunchenguid/no-mistakes/commit/11a95ad88479fb30a8b79180c971756ff9be6779))
+* **review:** opt-in per-round review agent overrides ([#897](https://github.com/kunchenguid/no-mistakes/issues/897)) ([#1141](https://github.com/kunchenguid/no-mistakes/issues/1141)) ([74455c4](https://github.com/kunchenguid/no-mistakes/commit/74455c44ca814c15c2c68b045763060f4b460a27))
+
+
+### Bug Fixes
+
+* **agent:** trigger prompt-only fallback for unconditional tool_choice rejections ([#1017](https://github.com/kunchenguid/no-mistakes/issues/1017)) ([cd24041](https://github.com/kunchenguid/no-mistakes/commit/cd24041ae58e68a14ae1d7c83e85281cbe0b86bf))
+* **ci:** pin require-no-mistakes at v1.80.1 and restore synchronize ([#1145](https://github.com/kunchenguid/no-mistakes/issues/1145)) ([90d1d0f](https://github.com/kunchenguid/no-mistakes/commit/90d1d0ffa05dc3237d70e1bd1e46e139ce24b5f3))
+
+## [1.80.1](https://github.com/kunchenguid/no-mistakes/compare/v1.80.0...v1.80.1) (2026-09-20)
+
+
+### Bug Fixes
+
+* **pipeline:** preserve recorded human fix decisions ([#1135](https://github.com/kunchenguid/no-mistakes/issues/1135)) ([2c3a301](https://github.com/kunchenguid/no-mistakes/commit/2c3a3013d2a221f4549d7fa7c458a11ef88023e5))
+
+## [1.80.0](https://github.com/kunchenguid/no-mistakes/compare/v1.79.0...v1.80.0) (2026-09-20)
+
+
+### Features
+
+* **pipeline:** add tighten-only caller-side control to omit the public Intent section ([#1132](https://github.com/kunchenguid/no-mistakes/issues/1132)) ([1d1ef5f](https://github.com/kunchenguid/no-mistakes/commit/1d1ef5f8d8657415ec9dde0342fe3f7f9b574c8c))
+
+
+### Bug Fixes
+
+* **shellenv:** gracefully cancel Windows repository commands ([#1134](https://github.com/kunchenguid/no-mistakes/issues/1134)) ([14d5e60](https://github.com/kunchenguid/no-mistakes/commit/14d5e60efc9d4d2606d906a56120e3dee7e134e1))
+
+## [1.79.0](https://github.com/kunchenguid/no-mistakes/compare/v1.78.0...v1.79.0) (2026-09-19)
+
+
+### Features
+
+* **agent:** disable compact-adviser in every pipeline agent subprocess ([#1115](https://github.com/kunchenguid/no-mistakes/issues/1115)) ([4b79b6e](https://github.com/kunchenguid/no-mistakes/commit/4b79b6ef119a8e69d6c46c609dd6959f2efc9c06))
+* **pipeline:** add opt-in TypeSafe Jev context pre-brief to review turns ([#1120](https://github.com/kunchenguid/no-mistakes/issues/1120)) ([9b697a7](https://github.com/kunchenguid/no-mistakes/commit/9b697a7bc9448a3d158eb6e8a65c20628535ce08))
+
+
+### Bug Fixes
+
+* **cli:** bypass pre-push hooks for gate triggers ([#909](https://github.com/kunchenguid/no-mistakes/issues/909)) ([6840d18](https://github.com/kunchenguid/no-mistakes/commit/6840d18689ad84fc570b7603abb80b45a643b06c))
+* **pipeline:** close defect classes in review fix rounds ([#1123](https://github.com/kunchenguid/no-mistakes/issues/1123)) ([bfc098c](https://github.com/kunchenguid/no-mistakes/commit/bfc098c6f1d7e37a9db2332129cbe43e64af3937))
+* **pipeline:** fail closed on PR attestation refresh ([#910](https://github.com/kunchenguid/no-mistakes/issues/910)) ([b48fa6d](https://github.com/kunchenguid/no-mistakes/commit/b48fa6da49baba46a764ea166371ca4818380436))
+* **pipeline:** park Test agent budget cuts for a decision instead of failing the run ([#1114](https://github.com/kunchenguid/no-mistakes/issues/1114)) ([664424f](https://github.com/kunchenguid/no-mistakes/commit/664424f9ee57a1859691f1f9329fd449866c0af2))
+
+## [1.78.0](https://github.com/kunchenguid/no-mistakes/compare/v1.77.1...v1.78.0) (2026-09-17)
+
+
+### Features
+
+* **daemon:** pin Pi model and reasoning effort per run ([#1072](https://github.com/kunchenguid/no-mistakes/issues/1072)) ([71cd911](https://github.com/kunchenguid/no-mistakes/commit/71cd9110543eeac67fd76180f2bdabd355395ec2))
+
+## [1.77.1](https://github.com/kunchenguid/no-mistakes/compare/v1.77.0...v1.77.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* **agent:** bound pipeline agent host filesystem searches ([#1096](https://github.com/kunchenguid/no-mistakes/issues/1096)) ([3eb3c25](https://github.com/kunchenguid/no-mistakes/commit/3eb3c25e51a0b19547d56d2b6958c2d521da96df))
+* **pipeline:** keep review findings outstanding until verified ([#1095](https://github.com/kunchenguid/no-mistakes/issues/1095)) ([8f683b5](https://github.com/kunchenguid/no-mistakes/commit/8f683b5313fe93b70b4d76f52f37dfd69f187197))
+* **pipeline:** report approved Test exceptions as passed-with-override ([#1100](https://github.com/kunchenguid/no-mistakes/issues/1100)) ([2bcb710](https://github.com/kunchenguid/no-mistakes/commit/2bcb710112036952dc794fdebf575ea2626839dc))
+
+## [1.77.0](https://github.com/kunchenguid/no-mistakes/compare/v1.76.0...v1.77.0) (2026-09-16)
+
+
+### Features
+
+* **pipeline:** integrate a moved base by merging behind rebase.strategy ([#1081](https://github.com/kunchenguid/no-mistakes/issues/1081)) ([ae2e99a](https://github.com/kunchenguid/no-mistakes/commit/ae2e99a8b250eb90e66211ae98508f1b21442293))
+
+## [1.76.0](https://github.com/kunchenguid/no-mistakes/compare/v1.75.3...v1.76.0) (2026-09-15)
+
+
+### Features
+
+* **config:** add branch capture replacements ([#1077](https://github.com/kunchenguid/no-mistakes/issues/1077)) ([2707071](https://github.com/kunchenguid/no-mistakes/commit/270707132de94f2dcffb9faab54ad1d197538234))
+
+## [1.75.3](https://github.com/kunchenguid/no-mistakes/compare/v1.75.2...v1.75.3) (2026-09-14)
+
+
+### Bug Fixes
+
+* **deps:** bump golang.org/x/text to v0.41.0 for CVE-2026-56852 ([#1073](https://github.com/kunchenguid/no-mistakes/issues/1073)) ([5173f42](https://github.com/kunchenguid/no-mistakes/commit/5173f42a9ef958f44476f7d7aac1d95815681fc5)), closes [#903](https://github.com/kunchenguid/no-mistakes/issues/903)
+* discover existing Azure DevOps PRs without repository webUrl ([#1076](https://github.com/kunchenguid/no-mistakes/issues/1076)) ([0eb367c](https://github.com/kunchenguid/no-mistakes/commit/0eb367ce8ec1b6f9f23bf5a42f5b7a23d8339c31)), closes [#1042](https://github.com/kunchenguid/no-mistakes/issues/1042)
+
+## [1.75.2](https://github.com/kunchenguid/no-mistakes/compare/v1.75.1...v1.75.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* **pipeline:** attest approved test command failures ([#1070](https://github.com/kunchenguid/no-mistakes/issues/1070)) ([b3b818e](https://github.com/kunchenguid/no-mistakes/commit/b3b818e9e8f040c8257a4fbcd8adcbb0fa568bde))
+
+## [1.75.1](https://github.com/kunchenguid/no-mistakes/compare/v1.75.0...v1.75.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **agent:** record honest token usage on failed and cancelled invocations ([#1059](https://github.com/kunchenguid/no-mistakes/issues/1059)) ([fb664f6](https://github.com/kunchenguid/no-mistakes/commit/fb664f6eb58e0b81f34bb570f95a91914fc0c9b2))
+
+## [1.75.0](https://github.com/kunchenguid/no-mistakes/compare/v1.74.0...v1.75.0) (2026-09-12)
+
+
+### Features
+
+* **config:** add ticket-aware commit and PR titles ([#1020](https://github.com/kunchenguid/no-mistakes/issues/1020)) ([9cf26b0](https://github.com/kunchenguid/no-mistakes/commit/9cf26b0b96cd1f35dc9070c8736e7c803adb21a6))
+* **pipeline:** support repository PR templates with author-preserving updates ([#1044](https://github.com/kunchenguid/no-mistakes/issues/1044)) ([36b9e2e](https://github.com/kunchenguid/no-mistakes/commit/36b9e2e98a0fb97aa896fc9555dbffd3c389bddf))
+
+
+### Bug Fixes
+
+* **agent:** tolerate provider residue and split objects in structured output ([#1050](https://github.com/kunchenguid/no-mistakes/issues/1050)) ([a12b0d5](https://github.com/kunchenguid/no-mistakes/commit/a12b0d5283f9469789f297cb1d6acff53c469a36))
+* **pipeline:** handle empty-index repairs and reconcile stale private mirrors ([#1046](https://github.com/kunchenguid/no-mistakes/issues/1046)) ([e94c7a0](https://github.com/kunchenguid/no-mistakes/commit/e94c7a069051a2d4fad1241c341205c42963d937))
+* **pipeline:** prevent fake TUI live-validation passes ([#1057](https://github.com/kunchenguid/no-mistakes/issues/1057)) ([bff827f](https://github.com/kunchenguid/no-mistakes/commit/bff827faa6e36d084f081e482e3d0e628d6aca88))
+* **pipeline:** rerun a fresh review when the reviewer's output fails schema validation ([#1051](https://github.com/kunchenguid/no-mistakes/issues/1051)) ([1a119a3](https://github.com/kunchenguid/no-mistakes/commit/1a119a3b2747b515dfebbdc2f98a0d5a92edd727))
+* **shellenv:** reliably resolve daemon login shell environment ([#1056](https://github.com/kunchenguid/no-mistakes/issues/1056)) ([975ed5b](https://github.com/kunchenguid/no-mistakes/commit/975ed5bfcbdb99f94c73a52f489c5db6ed59c02b))
+
+## [1.74.0](https://github.com/kunchenguid/no-mistakes/compare/v1.73.0...v1.74.0) (2026-09-10)
+
+
+### Features
+
+* **pipeline:** add repository command gates ([#1030](https://github.com/kunchenguid/no-mistakes/issues/1030)) ([74143ae](https://github.com/kunchenguid/no-mistakes/commit/74143aee1fa6f316491c9d5c105993198c895b8e))
+
+
+### Bug Fixes
+
+* **branchsync:** recover reviewed equal-tree rewrites ([#1037](https://github.com/kunchenguid/no-mistakes/issues/1037)) ([947c64c](https://github.com/kunchenguid/no-mistakes/commit/947c64c7046d47a924cdfb374887202edf560fc8))
+
+## [1.73.0](https://github.com/kunchenguid/no-mistakes/compare/v1.72.0...v1.73.0) (2026-09-09)
+
+
+### Features
+
+* **pipeline:** add opt-out for generated PR intent publication ([#1018](https://github.com/kunchenguid/no-mistakes/issues/1018)) ([2696771](https://github.com/kunchenguid/no-mistakes/commit/2696771d8fcb772708164b5e2e381b18b69b321b))
+
+
+### Bug Fixes
+
+* publish update channels after automated releases ([#1024](https://github.com/kunchenguid/no-mistakes/issues/1024)) ([53ceb81](https://github.com/kunchenguid/no-mistakes/commit/53ceb81ea6920e449684c2d0c275006e7ed99e8c))
+
+## [1.72.0](https://github.com/kunchenguid/no-mistakes/compare/v1.71.0...v1.72.0) (2026-09-08)
+
+
+### Features
+
+* **agent:** configure independent reviewer and fixer harness profiles ([#1016](https://github.com/kunchenguid/no-mistakes/issues/1016)) ([94afe33](https://github.com/kunchenguid/no-mistakes/commit/94afe335fa0060bccc562cd0512c2c940741d95b))
+
+
+### Bug Fixes
+
+* **pipeline:** retry invalid test analyzer findings ([#1014](https://github.com/kunchenguid/no-mistakes/issues/1014)) ([42497f8](https://github.com/kunchenguid/no-mistakes/commit/42497f8412214d8f37ed3d0ce807a6ea3692e8e0))
+
+## [1.71.0](https://github.com/kunchenguid/no-mistakes/compare/v1.70.1...v1.71.0) (2026-09-08)
+
+
+### Features
+
+* **eval:** auto-ingest fixed CI misses ([#1012](https://github.com/kunchenguid/no-mistakes/issues/1012)) ([bace158](https://github.com/kunchenguid/no-mistakes/commit/bace15861522b7613944f68dcf6574d6a202e544))
+* **pipeline:** unify CI failures with findings loop ([#1009](https://github.com/kunchenguid/no-mistakes/issues/1009)) ([9a464c2](https://github.com/kunchenguid/no-mistakes/commit/9a464c26fca7962fdd318502358cfa6cb0e1de1c))
+
+## [1.70.1](https://github.com/kunchenguid/no-mistakes/compare/v1.70.0...v1.70.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **update:** fetch version metadata from release CDN ([#1007](https://github.com/kunchenguid/no-mistakes/issues/1007)) ([2db4b7f](https://github.com/kunchenguid/no-mistakes/commit/2db4b7f19224bde17018ebfcd38bbe56bd9486f4))
+
+## [1.70.0](https://github.com/kunchenguid/no-mistakes/compare/v1.69.0...v1.70.0) (2026-09-07)
+
+
+### Features
+
+* **pipeline:** prepare dependencies once per run ([#937](https://github.com/kunchenguid/no-mistakes/issues/937)) ([4603016](https://github.com/kunchenguid/no-mistakes/commit/4603016d04f78f360235704d73b01e2a6eaf6cac))
+
+
+### Bug Fixes
+
+* **cli:** show elapsed time for the active review round ([#1001](https://github.com/kunchenguid/no-mistakes/issues/1001)) ([2b98e45](https://github.com/kunchenguid/no-mistakes/commit/2b98e458251207404b413ec65cbf205a1cb7ff57))
+* **pipeline:** ask before proceeding without a live-testable surface ([#1005](https://github.com/kunchenguid/no-mistakes/issues/1005)) ([8c274f3](https://github.com/kunchenguid/no-mistakes/commit/8c274f37ed2257bb76dea341354a3cc22081ca83))
+* **pipeline:** distinguish intended local-main deliveries ([#1003](https://github.com/kunchenguid/no-mistakes/issues/1003)) ([33327b7](https://github.com/kunchenguid/no-mistakes/commit/33327b794639a230c829a0a9ac5398dc22c3e958))
+
+## [1.69.0](https://github.com/kunchenguid/no-mistakes/compare/v1.68.0...v1.69.0) (2026-09-07)
+
+
+### Features
+
+* **pipeline:** add live validation to the test gate ([#999](https://github.com/kunchenguid/no-mistakes/issues/999)) ([f0a8858](https://github.com/kunchenguid/no-mistakes/commit/f0a8858037a2e798a503cafe3a491e216a25919e))
+
+## [1.68.0](https://github.com/kunchenguid/no-mistakes/compare/v1.67.0...v1.68.0) (2026-09-06)
+
+
+### Features
+
+* **cli:** add ci-workflow subcommand to generate GitHub Actions CI from repo config ([#984](https://github.com/kunchenguid/no-mistakes/issues/984)) ([9862979](https://github.com/kunchenguid/no-mistakes/commit/9862979aa6f9631ddbcd3518dfa58df2084f0ebe))
+
+
+### Bug Fixes
+
+* **eval:** compare replay model names only ([#991](https://github.com/kunchenguid/no-mistakes/issues/991)) ([a24f920](https://github.com/kunchenguid/no-mistakes/commit/a24f920b7c322d2996fca65700fafe6d4a563964))
+* **pipeline:** attest PR heads before pushing ([#994](https://github.com/kunchenguid/no-mistakes/issues/994)) ([80ab4d8](https://github.com/kunchenguid/no-mistakes/commit/80ab4d88e685d648fac7e1080c925407f2c21f00))
+* **pipeline:** isolate review agent timeout budgets ([#962](https://github.com/kunchenguid/no-mistakes/issues/962)) ([8a82308](https://github.com/kunchenguid/no-mistakes/commit/8a82308ded6e3de2e0e574ed3d89424e151b3df4))
+
+## [1.67.0](https://github.com/kunchenguid/no-mistakes/compare/v1.66.0...v1.67.0) (2026-09-06)
+
+
+### Features
+
+* **daemon:** add atomic nonce-bound launch receipts ([#895](https://github.com/kunchenguid/no-mistakes/issues/895)) ([f093de2](https://github.com/kunchenguid/no-mistakes/commit/f093de2923ce1178812762dba61574a1d6089c8d))
+
+
+### Bug Fixes
+
+* **cli:** keep AXI attached to slow daemons ([#988](https://github.com/kunchenguid/no-mistakes/issues/988)) ([e9c3b44](https://github.com/kunchenguid/no-mistakes/commit/e9c3b4418e69b0e9d8ec5b38aae57242e165bab0))
+
+## [1.66.0](https://github.com/kunchenguid/no-mistakes/compare/v1.65.4...v1.66.0) (2026-09-05)
+
+
+### Features
+
+* **pipeline:** add opt-in protected paths for automatic commits ([#970](https://github.com/kunchenguid/no-mistakes/issues/970)) ([bb821d3](https://github.com/kunchenguid/no-mistakes/commit/bb821d3fb9966821834ac25ebb415b81194f20c3))
+
+
+### Bug Fixes
+
+* **axi:** qualify automatic publication and CI skips ([#975](https://github.com/kunchenguid/no-mistakes/issues/975)) ([5700d0f](https://github.com/kunchenguid/no-mistakes/commit/5700d0f80b17378cf51cb0cbcee275dd00318e79))
+* **daemon:** refuse reruns that differ from the clean caller HEAD ([#972](https://github.com/kunchenguid/no-mistakes/issues/972)) ([68ae62f](https://github.com/kunchenguid/no-mistakes/commit/68ae62f18d6d2925fffaa680fec5f2c7ab0cc56d))
+* **eval:** normalize provider-qualified model identities ([#982](https://github.com/kunchenguid/no-mistakes/issues/982)) ([9b6d998](https://github.com/kunchenguid/no-mistakes/commit/9b6d99828c8465f9eb387c92c9a44548a3bf4b71))
+
+## [1.65.4](https://github.com/kunchenguid/no-mistakes/compare/v1.65.3...v1.65.4) (2026-09-05)
+
+
+### Bug Fixes
+
+* **pipeline:** give CI repairs the recorded decision history ([#976](https://github.com/kunchenguid/no-mistakes/issues/976)) ([7808aea](https://github.com/kunchenguid/no-mistakes/commit/7808aeae2702f301b6da4a7cd39935c0adaaf5fe))
+
+## [1.65.3](https://github.com/kunchenguid/no-mistakes/compare/v1.65.2...v1.65.3) (2026-09-04)
+
+
+### Bug Fixes
+
+* **eval:** preserve agent authentication during replay ([#968](https://github.com/kunchenguid/no-mistakes/issues/968)) ([b99bce8](https://github.com/kunchenguid/no-mistakes/commit/b99bce828e133e2a7682b2bc76a24f3748ff3852))
+
+## [1.65.2](https://github.com/kunchenguid/no-mistakes/compare/v1.65.1...v1.65.2) (2026-09-04)
+
+
+### Bug Fixes
+
+* **branchsync:** recover custody from bound archives ([#954](https://github.com/kunchenguid/no-mistakes/issues/954)) ([e2f575a](https://github.com/kunchenguid/no-mistakes/commit/e2f575aded870cc92e58b56fd5414ab9b4cb3c2b))
+* **pipeline:** fail closed on invalid analyzer output ([#955](https://github.com/kunchenguid/no-mistakes/issues/955)) ([911452b](https://github.com/kunchenguid/no-mistakes/commit/911452b00f942f80238e3c6cc35b8c185146cae8))
+
+## [1.65.1](https://github.com/kunchenguid/no-mistakes/compare/v1.65.0...v1.65.1) (2026-09-04)
+
+
+### Bug Fixes
+
+* **branchsync:** recover custody when preserved heads are missing ([#958](https://github.com/kunchenguid/no-mistakes/issues/958)) ([100c1f5](https://github.com/kunchenguid/no-mistakes/commit/100c1f55cffa8ded4d6f1b9a7a8a4f4cf4098ea4))
+
+## [1.65.0](https://github.com/kunchenguid/no-mistakes/compare/v1.64.0...v1.65.0) (2026-09-03)
+
+
+### Features
+
+* **scm:** add draft pull request configuration ([#389](https://github.com/kunchenguid/no-mistakes/issues/389)) ([2c84e5c](https://github.com/kunchenguid/no-mistakes/commit/2c84e5c04ed5776ae902c72cc141fecb95106d17))
+
+
+### Bug Fixes
+
+* **agent:** nest OpenCode schema format under info ([#949](https://github.com/kunchenguid/no-mistakes/issues/949)) ([b5a2817](https://github.com/kunchenguid/no-mistakes/commit/b5a281758fc2f0a275031cb6be2273b8e67b826f))
+
+## [1.64.0](https://github.com/kunchenguid/no-mistakes/compare/v1.63.0...v1.64.0) (2026-09-03)
+
+
+### Features
+
+* **pipeline:** add simplification-first review and repair guidance ([#950](https://github.com/kunchenguid/no-mistakes/issues/950)) ([72ffc59](https://github.com/kunchenguid/no-mistakes/commit/72ffc59bf30fc2d2ee85627d1180323bba40aad7))
+
+## [1.63.0](https://github.com/kunchenguid/no-mistakes/compare/v1.62.0...v1.63.0) (2026-09-03)
+
+
+### Features
+
+* **pipeline:** add authorization and privacy tracing to review ([#946](https://github.com/kunchenguid/no-mistakes/issues/946)) ([961fbfb](https://github.com/kunchenguid/no-mistakes/commit/961fbfb699f968a290351e7977afd78b48f01694))
+
+
+### Bug Fixes
+
+* **cli:** clarify combined document and lint housekeeping attribution ([#941](https://github.com/kunchenguid/no-mistakes/issues/941)) ([19e5db9](https://github.com/kunchenguid/no-mistakes/commit/19e5db95951f013cd096267a572ce675c05add25))
+* **pipeline:** require intended-usage evidence for review findings ([#948](https://github.com/kunchenguid/no-mistakes/issues/948)) ([f9415ab](https://github.com/kunchenguid/no-mistakes/commit/f9415ab1db06a739961e09ed18256e0bd7378806))
+
+## [1.62.0](https://github.com/kunchenguid/no-mistakes/compare/v1.61.0...v1.62.0) (2026-09-02)
+
+
+### Features
+
+* **axi:** add per-run PR base branch via --base-branch ([#861](https://github.com/kunchenguid/no-mistakes/issues/861)) ([e08143f](https://github.com/kunchenguid/no-mistakes/commit/e08143f8407681d922ad50df9bcf14906095dd57))
+* **pipeline:** attach media evidence to GitHub pull requests ([#934](https://github.com/kunchenguid/no-mistakes/issues/934)) ([b262caa](https://github.com/kunchenguid/no-mistakes/commit/b262caa9218d47a4df28e4394cba8c392383d2bb))
+
+
+### Bug Fixes
+
+* **agent:** take the terminal bare JSON object for ACP agents ([#931](https://github.com/kunchenguid/no-mistakes/issues/931)) ([c6ad6ce](https://github.com/kunchenguid/no-mistakes/commit/c6ad6ce784761c1e7e759147e71f5a9a3b97b13c)), closes [#930](https://github.com/kunchenguid/no-mistakes/issues/930)
+* **cli:** make untracked-file guidance safe ([#927](https://github.com/kunchenguid/no-mistakes/issues/927)) ([552c22a](https://github.com/kunchenguid/no-mistakes/commit/552c22adaee2c9d114e47467a03135cfc02ea2c0))
+* **pipeline:** never report a CI approval override as a clean pass ([#923](https://github.com/kunchenguid/no-mistakes/issues/923)) ([76fa092](https://github.com/kunchenguid/no-mistakes/commit/76fa0921a9797b09e120c8b5979c4d0e65f88922))
+
+## [1.61.0](https://github.com/kunchenguid/no-mistakes/compare/v1.60.3...v1.61.0) (2026-08-31)
+
+
+### Features
+
+* **config:** make gate reconcile timings configurable ([#862](https://github.com/kunchenguid/no-mistakes/issues/862)) ([d0c4feb](https://github.com/kunchenguid/no-mistakes/commit/d0c4feb46b2297d548dd284fdf989cd57fa96721))
+
+## [1.60.3](https://github.com/kunchenguid/no-mistakes/compare/v1.60.2...v1.60.3) (2026-08-29)
+
+
+### Performance Improvements
+
+* **pipeline:** cut CI test latency ([#901](https://github.com/kunchenguid/no-mistakes/issues/901)) ([1a3f74d](https://github.com/kunchenguid/no-mistakes/commit/1a3f74d86d2646967d6f1e7dce8853023c41768c))
+
+## [1.60.2](https://github.com/kunchenguid/no-mistakes/compare/v1.60.1...v1.60.2) (2026-08-29)
+
+
+### Bug Fixes
+
+* **agent:** pass --print-timeout 24h by default in Antigravity adapter ([#896](https://github.com/kunchenguid/no-mistakes/issues/896)) ([be9138f](https://github.com/kunchenguid/no-mistakes/commit/be9138fdabb528acecafc78005b277028e1612c9))
+* **pipeline:** harden CI repair scope and attestation ([#899](https://github.com/kunchenguid/no-mistakes/issues/899)) ([4a84a15](https://github.com/kunchenguid/no-mistakes/commit/4a84a153dbcba764c76d7113fd8a8d886e35e3d6))
+
+## [1.60.1](https://github.com/kunchenguid/no-mistakes/compare/v1.60.0...v1.60.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **pipeline:** keep review fixes within authorized scope ([#892](https://github.com/kunchenguid/no-mistakes/issues/892)) ([f1f249d](https://github.com/kunchenguid/no-mistakes/commit/f1f249d26ef14507757a85273ab3244d3bf5e6c6))
+* **pipeline:** safely publish CI repairs with proven continuity ([#887](https://github.com/kunchenguid/no-mistakes/issues/887)) ([5d5b650](https://github.com/kunchenguid/no-mistakes/commit/5d5b650300e51639c79f5516b4c8c11b4425b1c3))
+
+## [1.60.0](https://github.com/kunchenguid/no-mistakes/compare/v1.59.3...v1.60.0) (2026-08-28)
+
+
+### Features
+
+* **pipeline:** ingest review comments and synchronize gate refs ([#873](https://github.com/kunchenguid/no-mistakes/issues/873)) ([605481b](https://github.com/kunchenguid/no-mistakes/commit/605481b9e3523fb7c11acf671826b22b8076b2fa))
+
+
+### Bug Fixes
+
+* **pipeline:** make native agent timeouts observable and bounded ([#877](https://github.com/kunchenguid/no-mistakes/issues/877)) ([dc45531](https://github.com/kunchenguid/no-mistakes/commit/dc4553128e4e29c78b7f5223daa9d9aabcca5471))
+
+## [1.59.3](https://github.com/kunchenguid/no-mistakes/compare/v1.59.2...v1.59.3) (2026-08-27)
+
+
+### Bug Fixes
+
+* **update:** reap background update-check processes ([#858](https://github.com/kunchenguid/no-mistakes/issues/858)) ([06c6504](https://github.com/kunchenguid/no-mistakes/commit/06c65043ede499378ab8c524aff2e0f966806ab0))
+
+## [1.59.2](https://github.com/kunchenguid/no-mistakes/compare/v1.59.1...v1.59.2) (2026-08-26)
+
+
+### Bug Fixes
+
+* **cli:** scope AXI run resolution to the current branch ([#850](https://github.com/kunchenguid/no-mistakes/issues/850)) ([10cb727](https://github.com/kunchenguid/no-mistakes/commit/10cb7270405d2dac5dafc50272c5886fa895b223))
+* **pipeline:** recognize push provenance to allow pushing rebased pipeline generations ([#852](https://github.com/kunchenguid/no-mistakes/issues/852)) ([539f09a](https://github.com/kunchenguid/no-mistakes/commit/539f09a3ec81b73eeabc13380a08ca14d275e55f))
+* **scm:** collapse superseded GitHub check runs ([#855](https://github.com/kunchenguid/no-mistakes/issues/855)) ([a59d667](https://github.com/kunchenguid/no-mistakes/commit/a59d6675a18d15cd44076a4c27786814a7a0ad15))
+
+## [1.59.1](https://github.com/kunchenguid/no-mistakes/compare/v1.59.0...v1.59.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **agent:** harden isolated pipeline execution ([#844](https://github.com/kunchenguid/no-mistakes/issues/844)) ([9694fff](https://github.com/kunchenguid/no-mistakes/commit/9694fff3bb451a8a11e6abdf730e2b0d3ce530b3))
+* **scm/gitlab:** drop unsupported --yes flag from glab mr update ([#841](https://github.com/kunchenguid/no-mistakes/issues/841)) ([3781331](https://github.com/kunchenguid/no-mistakes/commit/3781331358040154d56ed438d937efd104ebb512))
+
+## [1.59.0](https://github.com/kunchenguid/no-mistakes/compare/v1.58.1...v1.59.0) (2026-08-25)
+
+
+### Features
+
+* **forgecontext:** route provider identity per repository with pinned logins ([#548](https://github.com/kunchenguid/no-mistakes/issues/548)) ([cc8d52a](https://github.com/kunchenguid/no-mistakes/commit/cc8d52a5126016a6f5fd4856ea185d1b00b92992))
+
+
+### Bug Fixes
+
+* **agent:** surface opencode's failed-turn error instead of empty output ([#772](https://github.com/kunchenguid/no-mistakes/issues/772)) ([cd5f5ba](https://github.com/kunchenguid/no-mistakes/commit/cd5f5ba286d4bc8d3623e1dcae11d75f593cd10b))
+
+## [1.58.1](https://github.com/kunchenguid/no-mistakes/compare/v1.58.0...v1.58.1) (2026-08-23)
+
+
+### Bug Fixes
+
+* **pipeline:** redact home-directory paths from published PR content ([#831](https://github.com/kunchenguid/no-mistakes/issues/831)) ([c878873](https://github.com/kunchenguid/no-mistakes/commit/c878873c5573a7cff6ed8b780eb0e1c53a8d8fc7))
+* **pipeline:** revalidate CI repairs before push ([#827](https://github.com/kunchenguid/no-mistakes/issues/827)) ([8dc5c15](https://github.com/kunchenguid/no-mistakes/commit/8dc5c158f8b43612c51911c2d7b58ac18356792e))
+
+## [1.58.0](https://github.com/kunchenguid/no-mistakes/compare/v1.57.1...v1.58.0) (2026-08-23)
+
+
+### Features
+
+* add shared no-mistakes PR enforcement action ([#819](https://github.com/kunchenguid/no-mistakes/issues/819)) ([32d396a](https://github.com/kunchenguid/no-mistakes/commit/32d396ac0f29135daf7fcb9964aba9d5f4e796d6))
+* **pipeline:** surface missing host permissions in test evidence ([#491](https://github.com/kunchenguid/no-mistakes/issues/491)) ([fb94645](https://github.com/kunchenguid/no-mistakes/commit/fb94645eef492602bd13593a3324dac93165424f))
+* **scm:** add Gitea as a fifth SCM provider ([#789](https://github.com/kunchenguid/no-mistakes/issues/789)) ([c82cfe8](https://github.com/kunchenguid/no-mistakes/commit/c82cfe81d39d4746ef190cbadc1bb79a730a1a23))
+
+
+### Bug Fixes
+
+* **pipeline:** park CI step at ask-user gate on persistent check-read failures ([#654](https://github.com/kunchenguid/no-mistakes/issues/654)) ([c2a75d0](https://github.com/kunchenguid/no-mistakes/commit/c2a75d0b047f8002f3148606c3efa9061efca466))
+* **pipeline:** retry GitHub Actions pre-run infrastructure failures ([#678](https://github.com/kunchenguid/no-mistakes/issues/678)) ([bbd769f](https://github.com/kunchenguid/no-mistakes/commit/bbd769f6e7712255db80f698d82d2d465de104c1))
+* replace the running executable during Windows self-update ([#650](https://github.com/kunchenguid/no-mistakes/issues/650)) ([ea8ecb0](https://github.com/kunchenguid/no-mistakes/commit/ea8ecb0d17f2fde4666d03bd5a6fdc82ebe866e1))
+
+## [1.57.1](https://github.com/kunchenguid/no-mistakes/compare/v1.57.0...v1.57.1) (2026-08-22)
+
+
+### Bug Fixes
+
+* make git fetch cancellation converge ([#752](https://github.com/kunchenguid/no-mistakes/issues/752)) ([22a32b2](https://github.com/kunchenguid/no-mistakes/commit/22a32b298ca1cb27436a046285dd2325a07f2ef2))
+
+## [1.57.0](https://github.com/kunchenguid/no-mistakes/compare/v1.56.0...v1.57.0) (2026-08-22)
+
+
+### Features
+
+* **agent:** add Antigravity (agy) support ([#673](https://github.com/kunchenguid/no-mistakes/issues/673)) ([b00db34](https://github.com/kunchenguid/no-mistakes/commit/b00db34745732a8d478336839b89038ecaf0d820))
+* **agent:** resume antigravity conversations for review-fixer sessions ([#812](https://github.com/kunchenguid/no-mistakes/issues/812)) ([9e6400c](https://github.com/kunchenguid/no-mistakes/commit/9e6400c80e9e87b8d46f7bcd3e30b4f9fdf6bc6a))
+* **agent:** unify model and effort configuration ([#806](https://github.com/kunchenguid/no-mistakes/issues/806)) ([f2e9289](https://github.com/kunchenguid/no-mistakes/commit/f2e928949448f639371773ffdbea59b05c897a50))
+
+
+### Bug Fixes
+
+* **agent:** map agy thinking tokens and honor the terminal result response ([#808](https://github.com/kunchenguid/no-mistakes/issues/808)) ([287e8dc](https://github.com/kunchenguid/no-mistakes/commit/287e8dc94425da3ff4655c8ab3394a4efec6bbd7))
+* **branchsync:** correct custody recovery eligibility ([#814](https://github.com/kunchenguid/no-mistakes/issues/814)) ([8685603](https://github.com/kunchenguid/no-mistakes/commit/868560348d3031c6ded6a7b122202cbae09317a9))
+* **branchsync:** isolate and configure remote operation timeouts ([#684](https://github.com/kunchenguid/no-mistakes/issues/684)) ([8d6ebbf](https://github.com/kunchenguid/no-mistakes/commit/8d6ebbf9f338da98a9826366c9da3e6b817a5f98))
+* **branchsync:** preserve recoverable pipeline custody ([#803](https://github.com/kunchenguid/no-mistakes/issues/803)) ([5b89741](https://github.com/kunchenguid/no-mistakes/commit/5b89741938fe956052d609360de42137011c4694))
+* **pipeline:** bound every agent invocation by a timeout ([#810](https://github.com/kunchenguid/no-mistakes/issues/810)) ([4a5cec6](https://github.com/kunchenguid/no-mistakes/commit/4a5cec653861a0efa34b9efabda88d08bc22d68c))
+* **pipeline:** bypass hooks for correction commits ([#796](https://github.com/kunchenguid/no-mistakes/issues/796)) ([595a32a](https://github.com/kunchenguid/no-mistakes/commit/595a32aacf8b999af56c13972f3152d6458e97c6))
+* **pipeline:** prevent test agents from hanging runs ([#807](https://github.com/kunchenguid/no-mistakes/issues/807)) ([21f3793](https://github.com/kunchenguid/no-mistakes/commit/21f3793b910b631cdab309f60a1153895c77845e))
+* **pr:** separate mixed evidence blocks ([#800](https://github.com/kunchenguid/no-mistakes/issues/800)) ([1217415](https://github.com/kunchenguid/no-mistakes/commit/12174153fea45d411644bbf57ef240ebba33fd73))
+* **review:** bound stalled review agents ([#708](https://github.com/kunchenguid/no-mistakes/issues/708)) ([70d7d8c](https://github.com/kunchenguid/no-mistakes/commit/70d7d8cc160fafdb18eb78babecce26d7309c10a))
+* **scm:** fail closed on invalid PR listings ([#470](https://github.com/kunchenguid/no-mistakes/issues/470)) ([88b322f](https://github.com/kunchenguid/no-mistakes/commit/88b322fe89123cb8c5c59df39cf7f1d9416ccb91))
+
+## [1.56.0](https://github.com/kunchenguid/no-mistakes/compare/v1.55.1...v1.56.0) (2026-08-20)
+
+
+### Features
+
+* **agent:** add native Grok Build support ([4c58ac3](https://github.com/kunchenguid/no-mistakes/commit/4c58ac33096e24f75a9f70351c13a095d6237c52))
+* **daemon:** place run worktrees per repository via worktree_roots ([7186c4b](https://github.com/kunchenguid/no-mistakes/commit/7186c4b2aecbbbda05d42dd69ee83d7362449bea))
+* **scm:** add Forgejo provider support ([#718](https://github.com/kunchenguid/no-mistakes/issues/718)) ([5c7f815](https://github.com/kunchenguid/no-mistakes/commit/5c7f815fda370b5027e64f68506a4f7f2cef4b5e))
+
+
+### Bug Fixes
+
+* **agent:** harden stdin prompt delivery ([132fb10](https://github.com/kunchenguid/no-mistakes/commit/132fb1039221daeaa5cd163fe80a9f3c6e596aad))
+* **agent:** prefer closed JSON fences over unclosed pi tails ([6dc07a4](https://github.com/kunchenguid/no-mistakes/commit/6dc07a4a90a7a2ac494cb9011224a8eb4dc37551))
+* **agent:** support structured output with thinking models ([3ed3ca4](https://github.com/kunchenguid/no-mistakes/commit/3ed3ca46039645b3b6afb1648cb6cfdbbc0dda35))
+* **daemon:** preserve open PR when daemon restarts during CI monitoring ([#374](https://github.com/kunchenguid/no-mistakes/issues/374)) ([53849a4](https://github.com/kunchenguid/no-mistakes/commit/53849a4f3cf8f1d36c16bea779219f875f45425c))
+* **github:** include head workflow runs in CI readiness ([#616](https://github.com/kunchenguid/no-mistakes/issues/616)) ([628d688](https://github.com/kunchenguid/no-mistakes/commit/628d68854bef10592162023840790b0e0c33c9d4))
+* **pipeline:** preserve existing PR's forge base branch for CI repair and rebase ([f345f6a](https://github.com/kunchenguid/no-mistakes/commit/f345f6ae81f178a109c35e66071c4a50df2a1916))
+* **pipeline:** render Bitbucket Cloud PR bodies as no-HTML markdown ([abe6da6](https://github.com/kunchenguid/no-mistakes/commit/abe6da6559c9a60ab5796ce2be6e6a42efd1dc56))
+
+## [1.55.1](https://github.com/kunchenguid/no-mistakes/compare/v1.55.0...v1.55.1) (2026-08-20)
+
+
+### Bug Fixes
+
+* **eval:** prevent display state mutations and clipped strata ([#787](https://github.com/kunchenguid/no-mistakes/issues/787)) ([a076b87](https://github.com/kunchenguid/no-mistakes/commit/a076b878bf74b7e0a97ae076a370d1665f88700d))
+* **pipeline:** preserve declined finding decisions across runs ([#790](https://github.com/kunchenguid/no-mistakes/issues/790)) ([a4411ed](https://github.com/kunchenguid/no-mistakes/commit/a4411ed85175ff54d348e38f74a9fe1b5743944c))
+
+## [1.55.0](https://github.com/kunchenguid/no-mistakes/compare/v1.54.0...v1.55.0) (2026-08-19)
+
+
+### Features
+
+* **cli:** improve eval sets repository and matrix display ([#784](https://github.com/kunchenguid/no-mistakes/issues/784)) ([3edab07](https://github.com/kunchenguid/no-mistakes/commit/3edab07028a3604b88772cdf9799962c83c5c635))
+
+## [1.54.0](https://github.com/kunchenguid/no-mistakes/compare/v1.53.0...v1.54.0) (2026-08-19)
+
+
+### Features
+
+* **eval:** add dashboards and idempotent eval workflows ([#779](https://github.com/kunchenguid/no-mistakes/issues/779)) ([8facba5](https://github.com/kunchenguid/no-mistakes/commit/8facba5972fcb2a97c135253d8158aed731b4246))
+
+## [1.53.0](https://github.com/kunchenguid/no-mistakes/compare/v1.52.0...v1.53.0) (2026-08-16)
+
+
+### Features
+
+* **eval:** label findings by recorded decision and match gold globally ([#753](https://github.com/kunchenguid/no-mistakes/issues/753)) ([f808d23](https://github.com/kunchenguid/no-mistakes/commit/f808d2389ff76d002d821a6f43999189f95fc102))
+
+## [1.52.0](https://github.com/kunchenguid/no-mistakes/compare/v1.51.1...v1.52.0) (2026-08-15)
+
+
+### Features
+
+* **eval:** ingest confirmed post-PR misses as false-negative gold ([#744](https://github.com/kunchenguid/no-mistakes/issues/744)) ([f92b7bd](https://github.com/kunchenguid/no-mistakes/commit/f92b7bd6da88904d8066ba70181a4491312fe4fe))
+* **eval:** pin gold-only holdout and merge-derived finding gold ([#739](https://github.com/kunchenguid/no-mistakes/issues/739)) ([dac4dc9](https://github.com/kunchenguid/no-mistakes/commit/dac4dc9bb34aea7a6074b5ff508046fa34de1085))
+* **pipeline:** persist uncertified fixer commits for the next initial review ([#745](https://github.com/kunchenguid/no-mistakes/issues/745)) ([a68298e](https://github.com/kunchenguid/no-mistakes/commit/a68298ea66c248d04d0fffec76db3f1d7d18a402))
+* **pipeline:** ungate review counterexample tracing and name silent-wrong-result risks ([#743](https://github.com/kunchenguid/no-mistakes/issues/743)) ([7cd86d4](https://github.com/kunchenguid/no-mistakes/commit/7cd86d4209ac79f4a0923b62c298524183f5d672))
+
+## [1.51.1](https://github.com/kunchenguid/no-mistakes/compare/v1.51.0...v1.51.1) (2026-08-14)
+
+
+### Bug Fixes
+
+* **daemon:** move test evidence out of system temp storage ([#735](https://github.com/kunchenguid/no-mistakes/issues/735)) ([2498e75](https://github.com/kunchenguid/no-mistakes/commit/2498e75f6a075efc710b2cda18333a3a69986c7c))
+
+## [1.51.0](https://github.com/kunchenguid/no-mistakes/compare/v1.50.0...v1.51.0) (2026-08-14)
+
+
+### Features
+
+* **eval:** score replay findings against human gold ([#726](https://github.com/kunchenguid/no-mistakes/issues/726)) ([a3954e1](https://github.com/kunchenguid/no-mistakes/commit/a3954e19f232b944bacfb2599faee946045d6671))
+
+## [1.50.0](https://github.com/kunchenguid/no-mistakes/compare/v1.49.0...v1.50.0) (2026-08-12)
+
+
+### Features
+
+* **eval:** automatically collect an affordable local corpus ([#711](https://github.com/kunchenguid/no-mistakes/issues/711)) ([366dfce](https://github.com/kunchenguid/no-mistakes/commit/366dfce2673dbd4bc566c58ea6c6a4edb37c4576))
+
+## [1.49.0](https://github.com/kunchenguid/no-mistakes/compare/v1.48.0...v1.49.0) (2026-08-11)
+
+
+### Features
+
+* **eval:** add local review evaluation toolkit ([#701](https://github.com/kunchenguid/no-mistakes/issues/701)) ([331ee93](https://github.com/kunchenguid/no-mistakes/commit/331ee9386f7a6765f7880313b01ca78a6b16983a))
+
+## [1.48.0](https://github.com/kunchenguid/no-mistakes/compare/v1.47.0...v1.48.0) (2026-08-08)
+
+
+### Features
+
+* **db:** record build identity on run records ([#687](https://github.com/kunchenguid/no-mistakes/issues/687)) ([5fc7bc7](https://github.com/kunchenguid/no-mistakes/commit/5fc7bc7353f020f302f125a2534e874256580fa1))
+
+## [1.47.0](https://github.com/kunchenguid/no-mistakes/compare/v1.46.0...v1.47.0) (2026-08-07)
+
+
+### Features
+
+* **evidence:** publish artifacts to an orphan branch ([#679](https://github.com/kunchenguid/no-mistakes/issues/679)) ([d37d9cc](https://github.com/kunchenguid/no-mistakes/commit/d37d9cc440d382542cc225c8dc2f290643d6e5e6))
+
+
+### Bug Fixes
+
+* **daemon:** reap lingering run-worktree processes that escape their process group ([#685](https://github.com/kunchenguid/no-mistakes/issues/685)) ([a385367](https://github.com/kunchenguid/no-mistakes/commit/a3853679302f2a953640de3ca07e70ebc7c0b77b))
+
+## [1.46.0](https://github.com/kunchenguid/no-mistakes/compare/v1.45.4...v1.46.0) (2026-08-05)
+
+
+### Features
+
+* **pipeline:** add structured step attestations to PR bodies ([#670](https://github.com/kunchenguid/no-mistakes/issues/670)) ([aead596](https://github.com/kunchenguid/no-mistakes/commit/aead596d693ff116b9b1f1d72f810826911967e8))
+
+## [1.45.4](https://github.com/kunchenguid/no-mistakes/compare/v1.45.3...v1.45.4) (2026-08-04)
+
+
+### Bug Fixes
+
+* **pipeline:** restore deterministic PR body sections ([#663](https://github.com/kunchenguid/no-mistakes/issues/663)) ([eda3d33](https://github.com/kunchenguid/no-mistakes/commit/eda3d335edd92922d30abf056a6a1b02315c5599))
+
+## [1.45.3](https://github.com/kunchenguid/no-mistakes/compare/v1.45.2...v1.45.3) (2026-08-03)
+
+
+### Bug Fixes
+
+* **branchsync:** recover custody from contained rebased heads ([#649](https://github.com/kunchenguid/no-mistakes/issues/649)) ([73425eb](https://github.com/kunchenguid/no-mistakes/commit/73425eb4ecc88607a12b444c4dbd245d221cac92))
+* **pipeline:** recognize green CI after successful rerun ([#647](https://github.com/kunchenguid/no-mistakes/issues/647)) ([1c1fe5c](https://github.com/kunchenguid/no-mistakes/commit/1c1fe5cc4ef2ff28367a3d0a2a3fa1e3f0fb0528))
+
+## [1.45.2](https://github.com/kunchenguid/no-mistakes/compare/v1.45.1...v1.45.2) (2026-08-02)
+
+
+### Bug Fixes
+
+* **pipeline:** stop polling terminal cancelled CI checks ([#637](https://github.com/kunchenguid/no-mistakes/issues/637)) ([eb826b4](https://github.com/kunchenguid/no-mistakes/commit/eb826b4c5ff5d06b619f3344ecf014c7e7d31001))
+* **update:** authenticate GitHub release requests ([#636](https://github.com/kunchenguid/no-mistakes/issues/636)) ([c0920cd](https://github.com/kunchenguid/no-mistakes/commit/c0920cd1675d562ee7d5e97a6b45d0cba82edde6))
+
+## [1.45.1](https://github.com/kunchenguid/no-mistakes/compare/v1.45.0...v1.45.1) (2026-08-02)
+
+
+### Bug Fixes
+
+* **pipeline:** independently review automatic fixes ([#634](https://github.com/kunchenguid/no-mistakes/issues/634)) ([f2538db](https://github.com/kunchenguid/no-mistakes/commit/f2538db8c81127cffbd0da58574ee6275aa5a11a))
+
+## [1.45.0](https://github.com/kunchenguid/no-mistakes/compare/v1.44.2...v1.45.0) (2026-08-02)
+
+
+### Features
+
+* **pipeline:** re-run provider-cancelled CI checks before escalating ([#595](https://github.com/kunchenguid/no-mistakes/issues/595)) ([1753783](https://github.com/kunchenguid/no-mistakes/commit/17537830a92de42e0b8c3848bfab8e2301be8923))
+
+
+### Bug Fixes
+
+* **cli:** confirm abort truth before releasing branch custody ([#631](https://github.com/kunchenguid/no-mistakes/issues/631)) ([a93dc8f](https://github.com/kunchenguid/no-mistakes/commit/a93dc8ff6a942d8d69fce97c3afc1bb11bf3fdc6))
+
+## [1.44.2](https://github.com/kunchenguid/no-mistakes/compare/v1.44.1...v1.44.2) (2026-08-01)
+
+
+### Bug Fixes
+
+* **cimonitor:** require trusted no-CI evidence for readiness ([#628](https://github.com/kunchenguid/no-mistakes/issues/628)) ([90885ee](https://github.com/kunchenguid/no-mistakes/commit/90885ee7c8f60b5558a5896414d3f50e759ca5da))
+* **daemon:** preserve run state under event stream pressure ([#626](https://github.com/kunchenguid/no-mistakes/issues/626)) ([58b52ee](https://github.com/kunchenguid/no-mistakes/commit/58b52eeec186466891e902590ee91f56c9b76508))
+
+## [1.44.1](https://github.com/kunchenguid/no-mistakes/compare/v1.44.0...v1.44.1) (2026-08-01)
+
+
+### Bug Fixes
+
+* **daemon:** preserve intent provenance across reruns ([#624](https://github.com/kunchenguid/no-mistakes/issues/624)) ([7e336cb](https://github.com/kunchenguid/no-mistakes/commit/7e336cb8d748d796562ac73786e4708582622872))
+
+## [1.44.0](https://github.com/kunchenguid/no-mistakes/compare/v1.43.0...v1.44.0) (2026-08-01)
+
+
+### Features
+
+* **pipeline:** scope review guidance to the paths a change touches ([#594](https://github.com/kunchenguid/no-mistakes/issues/594)) ([5f89e1f](https://github.com/kunchenguid/no-mistakes/commit/5f89e1f9233c20b28ac59bc689fa5a3df58cf027))
+
+
+### Bug Fixes
+
+* **branchsync:** prefer newer pushed descendants over stale custody ([#622](https://github.com/kunchenguid/no-mistakes/issues/622)) ([2d0fa98](https://github.com/kunchenguid/no-mistakes/commit/2d0fa98f9207451f739b046211ec1a32db4cb76d))
+
+## [1.43.0](https://github.com/kunchenguid/no-mistakes/compare/v1.42.0...v1.43.0) (2026-07-30)
+
+
+### Features
+
+* **pipeline:** enforce behavior-based test guidance ([#607](https://github.com/kunchenguid/no-mistakes/issues/607)) ([df10389](https://github.com/kunchenguid/no-mistakes/commit/df1038941a4121fb5bfc3d2b3e99f2d8eab13586))
+
+
+### Bug Fixes
+
+* **daemon:** wait for process exit before restart ([#609](https://github.com/kunchenguid/no-mistakes/issues/609)) ([a7f32ee](https://github.com/kunchenguid/no-mistakes/commit/a7f32ee0f74a6bf329b7a54ab2f6764272f5a9ea))
+
+## [1.42.0](https://github.com/kunchenguid/no-mistakes/compare/v1.41.2...v1.42.0) (2026-07-30)
+
+
+### Features
+
+* **agent:** neutralize Pi project context files ([#586](https://github.com/kunchenguid/no-mistakes/issues/586)) ([829ee34](https://github.com/kunchenguid/no-mistakes/commit/829ee34703bdc1d7cb216e6c33166803944f6f85))
+
+
+### Bug Fixes
+
+* **db:** finalize runs on terminal PR outcomes ([#570](https://github.com/kunchenguid/no-mistakes/issues/570)) ([62ab989](https://github.com/kunchenguid/no-mistakes/commit/62ab9899d7cd0ef0c0f1e171bc65ad916bcfa613))
+* **gate:** refresh repository URLs at run start ([#582](https://github.com/kunchenguid/no-mistakes/issues/582)) ([e279099](https://github.com/kunchenguid/no-mistakes/commit/e279099c51a667f3d82b3025db88f6ba4736be15))
+* **pipeline:** bind pushes to the reviewed commit ([#573](https://github.com/kunchenguid/no-mistakes/issues/573)) ([574e3aa](https://github.com/kunchenguid/no-mistakes/commit/574e3aa651b2ce9bd0bb51cc72eaaa223cb6d3ce))
+* **pipeline:** enforce post-review HEAD continuity ([#574](https://github.com/kunchenguid/no-mistakes/issues/574)) ([88dc204](https://github.com/kunchenguid/no-mistakes/commit/88dc204f933bbccee5fd144f2fa1e74cb52704c2))
+* **pipeline:** scope PR summaries to the final diff ([#605](https://github.com/kunchenguid/no-mistakes/issues/605)) ([c70992a](https://github.com/kunchenguid/no-mistakes/commit/c70992ad5896cd211e08bfc81ffa43ecce3fd885))
+
 ## [1.41.2](https://github.com/kunchenguid/no-mistakes/compare/v1.41.1...v1.41.2) (2026-07-24)
 
 
