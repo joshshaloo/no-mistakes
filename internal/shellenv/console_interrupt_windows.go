@@ -21,7 +21,7 @@ func RunWindowsCooperativeCommandHelper(args []string) (bool, int, error) {
 	if len(args) == 0 || !strings.HasPrefix(args[0], windowsCooperativeCommandArg) {
 		return false, 0, nil
 	}
-	if len(args) < 3 {
+	if len(args) < 4 {
 		return true, 1, errors.New("missing Windows cooperative command arguments")
 	}
 
@@ -29,11 +29,11 @@ func RunWindowsCooperativeCommandHelper(args []string) (bool, int, error) {
 	if eventName == "" {
 		return true, 1, errors.New("empty Windows cooperative cancel event name")
 	}
-	exitCode, err := runWindowsCooperativeCommand(eventName, args[1], args[2:])
+	exitCode, err := runWindowsCooperativeCommand(eventName, args[1], args[2], args[3:])
 	return true, exitCode, err
 }
 
-func runWindowsCooperativeCommand(eventName, targetPath string, targetArgs []string) (int, error) {
+func runWindowsCooperativeCommand(eventName, targetPath, commandLine string, targetArgs []string) (int, error) {
 	eventNamePtr, err := windows.UTF16PtrFromString(eventName)
 	if err != nil {
 		return 1, fmt.Errorf("encode Windows cooperative cancel event name: %w", err)
@@ -55,6 +55,7 @@ func runWindowsCooperativeCommand(eventName, targetPath string, targetArgs []str
 		Stdout: os.Stdout,
 		Stderr: os.Stderr,
 		SysProcAttr: &syscall.SysProcAttr{
+			CmdLine:       commandLine,
 			CreationFlags: windows.CREATE_NEW_PROCESS_GROUP,
 			HideWindow:    true,
 		},

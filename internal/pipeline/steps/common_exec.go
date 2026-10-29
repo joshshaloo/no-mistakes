@@ -364,12 +364,7 @@ func runShellCommandWithEnv(ctx context.Context, dir string, env []string, cmdSt
 }
 
 func runShellCommandWithProcessEnv(ctx context.Context, dir string, env []string, cmdStr string) (string, int, error) {
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd.exe", "/d", "/c", windowsShellCommand(cmdStr))
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", shellenv.OwnOOMScoreScript(cmdStr))
-	}
+	cmd := newStepShellCommand(ctx, cmdStr)
 	shellenv.ConfigureCooperativeShellCommand(cmd)
 	shellenv.SuperviseShellCommand(ctx, cmd)
 	cmd.Dir = dir
@@ -379,19 +374,22 @@ func runShellCommandWithProcessEnv(ctx context.Context, dir string, env []string
 	out, err := shellenv.CombinedOutputShellCommand(cmd)
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
-			return string(out), ee.ExitCode(), nil
+			code := ee.ExitCode()
+			if runtime.GOOS == "windows" && code == 9009 {
+				code = 127
+			}
+			return string(out), code, nil
 		}
 		return string(out), -1, fmt.Errorf("run command %q: %w", cmdStr, err)
 	}
 	return string(out), 0, nil
 }
 
-// cmd.exe reports an absent command as ERRORLEVEL 9009 inside the shell but
-// can expose only exit code 1 to its parent unless the batch explicitly maps
-// it. Preserve every other status while normalizing command-not-found to the
-// cross-platform configured-command contract (127).
+// /c consumes a command line, not a multiline batch file. Explicit exit /b
+// preserves the runtime ERRORLEVEL (9009 for a missing command) instead of
+// cmd.exe collapsing it to 1. No percent/delayed expansion is needed, so an
+// ordinary nonzero exit is preserved and ! in a quoted path stays literal.
+// A command that explicitly exits already returns its chosen status.
 func windowsShellCommand(cmdStr string) string {
-	return cmdStr + "\r\nset \"NO_MISTAKES_COMMAND_EXIT=%ERRORLEVEL%\"\r\n" +
-		"if \"%NO_MISTAKES_COMMAND_EXIT%\"==\"9009\" exit /b 127\r\n" +
-		"exit /b %NO_MISTAKES_COMMAND_EXIT%"
+	return cmdStr + " & exit /b"
 }

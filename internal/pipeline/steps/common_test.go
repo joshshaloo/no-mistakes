@@ -23,17 +23,13 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestWindowsShellCommandMapsOnlyCommandNotFound(t *testing.T) {
-	wrapped := windowsShellCommand("missing-tool --check")
-	for _, want := range []string{
-		"missing-tool --check\r\n",
-		"NO_MISTAKES_COMMAND_EXIT=%ERRORLEVEL%",
-		"==\"9009\" exit /b 127",
-		"exit /b %NO_MISTAKES_COMMAND_EXIT%",
-	} {
-		if !strings.Contains(wrapped, want) {
-			t.Fatalf("windows shell wrapper %q does not contain %q", wrapped, want)
-		}
+func TestWindowsShellCommandPreservesRuntimeExitStatus(t *testing.T) {
+	// /c receives a command line, not a batch file. A CRLF trailer does not
+	// reliably execute, and percent expansion would capture a stale status.
+	const command = `missing-tool --check > "path with spaces\output.txt"`
+	want := command + " & exit /b"
+	if got := windowsShellCommand(command); got != want {
+		t.Fatalf("windows shell wrapper = %q, want %q", got, want)
 	}
 }
 

@@ -11,6 +11,8 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -68,7 +70,34 @@ func TestStartShellCommandFailsWhenJobSetupFails(t *testing.T) {
 	}
 }
 
+func TestConfigureCooperativeShellCommandPreservesRawCommandLine(t *testing.T) {
+	installWindowsCooperativeCommandTestHelper(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "cmd.exe", "/d", "/c", "echo wrong argv")
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CmdLine: `"` + cmd.Path + `" /d /s /c "echo "raw value""`,
+	}
+	ConfigureCooperativeShellCommand(cmd)
+	if cmd.SysProcAttr.CmdLine != "" {
+		t.Fatal("the helper must use its own argv, not the target's raw command line")
+	}
+	out, err := CombinedOutputShellCommand(cmd)
+	if err != nil || strings.TrimSpace(string(out)) != `"raw value"` {
+		t.Fatalf("raw command line: output=%q, err=%v", out, err)
+	}
+}
+
 func TestConfigureCooperativeShellCommandCancelAllowsCleanup(t *testing.T) {
+	testWindowsCooperativeCleanup(t, false)
+}
+
+func TestConfigureCooperativeShellCommandRawCancelAllowsCleanup(t *testing.T) {
+	testWindowsCooperativeCleanup(t, true)
+}
+
+func testWindowsCooperativeCleanup(t *testing.T, raw bool) {
+	t.Helper()
 	installWindowsCooperativeCommandTestHelper(t)
 
 	dir := t.TempDir()
@@ -82,6 +111,11 @@ func TestConfigureCooperativeShellCommandCancelAllowsCleanup(t *testing.T) {
 		"NM_WINDOWS_COMMAND_READY="+ready,
 		"NM_WINDOWS_COMMAND_CLEANUP="+cleanup,
 	)
+	if raw {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			CmdLine: `"` + cmd.Path + `" /d /s /c "` + cmd.Args[len(cmd.Args)-1] + `"`,
+		}
+	}
 	ConfigureCooperativeShellCommand(cmd)
 	var output bytes.Buffer
 	cmd.Stdout = &output
@@ -202,13 +236,14 @@ func installWindowsCooperativeCommandTestHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := windowsCooperativeHelperCommandFunc
-	windowsCooperativeHelperCommandFunc = func(eventName, targetPath string, targetArgs []string) (string, []string, error) {
+	windowsCooperativeHelperCommandFunc = func(eventName, targetPath, commandLine string, targetArgs []string) (string, []string, error) {
 		args := []string{
 			exe,
 			"-test.run=^TestWindowsCooperativeCommandLauncherHelper$",
 			"--",
 			windowsCooperativeCommandArg + eventName,
 			targetPath,
+			commandLine,
 		}
 		args = append(args, targetArgs...)
 		return exe, args, nil

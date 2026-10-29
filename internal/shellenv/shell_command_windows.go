@@ -306,24 +306,30 @@ func wrapWindowsCooperativeCommand(cmd *exec.Cmd, eventName string) error {
 	if cmd == nil || cmd.Path == "" || len(cmd.Args) == 0 {
 		return errors.New("invalid Windows cooperative command")
 	}
-	if cmd.SysProcAttr != nil && cmd.SysProcAttr.CmdLine != "" {
-		return errors.New("Windows cooperative commands do not support SysProcAttr.CmdLine")
+	var commandLine string
+	if cmd.SysProcAttr != nil {
+		commandLine = cmd.SysProcAttr.CmdLine
 	}
-	path, args, err := windowsCooperativeHelperCommandFunc(eventName, cmd.Path, cmd.Args)
+	path, args, err := windowsCooperativeHelperCommandFunc(eventName, cmd.Path, commandLine, cmd.Args)
 	if err != nil {
 		return fmt.Errorf("prepare Windows cooperative command helper: %w", err)
 	}
 	cmd.Path = path
 	cmd.Args = args
+	if cmd.SysProcAttr != nil {
+		// The helper is a Go executable and needs normal argv escaping. Only
+		// its eventual target receives the original verbatim command line.
+		cmd.SysProcAttr.CmdLine = ""
+	}
 	return nil
 }
 
-func windowsCooperativeHelperCommand(eventName, targetPath string, targetArgs []string) (string, []string, error) {
+func windowsCooperativeHelperCommand(eventName, targetPath, commandLine string, targetArgs []string) (string, []string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", nil, err
 	}
-	args := []string{exe, windowsCooperativeCommandArg + eventName, targetPath}
+	args := []string{exe, windowsCooperativeCommandArg + eventName, targetPath, commandLine}
 	args = append(args, targetArgs...)
 	return exe, args, nil
 }
