@@ -2,6 +2,7 @@ package bitbucket
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -39,6 +40,31 @@ func TestBKTHostDraftCreationUsesBKTFlagAndVerifiesPR(t *testing.T) {
 	}
 }
 
+func TestBKTHostSelectedLogsRejectDifferentHead(t *testing.T) {
+	client, fake := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
+		if commandIs(args, "pr", "checks") {
+			return fakeBKTResult{stdout: `{"workspace":"ws","repo":"repo","pull_request":42,"commit":"new-head","statuses":[{"name":"test","key":"linux","state":"FAILED","url":"https://bitbucket.org/ws/repo/pipelines/results/11111111-2222-3333-4444-555555555555"}]}`}
+		}
+		t.Fatalf("unexpected command %q", args)
+		return fakeBKTResult{}
+	})
+	host := NewHost(client, RepoRef{Workspace: "ws", RepoSlug: "repo"})
+	if err := host.Available(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := host.FetchFailedCheckTargetLogs(context.Background(), &scm.PR{Number: "42"}, "feature", "run-head", []scm.CheckTarget{{Name: "test", ProviderID: "bitbucket-status:linux"}})
+	if !errors.Is(err, scm.ErrHeadChanged) {
+		t.Fatalf("FetchFailedCheckTargetLogs() error = %v, want ErrHeadChanged", err)
+	}
+	calls := fake.snapshotCalls()
+	findCall(t, calls, "pr", "checks")
+	for _, args := range calls {
+		if commandIs(args, "pipeline", "view") || commandIs(args, "pipeline", "logs") {
+			t.Fatalf("commands = %q, want no pipeline access after head mismatch", calls)
+		}
+	}
+}
+
 func TestBKTHostSelectedLogsKeepProviderIdentityAndPipelineUUID(t *testing.T) {
 	const selected = "{11111111-2222-3333-4444-555555555555}"
 	const other = "{99999999-2222-3333-4444-555555555555}"
@@ -46,7 +72,7 @@ func TestBKTHostSelectedLogsKeepProviderIdentityAndPipelineUUID(t *testing.T) {
 	client, _ := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
 		switch {
 		case commandIs(args, "pr", "checks"):
-			return fakeBKTResult{stdout: fmt.Sprintf(`{"workspace":"ws","repo":"repo","pull_request":42,"statuses":[{"name":"test","key":"linux","state":"FAILED","url":"https://bitbucket.org/ws/repo/pipelines/results/%s"},{"name":"test","key":"macos","state":"FAILED","url":"https://bitbucket.org/ws/repo/pipelines/results/%s"}]}`, other, selected)}
+			return fakeBKTResult{stdout: fmt.Sprintf(`{"workspace":"ws","repo":"repo","pull_request":42,"commit":"sha","statuses":[{"name":"test","key":"linux","state":"FAILED","url":"https://bitbucket.org/ws/repo/pipelines/results/%s"},{"name":"test","key":"macos","state":"FAILED","url":"https://bitbucket.org/ws/repo/pipelines/results/%s"}]}`, other, selected)}
 		case commandIs(args, "pipeline", "view"):
 			if normalizePipelineUUID(args[2]) != normalizePipelineUUID(selected) {
 				t.Fatalf("wrong selected pipeline %q", args)

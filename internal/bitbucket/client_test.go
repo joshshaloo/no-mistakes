@@ -172,6 +172,29 @@ func TestRESTHostRejectsChecksForDifferentHead(t *testing.T) {
 	}
 }
 
+func TestRESTHostFailedLogsRejectDifferentHead(t *testing.T) {
+	repo := RepoRef{Workspace: "test", RepoSlug: "repo"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/2.0/repositories/test/repo/pullrequests/42":
+			_, _ = w.Write([]byte(`{"id":42,"source":{"commit":{"hash":"new-head"}}}`))
+		case "/2.0/repositories/test/repo/pullrequests/42/statuses":
+			_, _ = w.Write([]byte(`{"values":[{"name":"build","key":"build","state":"FAILED","url":"https://bitbucket.org/test/repo/pipelines/results/1"}]}`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{baseURL: server.URL, email: "test@example.com", token: "token", httpClient: server.Client()}
+	host := NewHost(client, repo)
+	_, err := host.FetchFailedCheckTargetLogs(context.Background(), &scm.PR{Number: "42"}, "feature", "run-head", []scm.CheckTarget{{Name: "build", ProviderID: "bitbucket-status:build"}})
+	if !errors.Is(err, scm.ErrHeadChanged) {
+		t.Fatalf("FetchFailedCheckTargetLogs() error = %v, want ErrHeadChanged", err)
+	}
+}
+
 func TestFindOpenPRBySourceAndDestinationBranchFiltersSourceRepo(t *testing.T) {
 	repo := RepoRef{Workspace: "test", RepoSlug: "repo"}
 	var gotQ string

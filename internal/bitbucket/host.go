@@ -110,8 +110,10 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	if err != nil {
 		return nil, err
 	}
-	if expected := strings.TrimSpace(pr.HeadSHA); expected != "" && !strings.EqualFold(expected, strings.TrimSpace(result.Commit)) {
-		return nil, fmt.Errorf("%w: Bitbucket checks are for %q, want %q", scm.ErrHeadChanged, strings.TrimSpace(result.Commit), expected)
+	if expected := strings.TrimSpace(pr.HeadSHA); expected != "" {
+		if err := validateExpectedHead(expected, result.Commit, "checks"); err != nil {
+			return nil, err
+		}
 	}
 	statuses := LatestStatuses(result.Statuses)
 	checks := make([]scm.Check, 0, len(statuses))
@@ -184,12 +186,25 @@ func (h *Host) FetchFailedCheckTargetLogs(ctx context.Context, pr *scm.PR, branc
 		return nil, errors.New("Bitbucket transport does not support selected pipeline logs")
 	}
 	commitSHA := strings.TrimSpace(headSHA)
-	if got, prErr := h.client.GetPR(ctx, h.repo, id); prErr == nil && got != nil && strings.TrimSpace(got.SourceCommitHash) != "" {
-		commitSHA = strings.TrimSpace(got.SourceCommitHash)
+	if commitSHA == "" {
+		return nil, errors.New("resolve selected Bitbucket checks: requested head commit is empty")
+	}
+	got, err := h.client.GetPR(ctx, h.repo, id)
+	if err != nil {
+		return nil, fmt.Errorf("resolve selected Bitbucket pull request head: %w", err)
+	}
+	if got == nil {
+		return nil, errors.New("resolve selected Bitbucket pull request head: pull request was not found")
+	}
+	if err := validateExpectedHead(commitSHA, got.SourceCommitHash, "pull request"); err != nil {
+		return nil, err
 	}
 	result, err := h.client.ListPRStatuses(ctx, h.repo, id)
 	if err != nil {
 		return nil, fmt.Errorf("resolve selected Bitbucket checks: %w", err)
+	}
+	if err := validateExpectedHead(commitSHA, result.Commit, "failed checks"); err != nil {
+		return nil, err
 	}
 	statuses := result.Statuses
 	targetBuildNumbers := make([]map[string]struct{}, len(selected))
@@ -246,6 +261,15 @@ func (h *Host) FetchFailedCheckTargetLogs(ctx context.Context, pr *scm.PR, branc
 		results = append(results, result)
 	}
 	return results, nil
+}
+
+func validateExpectedHead(expected, actual, evidence string) error {
+	expected = strings.TrimSpace(expected)
+	actual = strings.TrimSpace(actual)
+	if !strings.EqualFold(expected, actual) {
+		return fmt.Errorf("%w: Bitbucket %s are for %q, want %q", scm.ErrHeadChanged, evidence, actual, expected)
+	}
+	return nil
 }
 
 func (h *Host) fetchPipelineLogs(ctx context.Context, transport pipelineAPI, pipelineRun Pipeline) (string, error) {

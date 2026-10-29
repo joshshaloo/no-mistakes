@@ -355,12 +355,16 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	// that created this PR. Re-read the forge record without a base filter so
 	// conflict repair and tip monitoring follow the PR's actual target.
 	if reader, ok := host.(scm.PRBaseBranchReader); ok {
-		if actual, readErr := reader.GetPRBaseBranch(ctx, pr); readErr == nil {
-			pr.BaseBranch = actual
+		actual, readErr := reader.GetPRBaseBranch(ctx, pr)
+		if readErr != nil {
+			return nil, fmt.Errorf("read pull request base branch: %w", readErr)
 		}
-	}
-	if strings.TrimSpace(pr.BaseBranch) != "" {
-		baseBranch = strings.TrimSpace(pr.BaseBranch)
+		actual = strings.TrimSpace(actual)
+		if actual == "" {
+			return nil, errors.New("pull request base branch is empty")
+		}
+		pr.BaseBranch = actual
+		baseBranch = actual
 	}
 	if repairRequested {
 		repairOutcome, err := s.repairFromFindings(sctx, host, pr)

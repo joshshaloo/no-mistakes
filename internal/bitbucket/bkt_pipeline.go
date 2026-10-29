@@ -58,9 +58,16 @@ func failedPipelineUUIDs(statuses []CommitStatus, names []string) map[string]str
 
 // FetchFailedCheckTargetLogs preserves upstream's per-target identity without
 // using bkt's branch-only pipeline list, which cannot prove a commit binding.
-func (c *BKTClient) FetchFailedCheckTargetLogs(ctx context.Context, repo RepoRef, prID int, _, _ string, selected []scm.CheckTarget) ([]scm.FailedCheckLog, error) {
+func (c *BKTClient) FetchFailedCheckTargetLogs(ctx context.Context, repo RepoRef, prID int, _ string, headSHA string, selected []scm.CheckTarget) ([]scm.FailedCheckLog, error) {
+	expected := strings.TrimSpace(headSHA)
+	if expected == "" {
+		return nil, errors.New("resolve selected Bitbucket checks: requested head commit is empty")
+	}
 	result, err := c.ListPRStatuses(ctx, repo, prID)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateExpectedHead(expected, result.Commit, "failed checks"); err != nil {
 		return nil, err
 	}
 	statuses := LatestStatuses(result.Statuses)

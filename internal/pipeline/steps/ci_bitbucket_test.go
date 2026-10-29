@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +65,39 @@ func TestCIStep_BitbucketPassesWhenStatusesPass(t *testing.T) {
 	}
 	if !foundPassed {
 		t.Fatalf("expected successful Bitbucket CI logs, got %v", logs)
+	}
+}
+
+func TestCIStep_BitbucketFailsClosedWhenPRBaseCannotBeRead(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		statusCode int
+		base       string
+		want       string
+	}{
+		{name: "read error", statusCode: http.StatusServiceUnavailable, base: "main", want: "read pull request base branch"},
+		{name: "empty branch", statusCode: http.StatusOK, base: "", want: "pull request base branch is empty"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[]}`)
+			api.prReadStatus = tt.statusCode
+			api.prDestinationBranch = tt.base
+
+			prURL := "https://bitbucket.org/test/repo/pull-requests/42"
+			sctx := newTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = fakeBitbucketEnv(api.server.URL)
+			sctx.Run.PRURL = &prURL
+			sctx.Repo.UpstreamURL = "https://bitbucket.org/test/repo.git"
+
+			_, err := (&CIStep{}).Execute(sctx)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Execute() error = %v, want %q", err, tt.want)
+			}
+			if api.statusesCalls != 0 {
+				t.Fatalf("statuses calls = %d, want none after base read failure", api.statusesCalls)
+			}
+		})
 	}
 }
 

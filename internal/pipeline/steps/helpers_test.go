@@ -375,31 +375,35 @@ func fakeBitbucketEnv(apiBaseURL string) []string {
 }
 
 type fakeBitbucketCIAPI struct {
-	server         *httptest.Server
-	prState        string
-	statusesJSON   string
-	pipelinesJSON  string
-	stepsJSON      string
-	stepLog        string
-	stepsByPath    map[string]string
-	stepLogsByPath map[string]string
-	prSourceSHA    string
-	prStateCalls   int
-	statusesCalls  int
-	pipelinesCalls int
-	stepsCalls     int
-	stepLogCalls   int
-	lastAuthHeader string
-	lastStatusesQ  string
-	lastPipelineQ  string
+	server              *httptest.Server
+	prState             string
+	statusesJSON        string
+	pipelinesJSON       string
+	stepsJSON           string
+	stepLog             string
+	stepsByPath         map[string]string
+	stepLogsByPath      map[string]string
+	prSourceSHA         string
+	prDestinationBranch string
+	prReadStatus        int
+	prStateCalls        int
+	statusesCalls       int
+	pipelinesCalls      int
+	stepsCalls          int
+	stepLogCalls        int
+	lastAuthHeader      string
+	lastStatusesQ       string
+	lastPipelineQ       string
 }
 
 func newFakeBitbucketCIAPI(t *testing.T, prState, statusesJSON string) *fakeBitbucketCIAPI {
 	t.Helper()
 
 	api := &fakeBitbucketCIAPI{
-		prState:      prState,
-		statusesJSON: statusesJSON,
+		prState:             prState,
+		statusesJSON:        statusesJSON,
+		prDestinationBranch: "main",
+		prReadStatus:        http.StatusOK,
 	}
 
 	api.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -409,7 +413,10 @@ func newFakeBitbucketCIAPI(t *testing.T, prState, statusesJSON string) *fakeBitb
 		case r.Method == http.MethodGet && r.URL.Path == "/2.0/repositories/test/repo/pullrequests/42":
 			api.prStateCalls++
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"id":42,"state":%q,"source":{"commit":{"hash":%q}}}`, api.prState, api.prSourceSHA)
+			w.WriteHeader(api.prReadStatus)
+			if api.prReadStatus == http.StatusOK {
+				fmt.Fprintf(w, `{"id":42,"state":%q,"source":{"commit":{"hash":%q}},"destination":{"branch":{"name":%q}}}`, api.prState, api.prSourceSHA, api.prDestinationBranch)
+			}
 		case r.Method == http.MethodGet && r.URL.Path == "/2.0/repositories/test/repo/pullrequests/42/statuses":
 			api.statusesCalls++
 			api.lastStatusesQ = r.URL.Query().Get("q")
