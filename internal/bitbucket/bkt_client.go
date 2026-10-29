@@ -428,12 +428,13 @@ func bktPRToPullRequest(repo RepoRef, pr bktPullRequest) (*PullRequest, error) {
 		}
 	}
 	return &PullRequest{
-		Title:            pr.Title,
-		Description:      pr.Description,
-		ID:               pr.ID,
-		URL:              prURL(repo, pr.ID, rawURL),
-		State:            strings.TrimSpace(pr.State),
-		SourceCommitHash: strings.TrimSpace(pr.Source.Commit.Hash),
+		Title:             pr.Title,
+		Description:       pr.Description,
+		ID:                pr.ID,
+		URL:               prURL(repo, pr.ID, rawURL),
+		State:             strings.TrimSpace(pr.State),
+		SourceCommitHash:  strings.TrimSpace(pr.Source.Commit.Hash),
+		DestinationBranch: strings.TrimSpace(pr.Destination.Branch.Name),
 	}, nil
 }
 
@@ -445,7 +446,7 @@ type bktChecksEnvelope struct {
 	Statuses    []CommitStatus `json:"statuses"`
 }
 
-func (c *BKTClient) ListPRStatuses(ctx context.Context, repo RepoRef, prID int) ([]CommitStatus, error) {
+func (c *BKTClient) ListPRStatuses(ctx context.Context, repo RepoRef, prID int) (*PRStatuses, error) {
 	selectors, err := c.repoArgs(repo)
 	if err != nil {
 		return nil, err
@@ -463,7 +464,7 @@ func (c *BKTClient) ListPRStatuses(ctx context.Context, repo RepoRef, prID int) 
 	if envelope.PullRequest != prID {
 		return nil, fmt.Errorf("bkt PR checks returned pull request %d, want %d", envelope.PullRequest, prID)
 	}
-	return envelope.Statuses, nil
+	return &PRStatuses{Commit: strings.TrimSpace(envelope.Commit), Statuses: envelope.Statuses}, nil
 }
 
 type bktPipeline struct {
@@ -533,11 +534,11 @@ func (c *BKTClient) GetStepLog(ctx context.Context, repo RepoRef, pipelineUUID, 
 // failing PR check. It deliberately declines a branch-only pipeline-list
 // fallback because bkt 0.30.0's structured list schema omits the commit SHA.
 func (c *BKTClient) FetchFailedCheckLogs(ctx context.Context, repo RepoRef, prID int, _ string, _ string, failingNames []string) (string, error) {
-	statuses, err := c.ListPRStatuses(ctx, repo, prID)
+	result, err := c.ListPRStatuses(ctx, repo, prID)
 	if err != nil {
 		return "", err
 	}
-	targets := failedPipelineUUIDs(statuses, failingNames)
+	targets := failedPipelineUUIDs(result.Statuses, failingNames)
 	if len(targets) == 0 {
 		return "", nil
 	}

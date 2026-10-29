@@ -3,6 +3,7 @@ package bitbucket
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
 func TestParseRepoRefRejectsLookalikeHosts(t *testing.T) {
@@ -61,6 +64,11 @@ func TestListPRStatusesFollowsPagination(t *testing.T) {
 
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/2.0/repositories/test/repo/pullrequests/42" {
+			_, _ = w.Write([]byte(`{"id":42,"source":{"commit":{"hash":"abc123"}}}`))
+			return
+		}
 		if r.URL.Path != "/2.0/repositories/test/repo/pullrequests/42/statuses" {
 			t.Fatalf("path = %q, want %q", r.URL.Path, "/2.0/repositories/test/repo/pullrequests/42/statuses")
 		}
@@ -68,7 +76,6 @@ func TestListPRStatusesFollowsPagination(t *testing.T) {
 			t.Fatalf("sort = %q, want -created_on", got)
 		}
 		pageCalls++
-		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Query().Get("page") {
 		case "", "1":
 			_, _ = w.Write([]byte(`{"values":[{"name":"build","state":"SUCCESSFUL"}],"next":"` + server.URL + `/2.0/repositories/test/repo/pullrequests/42/statuses?sort=-created_on&page=2"}`))
@@ -89,15 +96,18 @@ func TestListPRStatusesFollowsPagination(t *testing.T) {
 		},
 	}
 
-	statuses, err := client.ListPRStatuses(context.Background(), repo, 42)
+	result, err := client.ListPRStatuses(context.Background(), repo, 42)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(statuses) != 2 {
-		t.Fatalf("len(statuses) = %d, want 2", len(statuses))
+	if result.Commit != "abc123" {
+		t.Fatalf("commit = %q, want abc123", result.Commit)
 	}
-	if statuses[0].Name != "build" || statuses[1].Name != "tests" {
-		t.Fatalf("statuses = %#v, want build then tests", statuses)
+	if len(result.Statuses) != 2 {
+		t.Fatalf("len(statuses) = %d, want 2", len(result.Statuses))
+	}
+	if result.Statuses[0].Name != "build" || result.Statuses[1].Name != "tests" {
+		t.Fatalf("statuses = %#v, want build then tests", result.Statuses)
 	}
 	if pageCalls != 2 {
 		t.Fatalf("pageCalls = %d, want 2", pageCalls)
@@ -109,6 +119,10 @@ func TestListPRStatusesRejectsCrossOriginPagination(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/2.0/repositories/test/repo/pullrequests/42" {
+			_, _ = w.Write([]byte(`{"id":42,"source":{"commit":{"hash":"abc123"}}}`))
+			return
+		}
 		_, _ = fmt.Fprintf(w, `{"values":[{"name":"build","state":"SUCCESSFUL"}],"next":"https://evil.example/2.0/repositories/test/repo/pullrequests/42/statuses?page=2"}`)
 	}))
 	defer server.Close()
@@ -128,6 +142,33 @@ func TestListPRStatusesRejectsCrossOriginPagination(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cross-origin") {
 		t.Fatalf("error = %q, want cross-origin validation failure", err)
+	}
+}
+
+func TestRESTHostRejectsChecksForDifferentHead(t *testing.T) {
+	repo := RepoRef{Workspace: "test", RepoSlug: "repo"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/2.0/repositories/test/repo/pullrequests/42":
+			_, _ = w.Write([]byte(`{"id":42,"source":{"commit":{"hash":"new-head"}},"destination":{"branch":{"name":"main"}}}`))
+		case "/2.0/repositories/test/repo/pullrequests/42/statuses":
+			_, _ = w.Write([]byte(`{"values":[{"name":"build","state":"SUCCESSFUL"}]}`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{baseURL: server.URL, email: "test@example.com", token: "token", httpClient: server.Client()}
+	host := NewHost(client, repo)
+	_, err := host.GetChecks(context.Background(), &scm.PR{Number: "42", HeadSHA: "run-head"})
+	if !errors.Is(err, scm.ErrHeadChanged) {
+		t.Fatalf("GetChecks() error = %v, want ErrHeadChanged", err)
+	}
+	base, err := host.GetPRBaseBranch(context.Background(), &scm.PR{Number: "42"})
+	if err != nil || base != "main" {
+		t.Fatalf("GetPRBaseBranch() = %q, %v; want main", base, err)
 	}
 }
 

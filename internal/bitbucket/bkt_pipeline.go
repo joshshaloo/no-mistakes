@@ -59,11 +59,11 @@ func failedPipelineUUIDs(statuses []CommitStatus, names []string) map[string]str
 // FetchFailedCheckTargetLogs preserves upstream's per-target identity without
 // using bkt's branch-only pipeline list, which cannot prove a commit binding.
 func (c *BKTClient) FetchFailedCheckTargetLogs(ctx context.Context, repo RepoRef, prID int, _, _ string, selected []scm.CheckTarget) ([]scm.FailedCheckLog, error) {
-	statuses, err := c.ListPRStatuses(ctx, repo, prID)
+	result, err := c.ListPRStatuses(ctx, repo, prID)
 	if err != nil {
 		return nil, err
 	}
-	statuses = LatestStatuses(statuses)
+	statuses := LatestStatuses(result.Statuses)
 	results := make([]scm.FailedCheckLog, 0, len(selected))
 	for _, target := range selected {
 		ids := map[string]struct{}{}

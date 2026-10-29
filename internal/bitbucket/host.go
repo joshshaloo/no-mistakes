@@ -106,11 +106,14 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	if err != nil {
 		return nil, err
 	}
-	statuses, err := h.client.ListPRStatuses(ctx, h.repo, id)
+	result, err := h.client.ListPRStatuses(ctx, h.repo, id)
 	if err != nil {
 		return nil, err
 	}
-	statuses = LatestStatuses(statuses)
+	if expected := strings.TrimSpace(pr.HeadSHA); expected != "" && !strings.EqualFold(expected, strings.TrimSpace(result.Commit)) {
+		return nil, fmt.Errorf("%w: Bitbucket checks are for %q, want %q", scm.ErrHeadChanged, strings.TrimSpace(result.Commit), expected)
+	}
+	statuses := LatestStatuses(result.Statuses)
 	checks := make([]scm.Check, 0, len(statuses))
 	for _, status := range statuses {
 		checks = append(checks, scm.Check{
@@ -131,6 +134,21 @@ func (h *Host) GetCIAttemptIdentity(context.Context, *scm.PR, string, []scm.Chec
 
 func (h *Host) GetMergeableState(_ context.Context, _ *scm.PR) (scm.MergeableState, error) {
 	return "", scm.ErrUnsupported
+}
+
+func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) {
+	id, err := strconv.Atoi(pr.Number)
+	if err != nil {
+		return "", fmt.Errorf("invalid Bitbucket PR number %q: %w", pr.Number, err)
+	}
+	got, err := h.client.GetPR(ctx, h.repo, id)
+	if err != nil {
+		return "", err
+	}
+	if got == nil {
+		return "", nil
+	}
+	return strings.TrimSpace(got.DestinationBranch), nil
 }
 
 func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, branch, headSHA string, failingNames []string) (string, error) {
@@ -169,10 +187,11 @@ func (h *Host) FetchFailedCheckTargetLogs(ctx context.Context, pr *scm.PR, branc
 	if got, prErr := h.client.GetPR(ctx, h.repo, id); prErr == nil && got != nil && strings.TrimSpace(got.SourceCommitHash) != "" {
 		commitSHA = strings.TrimSpace(got.SourceCommitHash)
 	}
-	statuses, err := h.client.ListPRStatuses(ctx, h.repo, id)
+	result, err := h.client.ListPRStatuses(ctx, h.repo, id)
 	if err != nil {
 		return nil, fmt.Errorf("resolve selected Bitbucket checks: %w", err)
 	}
+	statuses := result.Statuses
 	targetBuildNumbers := make([]map[string]struct{}, len(selected))
 	for i, target := range selected {
 		resolved, err := failedPipelineBuildNumberTargets(statuses, []scm.CheckTarget{target})
@@ -257,8 +276,10 @@ func (h *Host) toPR(pr *PullRequest) *scm.PR {
 		return nil
 	}
 	return &scm.PR{
-		Number: strconv.Itoa(pr.ID),
-		URL:    prURL(h.repo, pr.ID, pr.URL),
+		Number:     strconv.Itoa(pr.ID),
+		URL:        prURL(h.repo, pr.ID, pr.URL),
+		HeadSHA:    strings.TrimSpace(pr.SourceCommitHash),
+		BaseBranch: strings.TrimSpace(pr.DestinationBranch),
 	}
 }
 

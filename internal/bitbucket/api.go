@@ -19,7 +19,7 @@ type API interface {
 	AddPRComment(context.Context, RepoRef, int, string) error
 	ListPRComments(context.Context, RepoRef, int) ([]string, error)
 	GetPR(context.Context, RepoRef, int) (*PullRequest, error)
-	ListPRStatuses(context.Context, RepoRef, int) ([]CommitStatus, error)
+	ListPRStatuses(context.Context, RepoRef, int) (*PRStatuses, error)
 }
 
 // pipelineAPI is the REST transport's commit-bound pipeline discovery. bkt
