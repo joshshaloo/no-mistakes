@@ -224,9 +224,7 @@ func TestWindowsCooperativeCommandLauncherHelper(t *testing.T) {
 	if !handled {
 		t.Fatal("Windows cooperative command helper arguments were not recognized")
 	}
-	if exitCode != 0 {
-		os.Exit(exitCode)
-	}
+	os.Exit(exitCode)
 }
 
 func installWindowsCooperativeCommandTestHelper(t *testing.T) {

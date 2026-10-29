@@ -98,7 +98,9 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	if got == nil {
 		return "", nil
 	}
-	pr.HeadSHA = strings.TrimSpace(got.SourceCommitHash)
+	if strings.TrimSpace(pr.HeadSHA) == "" {
+		pr.HeadSHA = strings.TrimSpace(got.SourceCommitHash)
+	}
 	return normalizePRState(got.State), nil
 }
 
@@ -151,7 +153,9 @@ func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) 
 	if got == nil {
 		return "", nil
 	}
-	pr.HeadSHA = strings.TrimSpace(got.SourceCommitHash)
+	if strings.TrimSpace(pr.HeadSHA) == "" {
+		pr.HeadSHA = strings.TrimSpace(got.SourceCommitHash)
+	}
 	return strings.TrimSpace(got.DestinationBranch), nil
 }
 

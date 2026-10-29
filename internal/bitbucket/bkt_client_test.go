@@ -388,10 +388,6 @@ func TestBKTHostReadsTerminalPRStatesAndChecks(t *testing.T) {
 			}
 			host := NewHost(client, repo)
 			pr := &scm.PR{Number: "42", URL: "https://bitbucket.org/envy-forge/app/pull-requests/42", HeadSHA: "abc123"}
-			state, err := host.GetPRState(context.Background(), pr)
-			if err != nil || state != tt.want {
-				t.Fatalf("GetPRState() = %q, %v; want %q", state, err, tt.want)
-			}
 			checks, err := host.GetChecks(context.Background(), pr)
 			if err != nil {
 				t.Fatal(err)
@@ -405,9 +401,20 @@ func TestBKTHostReadsTerminalPRStatesAndChecks(t *testing.T) {
 					t.Errorf("checks[%d].Bucket = %q, want %q", i, checks[i].Bucket, want[i])
 				}
 			}
+			pr.HeadSHA = "run-head"
+			state, err := host.GetPRState(context.Background(), pr)
+			if err != nil || state != tt.want {
+				t.Fatalf("GetPRState() = %q, %v; want %q", state, err, tt.want)
+			}
+			if pr.HeadSHA != "run-head" {
+				t.Fatalf("GetPRState() changed expected head to %q", pr.HeadSHA)
+			}
 			base, err := host.GetPRBaseBranch(context.Background(), pr)
 			if err != nil || base != "main" {
 				t.Fatalf("GetPRBaseBranch() = %q, %v; want main", base, err)
+			}
+			if pr.HeadSHA != "run-head" {
+				t.Fatalf("GetPRBaseBranch() changed expected head to %q", pr.HeadSHA)
 			}
 		})
 	}

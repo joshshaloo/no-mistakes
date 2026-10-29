@@ -304,7 +304,7 @@ func TestCIStep_BitbucketAutoFixIncludesPipelineLogs(t *testing.T) {
 	}
 }
 
-func TestCIStep_BitbucketAutoFixUsesLivePRHeadSHAForLogs(t *testing.T) {
+func TestCIStep_BitbucketMovedPRHeadDoesNotRepairRecordedHead(t *testing.T) {
 	t.Parallel()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -338,9 +338,9 @@ func TestCIStep_BitbucketAutoFixUsesLivePRHeadSHAForLogs(t *testing.T) {
 	api.stepLog = "error log output"
 	api.prSourceSHA = headSHA
 
-	// Keep the recorded head stale enough to prove CI uses the live PR source,
-	// but on the valid pipeline lineage so the post-review entry guard permits it.
-	staleHeadSHA := baseSHA
+	// The run delivered H1, but the PR has moved to H2. CI must keep H1 as the
+	// immutable validation binding instead of using H2's checks or logs.
+	recordedHeadSHA := baseSHA
 	var capturedPrompt string
 	ag := &mockAgent{
 		name: "test",
@@ -354,7 +354,7 @@ func TestCIStep_BitbucketAutoFixUsesLivePRHeadSHAForLogs(t *testing.T) {
 	}
 
 	prURL := "https://bitbucket.org/test/repo/pull-requests/42"
-	sctx := newTestContext(t, ag, dir, baseSHA, staleHeadSHA, config.Commands{})
+	sctx := newTestContext(t, ag, dir, baseSHA, recordedHeadSHA, config.Commands{})
 	sctx.Env = fakeBitbucketEnv(api.server.URL)
 	sctx.Run.PRURL = &prURL
 	sctx.Repo.UpstreamURL = upstream
@@ -373,16 +373,15 @@ func TestCIStep_BitbucketAutoFixUsesLivePRHeadSHAForLogs(t *testing.T) {
 			return ctx.Err()
 		},
 	}
-	outcome, err := driveCI(t, step, sctx)
-	assertCIRestartsValidation(t, outcome, err)
-	if capturedPrompt == "" {
-		t.Fatal("expected Bitbucket auto-fix to call the agent")
+	_, err := driveCI(t, step, sctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("CI result = %v, want cancellation after rejecting moved PR head", err)
 	}
-	if api.lastPipelineQ != headSHA {
-		t.Fatalf("pipeline commit SHA = %q, want live PR source commit %q", api.lastPipelineQ, headSHA)
+	if capturedPrompt != "" {
+		t.Fatal("moved PR head must not trigger a repair for the recorded run head")
 	}
-	if api.lastPipelineQ == staleHeadSHA {
-		t.Fatalf("pipeline lookup used stale run head SHA %q", staleHeadSHA)
+	if api.lastPipelineQ != "" {
+		t.Fatalf("pipeline logs queried for moved PR head %q", api.lastPipelineQ)
 	}
 }
 

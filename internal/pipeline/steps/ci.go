@@ -336,7 +336,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	if err != nil {
 		return nil, fmt.Errorf("extract PR number: %w", err)
 	}
-	pr := &scm.PR{Number: prNumber, URL: prURL}
+	pr := &scm.PR{Number: prNumber, URL: prURL, HeadSHA: strings.TrimSpace(sctx.Run.HeadSHA)}
 	if retryRefusal {
 		if err := setCIMonitorReadiness(sctx, false, false); err != nil {
 			return nil, err

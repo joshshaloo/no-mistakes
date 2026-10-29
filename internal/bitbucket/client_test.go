@@ -166,9 +166,19 @@ func TestRESTHostRejectsChecksForDifferentHead(t *testing.T) {
 	if !errors.Is(err, scm.ErrHeadChanged) {
 		t.Fatalf("GetChecks() error = %v, want ErrHeadChanged", err)
 	}
-	base, err := host.GetPRBaseBranch(context.Background(), &scm.PR{Number: "42"})
+	pr := &scm.PR{Number: "42", HeadSHA: "run-head"}
+	if _, err := host.GetPRState(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	if pr.HeadSHA != "run-head" {
+		t.Fatalf("GetPRState() changed expected head to %q", pr.HeadSHA)
+	}
+	base, err := host.GetPRBaseBranch(context.Background(), pr)
 	if err != nil || base != "main" {
 		t.Fatalf("GetPRBaseBranch() = %q, %v; want main", base, err)
+	}
+	if pr.HeadSHA != "run-head" {
+		t.Fatalf("GetPRBaseBranch() changed expected head to %q", pr.HeadSHA)
 	}
 }
 
