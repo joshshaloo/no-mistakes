@@ -454,6 +454,7 @@ func fakeCIGHReconcileHandler(args []string) {
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
+	fakeGHHandlePRContentCommands(args, joined)
 	if strings.Contains(joined, "pr list") {
 		fmt.Println("[]")
 		os.Exit(0)

@@ -547,7 +547,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 
 		// Check CI status - wait for all checks to complete before escalating
-		pr.HeadSHA = sctx.Run.HeadSHA
+		if strings.TrimSpace(pr.HeadSHA) == "" {
+			pr.HeadSHA = sctx.Run.HeadSHA
+		}
 		checks, err := host.GetChecks(ctx, pr)
 		if err != nil {
 			if clearErr := s.clearCIMonitorReady(sctx); clearErr != nil {

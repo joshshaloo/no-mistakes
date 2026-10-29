@@ -224,6 +224,9 @@ func fakeCLIEnv(binDir string, vars map[string]string) []string {
 		"FAKE_CLI_REAL_GIT=" + testGitExecutable,
 		"FAKE_CLI_HEAD_FROM_WORKTREE=1",
 	}
+	if _, ok := vars["FAKE_CLI_PR_BASE"]; !ok {
+		env = append(env, "FAKE_CLI_PR_BASE=main")
+	}
 	for k, v := range vars {
 		env = append(env, k+"="+v)
 	}
@@ -402,6 +405,7 @@ func newFakeBitbucketCIAPI(t *testing.T, prState, statusesJSON string) *fakeBitb
 	api := &fakeBitbucketCIAPI{
 		prState:             prState,
 		statusesJSON:        statusesJSON,
+		prSourceSHA:         "stable-head",
 		prDestinationBranch: "main",
 		prReadStatus:        http.StatusOK,
 	}

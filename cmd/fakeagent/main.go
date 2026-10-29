@@ -125,6 +125,14 @@ func runGhForkPRStub(args []string) int {
 		return 0
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
+		if hasArgValue(args, "--json", "baseRefName") {
+			base := strings.TrimSpace(os.Getenv("FAKEAGENT_GH_BASE"))
+			if base == "" {
+				base = "main"
+			}
+			fmt.Println(base)
+			return 0
+		}
 		if hasArgValue(args, "--json", "state") {
 			fmt.Println("MERGED")
 			return 0

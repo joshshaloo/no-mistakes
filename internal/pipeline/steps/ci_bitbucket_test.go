@@ -22,6 +22,7 @@ func TestCIStep_BitbucketPassesWhenStatusesPass(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","state":"SUCCESSFUL"}]}`)
+	api.prSourceSHA = headSHA
 
 	prURL := "https://bitbucket.org/test/repo/pull-requests/42"
 	ag := &mockAgent{name: "test"}
@@ -104,6 +105,7 @@ func TestCIStep_BitbucketFailsClosedWhenPRBaseCannotBeRead(t *testing.T) {
 func TestCIStep_BitbucketUsesProcessEnvWhenStepEnvIsNil(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","state":"SUCCESSFUL"}]}`)
+	api.prSourceSHA = headSHA
 	t.Setenv("NO_MISTAKES_BITBUCKET_EMAIL", "test@example.com")
 	t.Setenv("NO_MISTAKES_BITBUCKET_API_TOKEN", "test-token")
 	t.Setenv("NO_MISTAKES_BITBUCKET_API_BASE_URL", api.server.URL)
@@ -138,6 +140,7 @@ func TestCIStep_BitbucketFailureNeedsApproval(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","key":"build-linux","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"}]}`)
+	api.prSourceSHA = headSHA
 
 	prURL := "https://bitbucket.org/test/repo/pull-requests/42"
 	ag := &mockAgent{name: "test"}
@@ -181,6 +184,7 @@ func TestCIStep_BitbucketStoppedCheckParksForADecision(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","state":"STOPPED"}]}`)
+	api.prSourceSHA = headSHA
 
 	prURL := "https://bitbucket.org/test/repo/pull-requests/42"
 	ag := &mockAgent{name: "test"}
@@ -255,6 +259,7 @@ func TestCIStep_BitbucketAutoFixIncludesPipelineLogs(t *testing.T) {
 	api.pipelinesJSON = `{"values":[{"uuid":"{pipeline-1}","build_number":1}]}`
 	api.stepsJSON = `{"values":[{"uuid":"{step-1}","state":{"name":"COMPLETED","result":{"name":"FAILED"}}}]}`
 	api.stepLog = "error log output"
+	api.prSourceSHA = headSHA
 
 	var capturedPrompt string
 	ag := &mockAgent{

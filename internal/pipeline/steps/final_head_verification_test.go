@@ -523,6 +523,7 @@ func TestFinalHeadVerification_TestAgentFilesCommittedByPushDoNotReverify(t *tes
 		Test: "printf rerun >> rerun.log",
 	})
 	sctx.Shared = &pipeline.RunShared{}
+	sctx.Env = append(fakeCIGH(t, "OPEN", `[]`), "FAKE_CLI_AUTH_ERR=not authenticated")
 
 	// The test agent writes a new focused test and leaves it uncommitted.
 	if err := os.WriteFile(filepath.Join(dir, "feature_extra_test.go"), []byte("package feature\n"), 0o644); err != nil {
@@ -532,14 +533,11 @@ func TestFinalHeadVerification_TestAgentFilesCommittedByPushDoNotReverify(t *tes
 	recordReviewApproval(t, sctx, headSHA)
 
 	outcome, err := (&PushStep{}).Execute(sctx)
-	if err == nil {
-		t.Fatal("expected the push step to reach the network push")
+	if err != nil {
+		t.Fatalf("push step failed: %v", err)
 	}
-	if outcome != nil {
-		t.Fatalf("outcome = %#v, want nil on step failure", outcome)
-	}
-	if strings.Contains(err.Error(), "final head verification") {
-		t.Fatalf("re-verified content the test step already validated: %v", err)
+	if outcome == nil {
+		t.Fatal("push step returned nil outcome")
 	}
 	if _, err := os.Stat(rerunLog); !os.IsNotExist(err) {
 		t.Fatalf("verification re-ran tests for the test step's own files, stat err = %v", err)
@@ -563,6 +561,7 @@ func TestFinalHeadVerification_ExternalEvidenceDoesNotReverify(t *testing.T) {
 	sctx.Config.Test.Evidence.StoreInRepo = true
 	sctx.Config.Test.Evidence.Dir = "docs/evidence"
 	sctx.Shared = &pipeline.RunShared{}
+	sctx.Env = append(fakeCIGH(t, "OPEN", `[]`), "FAKE_CLI_AUTH_ERR=not authenticated")
 
 	sctx.EvidenceDir = t.TempDir()
 	evidenceDir := sctx.EvidenceDir
@@ -576,14 +575,11 @@ func TestFinalHeadVerification_ExternalEvidenceDoesNotReverify(t *testing.T) {
 	recordReviewApproval(t, sctx, headSHA)
 
 	outcome, err := (&PushStep{}).Execute(sctx)
-	if err == nil {
-		t.Fatal("expected the push step to reach the network push")
+	if err != nil {
+		t.Fatalf("push step failed: %v", err)
 	}
-	if outcome != nil {
-		t.Fatalf("outcome = %#v, want nil on step failure", outcome)
-	}
-	if strings.Contains(err.Error(), "final head verification") {
-		t.Fatalf("re-verified pipeline-staged evidence artifacts: %v", err)
+	if outcome == nil {
+		t.Fatal("push step returned nil outcome")
 	}
 	if _, err := os.Stat(rerunLog); !os.IsNotExist(err) {
 		t.Fatalf("verification re-ran tests for staged evidence, stat err = %v", err)
