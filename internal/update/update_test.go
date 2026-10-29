@@ -95,6 +95,67 @@ func TestUpdaterCheckLatestAndRefreshCache(t *testing.T) {
 	}
 }
 
+func TestUpdaterRunForkBuildPolicy(t *testing.T) {
+	allowInsecureDownloads = true
+	t.Cleanup(func() { allowInsecureDownloads = false })
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		fmt.Fprint(w, `{"schema_version":1,"stable":{"tag_name":"v1.84.0","assets":[]}}`)
+	}))
+	defer server.Close()
+
+	t.Run("bkt suffix refuses self-update", func(t *testing.T) {
+		requests = 0
+		u := &updater{
+			appName:        "no-mistakes",
+			currentVersion: "v1.84.0+bkt.ac8ec47",
+			manifestURL:    server.URL + "/channels.json",
+			httpClient:     server.Client(),
+			cachePath:      filepath.Join(t.TempDir(), "update-check.json"),
+		}
+
+		err := u.run(context.Background())
+		if err == nil {
+			t.Fatal("run should refuse self-update for a bkt fork build")
+		}
+		for _, want := range []string{"dotfiles nix pin", "must be upgraded there"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("error = %q, want %q", err, want)
+			}
+		}
+		if requests != 0 {
+			t.Fatalf("requests = %d, want 0", requests)
+		}
+	})
+
+	t.Run("plain version retains self-update", func(t *testing.T) {
+		requests = 0
+		stdout := new(bytes.Buffer)
+		u := &updater{
+			appName:        "no-mistakes",
+			currentVersion: "v1.84.0",
+			platform:       platformSpec{GOOS: "linux", GOARCH: "amd64"},
+			manifestURL:    server.URL + "/channels.json",
+			httpClient:     server.Client(),
+			cachePath:      filepath.Join(t.TempDir(), "update-check.json"),
+			stdout:         stdout,
+			now:            time.Now,
+		}
+
+		if err := u.run(context.Background()); err != nil {
+			t.Fatalf("run error = %v", err)
+		}
+		if requests != 1 {
+			t.Fatalf("requests = %d, want 1", requests)
+		}
+		if !strings.Contains(stdout.String(), "already up to date") {
+			t.Fatalf("stdout = %q", stdout.String())
+		}
+	})
+}
+
 func TestUpdaterRunReplacesExecutable(t *testing.T) {
 	allowInsecureDownloads = true
 	t.Cleanup(func() { allowInsecureDownloads = false })
