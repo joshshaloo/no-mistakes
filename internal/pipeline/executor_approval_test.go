@@ -135,6 +135,11 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	if err := database.StartStep(stepResult.ID); err != nil {
 		t.Fatal(err)
 	}
+	initial, err := database.GetStepResult(stepResult.ID)
+	if err != nil || initial == nil || initial.StartedAt == nil {
+		t.Fatalf("read initial step timing: step=%+v err=%v", initial, err)
+	}
+	initialStartedAt := *initial.StartedAt
 	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs a fix","action":"ask-user"}],"summary":"one issue"}`
 	if err := database.SetStepFindings(stepResult.ID, findings); err != nil {
 		t.Fatal(err)
@@ -160,23 +165,55 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	}
 
 	fake := newFakeSessionAgent()
+	fixStarted := make(chan struct{})
+	releaseFix := make(chan struct{})
 	step := &adaptiveCallStep{
 		name: types.StepReview,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			if !sctx.Fixing {
 				return nil, fmt.Errorf("recovered gate must not rerun its completed review pass")
 			}
+			close(fixStarted)
+			<-releaseFix
 			if _, err := sctx.RunAgentSession(SessionRoleFixer, agent.RunOpts{Prompt: "fix"}); err != nil {
 				return nil, err
 			}
-			if _, err := sctx.RunAgentSession(SessionRoleReviewer, agent.RunOpts{Prompt: "rereview"}); err != nil {
+			// The rereview is deliberately session-free (see ReviewStep): it
+			// must never resume the session that prescribed the fixes.
+			if _, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{Prompt: "rereview"}); err != nil {
 				return nil, err
 			}
 			return &StepOutcome{ReviewApprovedHeadSHA: "2222222222222222222222222222222222222222"}, nil
 		},
 	}
-	exec := NewExecutor(database, p, &config.Config{SessionReuse: true}, fake, []Step{step}, nil)
+	exec := NewExecutor(database, p, &config.Config{
+		SessionReuse: true,
+		AutoFix:      config.AutoFix{Review: 2},
+	}, fake, []Step{step}, nil)
 	done := make(chan error, 1)
+	released := false
+	finished := false
+	defer func() {
+		if !released {
+			close(releaseFix)
+		}
+		if finished {
+			return
+		}
+		select {
+		case err := <-done:
+			if err != nil && !t.Failed() {
+				t.Errorf("resume: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			if !t.Failed() {
+				t.Error("recovered executor timed out")
+			}
+		}
+	}()
+	for time.Now().Unix() <= initialStartedAt {
+		time.Sleep(10 * time.Millisecond)
+	}
 	go func() {
 		done <- exec.Resume(context.Background(), run, repo, t.TempDir())
 	}()
@@ -193,10 +230,43 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	select {
+	case <-fixStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("recovered fix did not start")
+	}
+	fixing, err := database.GetStepResult(stepResult.ID)
+	if err != nil || fixing == nil {
+		t.Fatalf("read recovered fixing step: step=%+v err=%v", fixing, err)
+	}
+	if fixing.Status != types.StepStatusFixing {
+		t.Errorf("recovered fixing step status = %s, want %s", fixing.Status, types.StepStatusFixing)
+	}
+	if fixing.StartedAt == nil || *fixing.StartedAt != initialStartedAt {
+		t.Errorf("recovered fixing step started_at = %v, want preserved %d", fixing.StartedAt, initialStartedAt)
+	}
+	if fixing.RoundStartedAt == nil || *fixing.RoundStartedAt <= initialStartedAt {
+		t.Errorf("recovered fixing round_started_at = %v, want after %d", fixing.RoundStartedAt, initialStartedAt)
+	}
+	if fixing.AutoFixLimit == nil || *fixing.AutoFixLimit != 2 {
+		t.Errorf("recovered fixing auto-fix limit = %v, want 2", fixing.AutoFixLimit)
+	}
+	close(releaseFix)
+	released = true
+	// The resumed rereview reports no new findings, and because the pending
+	// verification set is not recoverable across a restart it cannot positively
+	// clear the selected finding either. The append-only carry keeps it
+	// outstanding, so the gate parks again for the operator rather than the run
+	// completing on a fix that nothing verified.
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("respond to re-parked gate: %v", err)
+	}
+	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("resume: %v", err)
 		}
+		finished = true
 	case <-time.After(5 * time.Second):
 		t.Fatal("recovered executor timed out")
 	}
@@ -207,8 +277,10 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	if fake.calls[0].session == nil || fake.calls[0].session.ID != "fixer-session" {
 		t.Fatalf("fixer session = %+v, want fixer-session", fake.calls[0].session)
 	}
-	if fake.calls[1].session == nil || fake.calls[1].session.ID != "reviewer-session" {
-		t.Fatalf("reviewer session = %+v, want reviewer-session", fake.calls[1].session)
+	// The legacy persisted reviewer row must not break recovery, and the
+	// rereview must not resume it.
+	if fake.calls[1].session != nil {
+		t.Fatalf("rereview session = %+v, want session-free", fake.calls[1].session)
 	}
 	resumed, err := database.GetRun(run.ID)
 	if err != nil {
@@ -279,9 +351,10 @@ func TestExecutor_ResumePromotesDurableReviewedCandidateOnApproval(t *testing.T)
 	}
 }
 
-func TestExecutor_TracksApprovalAndUserFixTelemetry(t *testing.T) {
+func TestExecutor_CustomGateTelemetryRedactsLabel(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
+	stepName := types.CustomGateStepName(types.StepReview, "private-policy")
 
 	recorder := &telemetryRecorder{}
 	restore := telemetry.SetDefaultForTesting(recorder)
@@ -289,7 +362,7 @@ func TestExecutor_TracksApprovalAndUserFixTelemetry(t *testing.T) {
 
 	callCount := 0
 	step := &adaptiveCallStep{
-		name: types.StepReview,
+		name: stepName,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
 			if callCount == 1 {
@@ -306,9 +379,9 @@ func TestExecutor_TracksApprovalAndUserFixTelemetry(t *testing.T) {
 		done <- exec.Execute(context.Background(), run, repo, workDir)
 	}()
 
-	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	waitForStepStatus(t, database, run.ID, stepName, types.StepStatusAwaitingApproval)
 
-	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(stepName, types.ActionFix, nil); err != nil {
 		t.Fatalf("respond error: %v", err)
 	}
 
@@ -325,8 +398,8 @@ func TestExecutor_TracksApprovalAndUserFixTelemetry(t *testing.T) {
 	if approvalEvent == nil {
 		t.Fatal("expected approval telemetry event")
 	}
-	if got := approvalEvent.fields["step"]; got != string(types.StepReview) {
-		t.Fatalf("approval step = %v, want %q", got, types.StepReview)
+	if got := approvalEvent.fields["step"]; got != "gate" {
+		t.Fatalf("approval step = %v, want gate", got)
 	}
 	if got := approvalEvent.fields["selected_findings_count"]; fmt.Sprint(got) != "2" {
 		t.Fatalf("approval selected_findings_count = %v, want 2", got)
@@ -336,6 +409,9 @@ func TestExecutor_TracksApprovalAndUserFixTelemetry(t *testing.T) {
 	if fixEvent == nil {
 		t.Fatal("expected user fix telemetry event")
 	}
+	if got := fixEvent.fields["step"]; got != "gate" {
+		t.Fatalf("fix step = %v, want gate", got)
+	}
 	if got := fixEvent.fields["selected_findings_count"]; fmt.Sprint(got) != "2" {
 		t.Fatalf("fix selected_findings_count = %v, want 2", got)
 	}
@@ -343,6 +419,9 @@ func TestExecutor_TracksApprovalAndUserFixTelemetry(t *testing.T) {
 	stepEvent := recorder.find("step", "status", string(types.StepStatusAwaitingApproval))
 	if stepEvent == nil {
 		t.Fatal("expected awaiting approval step telemetry event")
+	}
+	if got := stepEvent.fields["step"]; got != "gate" {
+		t.Fatalf("step telemetry step = %v, want gate", got)
 	}
 	if got := stepEvent.fields["findings_count"]; fmt.Sprint(got) != "2" {
 		t.Fatalf("step findings_count = %v, want 2", got)
@@ -368,10 +447,10 @@ func TestExecutor_TracksAutoFixTelemetry(t *testing.T) {
 			if callCount == 1 {
 				return &StepOutcome{
 					AutoFixable: true,
-					Findings:    `{"findings":[{"severity":"error","description":"fix me","action":"auto-fix"}],"summary":"1 issue"}`,
+					Findings:    `{"findings":[{"severity":"error","file":"main.go","description":"fix me","action":"auto-fix"}],"summary":"1 issue"}`,
 				}, nil
 			}
-			return &StepOutcome{ExitCode: 0}, nil
+			return &StepOutcome{ExitCode: 0, ReviewedPaths: []string{"main.go"}, ReviewablePaths: []string{"main.go"}}, nil
 		},
 	}
 

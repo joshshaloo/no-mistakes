@@ -80,7 +80,7 @@ func (a *perfRecordingAgent) record(ctx context.Context, opts agent.RunOpts, age
 		Round:       a.round(),
 		Purpose:     purpose,
 		Agent:       agentName,
-		SessionMode: invocationSessionMode(opts),
+		SessionMode: invocationSessionMode(opts, result, runErr),
 		SessionKey:  sessionKey,
 		StartedAt:   startedAt.Unix(),
 		CompletedAt: completedAt.Unix(),
@@ -125,12 +125,14 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 		provider := result.ModelProvider
 		inv.ModelProvider = &provider
 	}
-	inv.InputTokens = result.Usage.InputTokens
-	inv.OutputTokens = result.Usage.OutputTokens
-	inv.CacheReadTokens = result.Usage.CacheReadTokens
-
 	if result.UsageReported {
-		fresh := agent.FreshInputTokens(result.Usage.InputTokens, result.Usage.CacheReadTokens)
+		in := result.Usage.InputTokens
+		out := result.Usage.OutputTokens
+		cache := result.Usage.CacheReadTokens
+		inv.InputTokens = &in
+		inv.OutputTokens = &out
+		inv.CacheReadTokens = &cache
+		fresh := agent.FreshInputTokens(in, cache)
 		inv.FreshInputTokens = &fresh
 	}
 
@@ -152,14 +154,13 @@ func (a *perfRecordingAgent) recordResult(inv *db.AgentInvocation, sessionKey st
 		inv.DeltaCacheReadTokens = &deltaCache
 	}
 
+	if result.UsageReported && result.Usage.ReasoningReported {
+		reasoning := result.Usage.ReasoningTokens
+		inv.ReasoningTokens = &reasoning
+	}
+
 	if result.Metrics != nil {
 		m := result.Metrics
-		// Reasoning tokens are reported only by adapters that also report
-		// activity metrics (codex); a real zero there is meaningful.
-		if result.UsageReported {
-			reasoning := result.Usage.ReasoningTokens
-			inv.ReasoningTokens = &reasoning
-		}
 		roundtrips := m.ModelRoundtrips
 		inv.ModelRoundtrips = &roundtrips
 		toolCalls := m.ToolCalls
@@ -207,13 +208,24 @@ func countOutputFindings(output json.RawMessage) (int, bool) {
 	return len(items), true
 }
 
-func invocationSessionMode(opts agent.RunOpts) string {
+func invocationSessionMode(opts agent.RunOpts, result *agent.Result, runErr error) string {
 	switch {
 	case opts.SessionFallback:
 		return db.InvocationModeFallback
 	case opts.Session == nil:
 		return db.InvocationModeCold
 	case opts.Session.ID != "":
+		// A session was requested but the adapter did not report resuming it
+		// (e.g. agy silently replaced a stale conversation with a fresh one).
+		// Record as fallback so the stale-session path is not mistaken for a
+		// successful resume. That absence is only evidence when the turn
+		// succeeded, because most adapters set Resumed after finalizing and a
+		// failed turn never gets there - unless the adapter positively named a
+		// different session, which is evidence whether or not the turn failed.
+		if result != nil && !result.Resumed &&
+			(runErr == nil || (result.SessionID != "" && result.SessionID != opts.Session.ID)) {
+			return db.InvocationModeFallback
+		}
 		return db.InvocationModeResumed
 	default:
 		return db.InvocationModeStarted

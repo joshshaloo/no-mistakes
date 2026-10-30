@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
@@ -28,7 +29,6 @@ const (
 )
 
 var allowInsecureDownloads bool
-var githubAPIBaseURL = "https://api.github.com"
 var currentGOOS = runtime.GOOS
 var daemonIsRunning = daemon.IsRunning
 var daemonExecutablePath = runningDaemonExecutablePath
@@ -43,10 +43,9 @@ type platformSpec struct {
 
 type updater struct {
 	appName            string
-	repo               string
 	currentVersion     string
 	platform           platformSpec
-	apiBaseURL         string
+	manifestURL        string
 	httpClient         *http.Client
 	cachePath          string
 	executablePath     string
@@ -124,10 +123,9 @@ func defaultUpdater(stdout, stderr io.Writer) (*updater, error) {
 	}
 	return &updater{
 		appName:         appName,
-		repo:            repoName,
 		currentVersion:  buildinfo.CurrentVersion(),
 		platform:        platformSpec{GOOS: runtime.GOOS, GOARCH: runtime.GOARCH},
-		apiBaseURL:      githubAPIBaseURL,
+		manifestURL:     defaultManifestURL(repoName),
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
 		cachePath:       p.UpdateCheckFile(),
 		executablePath:  execPath,
@@ -193,6 +191,9 @@ func (u *updater) cachedLatestVersion() string {
 }
 
 func (u *updater) run(ctx context.Context) error {
+	if isBKTBuildVersion(u.currentVersion) {
+		return fmt.Errorf("self-update refused for bkt fork build %s: this fork is installed through the dotfiles nix pin and must be upgraded there", u.currentVersion)
+	}
 	if isDevVersion(u.currentVersion) {
 		fmt.Fprintf(u.stdoutWriter(), "self-update unavailable for development builds (%s)\n", u.currentVersion)
 		return nil
@@ -252,6 +253,19 @@ func (u *updater) run(ctx context.Context) error {
 	}
 	fmt.Fprintf(u.stdoutWriter(), "updated %s from %s to %s\n", u.appName, u.currentVersion, plan.LatestVersion)
 	return nil
+}
+
+func isBKTBuildVersion(version string) bool {
+	_, metadata, ok := strings.Cut(strings.TrimSpace(version), "+")
+	if !ok {
+		return false
+	}
+	for _, identifier := range strings.Split(metadata, ".") {
+		if identifier == "bkt" {
+			return true
+		}
+	}
+	return false
 }
 
 func (u *updater) stdoutWriter() io.Writer {

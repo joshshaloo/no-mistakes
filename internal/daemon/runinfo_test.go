@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -37,6 +38,43 @@ func TestRunToInfoIncludesImmutableSubmittedHead(t *testing.T) {
 	}
 	if info.SubmittedHeadSHA == nil || *info.SubmittedHeadSHA != "submitted-head" {
 		t.Fatalf("submitted head = %v, want submitted-head", info.SubmittedHeadSHA)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const reason = "provider unavailable"
+	if err := d.CompleteSkippedStep(step.ID, 0, 10, "ci.log", reason); err != nil {
+		t.Fatal(err)
+	}
+	results, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info = runToInfo(d, run, results)
+	if len(info.Steps) != 1 || info.Steps[0].SkipReason != reason {
+		t.Fatalf("IPC lost automatic skip cause: %+v", info.Steps)
+	}
+}
+
+func TestRunToInfoKeepsCIOverrideReasonCISpecific(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	run := &db.Run{ID: "run-1", Status: types.RunCompleted}
+	testReason := "configured test command failed"
+	ciReason := "live checks still failing: required-check"
+	steps := []*db.StepResult{
+		{ID: "test", RunID: run.ID, StepName: types.StepTest, OverrideReason: &testReason},
+		{ID: "ci", RunID: run.ID, StepName: types.StepCI, OverrideReason: &ciReason},
+	}
+
+	info := runToInfo(d, run, steps)
+	if info.CIOverrideReason != ciReason {
+		t.Fatalf("CIOverrideReason = %q, want %q", info.CIOverrideReason, ciReason)
 	}
 }
 
@@ -72,6 +110,39 @@ func TestStepToInfoIncludesFixSummaries(t *testing.T) {
 	info := stepToInfo(d, step)
 	if len(info.FixSummaries) != 1 || info.FixSummaries[0] != sum {
 		t.Errorf("fix summaries = %v, want [%q]", info.FixSummaries, sum)
+	}
+}
+
+func TestStepToInfoLabelsCombinedHousekeepingScope(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer d.Close()
+
+	repo, err := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	if err != nil {
+		t.Fatalf("insert repo: %v", err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "abc", "def")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepDocument)
+	if err != nil {
+		t.Fatalf("insert step: %v", err)
+	}
+	if _, err := d.InsertAgentInvocation(db.AgentInvocation{
+		RunID: run.ID, StepName: string(types.StepDocument), Round: 1,
+		Purpose: "housekeeping", Agent: "codex", SessionMode: db.InvocationModeCold,
+		StartedAt: 1, CompletedAt: 2, DurationMS: 1000, ExitStatus: "ok",
+	}); err != nil {
+		t.Fatalf("insert invocation: %v", err)
+	}
+
+	info := stepToInfo(d, step)
+	if info.WorkScope != ipc.WorkScopeDocumentLintHousekeeping {
+		t.Fatalf("work scope = %q, want combined housekeeping attribution", info.WorkScope)
 	}
 }
 

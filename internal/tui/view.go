@@ -47,7 +47,15 @@ func (m Model) View() string {
 		raw, ok := m.stepDiffs[step.StepName]
 		hasDiff = ok && raw != ""
 	}
-	actionBar := renderActionBar(m.steps, showSelectionActions, allowFix, m.showDiff, selectedCount, totalCount, m.confirmAbort, hasDiff)
+	stepAwaiting := awaitingStep(m.steps)
+	approvalReady := m.approvalReady(stepAwaiting)
+	retryAvailable := m.reviewRetryAvailable()
+	actionBar := renderActionBar(m.steps, showSelectionActions, allowFix, m.showDiff, selectedCount, totalCount, m.confirmAbort, hasDiff, approvalReady, retryAvailable)
+	if stepAwaiting != nil && m.stepDiffTruncated[stepAwaiting.StepName] {
+		warning := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow)).
+			Render("⚠ Diff truncated at 512 KiB. Approval applies to the full diff.")
+		actionBar = warning + "\n" + actionBar
+	}
 
 	footer := renderFooter(m.done, m.showHelp, m.confirmAbort, m.yoloMode, m.run, m.latestVersion, m.width)
 	contentBudget := -1
@@ -95,8 +103,12 @@ func (m Model) View() string {
 		return true
 	}
 
-	if m.err != nil {
-		appendExtraSection(renderErrorBox(m.err, rightWidth))
+	visibleErr := m.err
+	if reviewErr := m.reviewRetryError(); reviewErr != nil {
+		visibleErr = reviewErr
+	}
+	if visibleErr != nil {
+		appendExtraSection(renderErrorBox(visibleErr, rightWidth))
 	}
 	if m.syncConfirm && m.branchSync != nil {
 		extraSections = append(extraSections, renderSyncConfirmation(*m.branchSync, rightWidth))
@@ -362,13 +374,11 @@ func renderErrorBox(err error, width int) string {
 	}
 	contentWidth := boxWidth - 4 // 2 border + 2 padding
 	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ansiRed))
-	errLines := strings.Split(err.Error(), "\n")
 	var errContent strings.Builder
-	for i, line := range errLines {
+	for i, line := range wrapText(err.Error(), contentWidth) {
 		if i > 0 {
 			errContent.WriteString("\n")
 		}
-		line, _ = cutText(line, contentWidth)
 		errContent.WriteString(errStyle.Render(line))
 	}
 	return renderBox("Error", errContent.String(), boxWidth)

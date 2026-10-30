@@ -44,6 +44,24 @@ func TestDogfoodConfig_NoBroadLocalTestCommand(t *testing.T) {
 	}
 }
 
+// Repository CI failures must park rather than let an unscoped repair undo
+// reviewed release metadata. Explicit zero must beat an operator's override.
+func TestDogfoodConfig_CIAutoRepairDisabled(t *testing.T) {
+	cfg, err := config.LoadRepo(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.AutoFix.CI == nil || *cfg.AutoFix.CI != 0 {
+		t.Fatal("dogfood auto_fix.ci must be explicitly zero")
+	}
+	globalLimit := 3
+	effective := config.EffectiveRepoConfig(cfg, &config.RepoConfig{}, false)
+	merged := config.Merge(&config.GlobalConfig{AutoFix: config.AutoFixRaw{CI: &globalLimit}}, effective)
+	if merged.AutoFix.CI != 0 {
+		t.Fatalf("effective CI repair limit = %d, want 0", merged.AutoFix.CI)
+	}
+}
+
 // commands.test contract ownership lives in repo-config.md: targeted local
 // validation, not CI-parity complete-suite configuration, and no brittle
 // shell-heuristics claiming to detect "broad" commands.

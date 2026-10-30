@@ -358,7 +358,7 @@ func probeNodeVersion(sctx *pipeline.StepContext, nodePath string) (parts []int,
 }
 
 func pathNodeVersion(sctx *pipeline.StepContext) (parts []int, nodePath string, ok bool) {
-	pathEnv := sctx.Env
+	pathEnv := stepEnvironment(sctx)
 	if _, hasCustomPath := envValue(pathEnv, "PATH"); !hasCustomPath {
 		pathEnv = []string{"PATH=" + os.Getenv("PATH")}
 	}
@@ -422,7 +422,7 @@ func nodeVersionOverride(sctx *pipeline.StepContext) (env []string, note string,
 
 func prependNodeBinToPath(sctx *pipeline.StepContext, binDir string) []string {
 	currentPath := os.Getenv("PATH")
-	if stepPath, ok := envValue(sctx.Env, "PATH"); ok {
+	if stepPath, ok := envValue(stepEnvironment(sctx), "PATH"); ok {
 		currentPath = stepPath
 	}
 	newPath := binDir

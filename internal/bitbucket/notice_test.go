@@ -20,8 +20,8 @@ type noticeAPI struct {
 	statuses []CommitStatus
 }
 
-func (a *noticeAPI) ListPRStatuses(context.Context, RepoRef, int) ([]CommitStatus, error) {
-	return a.statuses, nil
+func (a *noticeAPI) ListPRStatuses(context.Context, RepoRef, int) (*PRStatuses, error) {
+	return &PRStatuses{Statuses: a.statuses}, nil
 }
 
 func (a *noticeAPI) AddPRComment(_ context.Context, _ RepoRef, id int, body string) error {

@@ -124,6 +124,7 @@ func TestTerminalTitle_RunningStep(t *testing.T) {
 func TestTerminalTitle_CIChecksPassed(t *testing.T) {
 	run := testRunWithCI()
 	run.Steps[5].Status = types.StepStatusRunning
+	run.CIReady = true
 	m := NewModel("/tmp/sock", nil, run)
 	m.steps = run.Steps
 	m.logs = []string{
@@ -210,6 +211,46 @@ func TestTerminalTitle_Cancelled(t *testing.T) {
 	title := m.terminalTitle()
 	if title != "✗ Cancelled - feature/foo" {
 		t.Errorf("expected '✗ Cancelled - feature/foo', got %q", title)
+	}
+}
+
+func TestTerminalTitle_CIMonitorInterrupted(t *testing.T) {
+	run := testRun()
+	run.Status = types.RunCIMonitorInterrupted
+	m := NewModel("/tmp/sock", nil, run)
+	title := m.terminalTitle()
+	if title != "CI monitor interrupted - feature/foo" {
+		t.Errorf("expected 'CI monitor interrupted - feature/foo', got %q", title)
+	}
+}
+
+func TestNewModel_DoneRoutesThroughTerminal(t *testing.T) {
+	// NewModel must derive the done field from RunStatus.Terminal() rather than
+	// a hand-maintained status list, so a newly added terminal status can never
+	// leave the TUI spinning forever on a finished run. Issue #361 added
+	// RunCIMonitorInterrupted as the fourth terminal status; this pins every
+	// status to the shared classifier so the two can never drift apart.
+	cases := []struct {
+		status types.RunStatus
+		want   bool
+	}{
+		{types.RunPending, false},
+		{types.RunRunning, false},
+		{types.RunCompleted, true},
+		{types.RunFailed, true},
+		{types.RunCancelled, true},
+		{types.RunCIMonitorInterrupted, true},
+	}
+	for _, tc := range cases {
+		run := testRun()
+		run.Status = tc.status
+		m := NewModel("/tmp/sock", nil, run)
+		if m.done != tc.want {
+			t.Errorf("NewModel done for status %q = %v, want %v", tc.status, m.done, tc.want)
+		}
+		if m.done != tc.status.Terminal() {
+			t.Errorf("NewModel done for status %q = %v must equal RunStatus.Terminal() = %v", tc.status, m.done, tc.status.Terminal())
+		}
 	}
 }
 

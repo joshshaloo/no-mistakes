@@ -77,6 +77,8 @@ Step status icons:
 | `✗` | Failed |
 
 Completed steps show their duration.
+Configured repository gates appear immediately after their anchor under names such as `gate.test.mutation-budget`.
+When no lint command is configured, the Document row is labeled `Document + Lint housekeeping`; its duration is the shared documentation-and-lint agent invocation, while Lint shows only its cached-result handoff duration.
 Steps with fixed findings, and steps currently fixing reported findings, show a right-aligned count such as `2/3 fixed` or `0/3 fixed`.
 The first number counts completed fixes, not findings selected for an in-progress fix.
 Connectors (`│`) between steps are hidden when the terminal height is under 30 lines.
@@ -117,6 +119,8 @@ After a fix cycle, press `d` to toggle the diff view:
 - Finding context line showing which finding you're viewing
 - Scroll position in the box title: `Diff (45/312)`
 
+The TUI loads this working-tree diff on demand when the fix-review gate opens. If loading either the authoritative run state or the diff fails, approval actions stay disabled and the action bar offers `r retry`. Diff previews are capped at 512 KiB; when a preview is truncated, the TUI shows a warning because approval still applies to the complete working-tree diff.
+
 ### Log tail
 
 During running steps, shows streaming agent output. Lines starting with `PASS` are green, `FAIL` are red, everything else is dim.
@@ -128,9 +132,9 @@ On narrow terminals, the log panel expands to fill the remaining vertical space 
 While the CI step is active, the TUI shows a dedicated CI panel instead of the generic findings view.
 It shows the PR label, the latest CI activity, and a log tail.
 When a real CI auto-fix attempt starts, the panel increments `CI auto-fixes: N`.
-Once checks are green and known mergeability is clear, the panel shows `✓ Checks passed` with `still monitoring until merged or closed`, and the terminal title switches to `Checks passed`.
+Once the CI monitor reports readiness and known mergeability is clear, the panel shows `✓ Checks passed` with `still monitoring until merged or closed`, and the terminal title switches to `Checks passed`. Readiness includes the trusted [`no_ci: true` declaration](/no-mistakes/reference/repo-config/#no_ci) when no checks are registered; an empty forge response alone is not ready.
 The review view separately replaces an invalidated rating with `STALE`; green checks do not renew it or make the previous rating merge authority. See [Risk assessment freshness](/no-mistakes/reference/pipeline-steps/#risk-assessment-freshness).
-The checks-passed text means the CI monitor is still active; it can still pause later if the configured idle timeout elapses with no base-branch movement.
+That text means the CI monitor is still active; it can still pause later if the configured idle timeout elapses with no base-branch movement.
 That ready signal clears if checks start running again, new failures appear, provider state becomes uncertain, or the PR is merged or closed.
 The ready signal is persisted, so a fresh attach shows `Checks passed` without depending on delivery of an earlier log line.
 
@@ -142,8 +146,7 @@ When a clean strict-behind relation is eligible, or a diverged relation may be e
 Pressing `u` explicitly refreshes the configured upstream or fork target, then opens a confirmation with both full SHAs, the exact target ref, and the clean-worktree proof.
 Confirm with `u` or Enter, or cancel with Escape.
 The apply path rechecks every mutable assumption and can only perform the same exact strict fast-forward or anchored equivalent-diverged advance as `no-mistakes sync`; blocked states never trigger destructive Git recovery.
-When the owning run ended without publishing its pipeline commits and its preserved head is unambiguous, the same box offers `u recover custody` instead: `u` opens a confirmation naming the terminal status, the local head, and the preserved head, and applying routes through the guarded recovery documented in [`no-mistakes axi sync`](/no-mistakes/reference/cli/#no-mistakes-axi-sync).
-When preservation evidence names more than one head, or the gate's preservation refs cannot be read, the box explains the blocked state and offers no key, because no head may be chosen for you; follow [Ambiguous preserved heads](/no-mistakes/reference/cli/#ambiguous-preserved-heads) from a shell instead.
+When the owning run ended without publishing its pipeline commits, the same box offers `u recover custody` instead: `u` opens a confirmation naming the terminal status, the local head, and the preserved head, and applying routes through the guarded recovery documented in [`no-mistakes axi sync`](/no-mistakes/reference/cli/#no-mistakes-axi-sync). When the structured proof is a bound archive for divergent later work, the confirmation also names the archive and required head, and `u` uses the keep-local recovery so the archived head is never selected. If the preserved commit is missing from both repositories, recovery remains blocked until an exact reachable archive is restored; neither the TUI nor AXI can discard unarchivable work.
 
 ### Footer
 
@@ -192,7 +195,7 @@ When the instruction editor is open, press `Ctrl+s` or `Ctrl+enter` to save, or 
 | `esc` | Exit diff view back to findings |
 | `?` | Toggle help overlay |
 | `y` | Toggle yolo mode, which auto-resolves paused steps |
-| `r` | Start a rerun after a failed or cancelled run |
+| `r` | Retry a failed fix-review state or diff load; otherwise start a rerun after a failed or cancelled run |
 | `u` | Refresh and confirm local branch synchronization, or confirm custody recovery, when offered |
 | `q` | Detach from TUI (or quit if run is done) |
 
@@ -215,6 +218,8 @@ Press `e` to add or edit extra guidance for the current finding. Press `+` to ad
 Press `y` to toggle yolo mode when you want paused approval gates to resolve automatically.
 Yolo fixes gates with `auto-fix` and `ask-user` findings by selecting every finding, then approves the resulting fix-review gate.
 It approves gates with no findings or only `action: no-op` findings as-is, and fixes each step at most once so unresolved findings do not loop forever.
+The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) are an exception to this automatic handling.
+So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approval is refused there, so yolo stops at it and leaves the choice between fix and abort to you (see [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout)).
 
 ## Outcome banner
 

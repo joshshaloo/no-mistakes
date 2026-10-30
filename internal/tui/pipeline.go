@@ -72,6 +72,8 @@ func runStatusStyled(status types.RunStatus) string {
 		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiGreen))
 	case types.RunFailed, types.RunCancelled:
 		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiRed))
+	case types.RunCIMonitorInterrupted:
+		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
 	default:
 		style = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiBrightBlack))
 	}
@@ -149,6 +151,9 @@ func renderPipelineView(run *ipc.RunInfo, steps []ipc.StepResultInfo, width int,
 		icon := stepStatusIndicator(step.Status, spinnerFrame)
 		style := stepStatusStyle(step.Status)
 		label := stepLabel(step.StepName)
+		if step.WorkScope == ipc.WorkScopeDocumentLintHousekeeping {
+			label = "Document + Lint housekeeping"
+		}
 
 		line := style.Render(icon) + " " + label
 
@@ -208,9 +213,13 @@ func appendRightLabel(line, label string, width int) string {
 // Per DESIGN.md: "Sits below the pipeline box, above findings/diff"
 // showDiff controls whether the 'd' key label says "findings" (to toggle back) or "diff".
 // Selection actions are hidden in diff mode since they don't apply.
-func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool) string {
+func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool, approvalReady bool, retryAvailable bool) string {
 	step := awaitingStep(steps)
 	if step == nil {
+		if retryAvailable {
+			promptStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
+			return promptStyle.Render("Review state unavailable:") + "\n" + renderApprovalActions(false, false, false, 0, 0, confirmAbort, false, false, true)
+		}
 		return ""
 	}
 
@@ -224,14 +233,27 @@ func renderActionBar(steps []ipc.StepResultInfo, showSelectionActions bool, allo
 	b.WriteString("\n")
 	// Hide selection actions in diff mode since toggle/A/N keys don't work there.
 	effectiveSelection := showSelectionActions && !showDiff
-	b.WriteString(renderApprovalActions(effectiveSelection, allowFix, showDiff, selectedCount, totalCount, confirmAbort, hasDiff))
+	b.WriteString(renderApprovalActions(effectiveSelection, allowFix, showDiff, selectedCount, totalCount, confirmAbort, hasDiff, approvalReady, retryAvailable))
 	return b.String()
 }
 
-func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool) string {
+func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bool, selectedCount int, totalCount int, confirmAbort bool, hasDiff bool, approvalReady bool, retryAvailable bool) string {
 	boldKey := lipgloss.NewStyle().Bold(true)
 	renderAction := func(key, label string) string {
 		return boldKey.Render(key) + " " + label
+	}
+
+	abortLabel := "abort"
+	if confirmAbort {
+		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ansiRed))
+		abortLabel = warnStyle.Render("x again to abort")
+	}
+	if !approvalReady {
+		status := lipgloss.NewStyle().Foreground(lipgloss.Color(ansiBrightBlack)).Render("loading fix diff...")
+		if retryAvailable {
+			status = renderAction("r", "retry")
+		}
+		return " " + strings.Join([]string{status, renderAction("x", abortLabel)}, "  ")
 	}
 
 	primary := []string{renderAction("a", "approve")}
@@ -241,11 +263,6 @@ func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bo
 			fixLabel = fmt.Sprintf("fix (%d/%d)", selectedCount, totalCount)
 		}
 		primary = append(primary, renderAction("f", fixLabel))
-	}
-	abortLabel := "abort"
-	if confirmAbort {
-		warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(ansiRed))
-		abortLabel = warnStyle.Render("x again to abort")
 	}
 	primary = append(primary, renderAction("s", "skip"), renderAction("x", abortLabel))
 	if hasDiff {
@@ -271,6 +288,18 @@ func renderApprovalActions(showSelectionActions bool, allowFix bool, showDiff bo
 	return result
 }
 
+// singleLineReason joins the non-blank lines of durable multiline reasons so
+// the outcome banner stays on one line.
+func singleLineReason(reason string) string {
+	var parts []string
+	for _, line := range strings.Split(reason, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			parts = append(parts, line)
+		}
+	}
+	return strings.Join(parts, "; ")
+}
+
 // renderOutcomeBanner returns a styled one-line banner when the run is done.
 // Empty string when the run is still in progress.
 func renderOutcomeBanner(run *ipc.RunInfo, steps []ipc.StepResultInfo) string {
@@ -293,6 +322,11 @@ func renderOutcomeBanner(run *ipc.RunInfo, steps []ipc.StepResultInfo) string {
 
 	switch run.Status {
 	case types.RunCompleted:
+		// Keep Test exceptions and CI overrides visible together.
+		if reason := singleLineReason(run.TestOverrideReason + "\n" + run.CIOverrideReason); reason != "" {
+			style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
+			return style.Render("⚠ Pipeline passed with override: "+reason) + elapsed
+		}
 		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiGreen))
 		return style.Render("✓ Pipeline passed") + elapsed
 	case types.RunFailed:
@@ -312,6 +346,9 @@ func renderOutcomeBanner(run *ipc.RunInfo, steps []ipc.StepResultInfo) string {
 	case types.RunCancelled:
 		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiRed))
 		return style.Render("✗ Pipeline cancelled") + elapsed
+	case types.RunCIMonitorInterrupted:
+		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
+		return style.Render("CI monitor interrupted") + elapsed
 	default:
 		return ""
 	}

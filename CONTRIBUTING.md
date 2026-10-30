@@ -5,18 +5,20 @@ Thanks for wanting to contribute. One rule up front:
 **All pull requests to this repository must be raised through `no-mistakes`.**
 
 This repo _is_ no-mistakes. Contributions should be done using the tool itself, which reduces the maintainer's burden of reviewing and merging contributions.
-The `Require no-mistakes` GitHub Actions workflow runs on every PR and fails if the body is missing the deterministic signature that no-mistakes writes. PRs without it will not be reviewed or merged.
+The `Require no-mistakes` GitHub Actions workflow runs on every PR and fails if the body is missing the deterministic signature and structured pipeline step attestation that no-mistakes writes. PRs without them will not be reviewed or merged.
+If you revise the PR description after no-mistakes creates it, preserve the generated `## Pipeline` section. Replacing the whole body removes the signature or attestation and makes the required check fail until no-mistakes writes the section again.
 
 Every `opened` or `edited` event gets an independent run, including first-time-fork runs that become actionable through GitHub's normal approval process. The integration contract for consumers such as Wheelhouse is:
 
 - The stable check name is `PR must be raised via no-mistakes`.
+- The reusable check implementation is the shared composite action in [`.github/actions/require-no-mistakes`](.github/actions/require-no-mistakes/README.md). Consumers pin it to a release tag or commit SHA rather than copying the enforcement shell. This repository uses the same action through a thin workflow caller.
 - The workflow run's `display_title` identifies the PR number, event action, `run_number`, and immutable `run_id`. For a PR, increasing `run_number` orders distinct events; a re-run retains that event identity and increments `run_attempt`.
-- The run's `head_sha` binds the evidence to the reviewed commit. After the latest `opened` or `edited` run reaches `status: completed`, `conclusion: success` means that event's body contained the signature and `conclusion: failure` means it did not. `action_required` or `cancelled` is not compliance evidence and must be handled conservatively.
+- The run's `head_sha` binds the evidence to the reviewed commit. After the latest `opened` or `edited` run reaches `status: completed`, `conclusion: success` means that event's body contained the signature and a parseable v1 pipeline attestation whose `head_sha` matches `github.event.pull_request.head.sha` and whose `review`, `test`, and `document` steps are `completed`. `conclusion: failure` means it did not. `action_required` or `cancelled` is not compliance evidence and must be handled conservatively.
 - Fork runs stay on the `pull_request` boundary with read-only contents permission, no repository secrets, and no checkout or execution of fork code. Approval permits only this body check; it does not grant write authority.
 
 ## Workflow
 
-1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent repo (`git@github.com:kunchenguid/no-mistakes.git`).
+1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent repo (`git@github.com:kunchenguid/no-mistakes.git`). If you instead cloned your fork directly (`gh repo fork --clone`, which leaves `origin` pointing at your fork and adds an `upstream` remote for the parent), `no-mistakes init` detects that layout and refuses with guidance instead of silently opening PRs against your own fork: `git remote set-url origin <parent-url>`, then pass your fork as `--fork-url` in step 3.
 2. Create a branch and make your changes.
 3. Initialize or refresh the gate with your fork as the push target: `no-mistakes init --fork-url git@github.com:<you>/no-mistakes.git`.
 4. Commit your changes.
@@ -36,9 +38,16 @@ See the [quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick
 - Go 1.25+, standard toolchain. See `AGENTS.md` for agent instructions.
 - Run `make fmt`, `make lint`, and `make test` before pushing. Run `make e2e` too when you touch agent integrations, the e2e harness, or recorded fixtures. The pipeline will run them again, but a fast local pass saves rounds.
 - Run `make skill` when you change the canonical agent skill content under `internal/skill`; `make lint` fails if any committed no-mistakes skill file has drifted.
-- Use `make e2e-record` only when an upstream agent wire format changes or you are adding a new fixture flavor. It overwrites `internal/e2e/fixtures/`, spends real API quota, and the diff should be reviewed before committing.
+- Use `make e2e-record` only when an upstream agent wire format changes or you are adding a new agent or fixture flavor. It overwrites `internal/e2e/fixtures/`, spends real API quota, and the diff should be reviewed before committing.
 - Keep `README.md` high-level. Deep reference material belongs in `docs/`.
 - Do not hand-edit `CHANGELOG.md` or `.release-please-manifest.json`. They are regenerated by release-please from your conventional commit messages, and a separate `Generated files must not be hand-edited` check will fail the PR if either is touched.
+
+### Development-only test-quality check - 2026-07-30
+
+- **Agent/model:** `codex-cli 0.145.0` using its configured default model. The JSON event stream did not report a model identifier, so none is claimed.
+- **Command:** `codex exec --ephemeral --ignore-rules --sandbox read-only --json --color never -C <temporary-synthetic-repo> -` against a temporary synthetic Git repo with read-only access and no live project input.
+- **Input:** two tiny staged diffs - a Go test that reads `app.go` and checks for a function-signature token while `Ready()` returns `false`, and a Go test that parses `policy.json` into a typed struct and asserts enabled enforcement semantics.
+- **Outcome:** it flagged the source-token test and accepted the typed JSON semantic test. This is qualitative policy evidence only, not a live-LLM CI gate.
 
 ## Questions
 

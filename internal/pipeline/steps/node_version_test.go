@@ -172,14 +172,14 @@ func TestFindPinnedNodeInstall_ResolvesViaMiseLayout(t *testing.T) {
 	t.Setenv("FNM_DIR", filepath.Join(root, "no-fnm-here"))
 	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "no-asdf-here"))
 
-	installBin := filepath.Join(root, "installs", "node", "20.19.0", "bin")
+	installBin := testMiseNodeBin(root, "20.19.0")
 	if err := os.MkdirAll(installBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	writeExecutable(t, filepath.Join(installBin, nodeBinaryName()))
 
 	// A newer, non-matching install must not be picked over the exact match.
-	otherBin := filepath.Join(root, "installs", "node", "22.0.0", "bin")
+	otherBin := testMiseNodeBin(root, "22.0.0")
 	if err := os.MkdirAll(otherBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +301,7 @@ func TestFindPinnedNodeInstall_PicksHighestMatchingForPartialPin(t *testing.T) {
 	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "no-asdf-here"))
 
 	for _, version := range []string{"20.10.0", "20.19.0"} {
-		bin := filepath.Join(root, "installs", "node", version, "bin")
+		bin := testMiseNodeBin(root, version)
 		if err := os.MkdirAll(bin, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -312,7 +312,7 @@ func TestFindPinnedNodeInstall_PicksHighestMatchingForPartialPin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := filepath.Join(root, "installs", "node", "20.19.0", "bin")
+	want := testMiseNodeBin(root, "20.19.0")
 	if binDir != want {
 		t.Fatalf("binDir = %q, want %q", binDir, want)
 	}
@@ -389,7 +389,7 @@ func TestNodeVersionOverride_ResolvesAndPrependsBinDir(t *testing.T) {
 	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "no-asdf-here"))
 	t.Setenv("PATH", root) // ensure no unrelated "node" shadows the pinned install
 
-	installBin := filepath.Join(root, "installs", "node", "20.19.0", "bin")
+	installBin := testMiseNodeBin(root, "20.19.0")
 	if err := os.MkdirAll(installBin, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -492,7 +492,7 @@ func TestNodeVersionOverride_PartialPinUsesHighestManagedInstallAndLogsResolutio
 	t.Setenv("ASDF_DATA_DIR", filepath.Join(root, "asdf"))
 	t.Setenv("PATH", t.TempDir())
 	for _, version := range []string{"20.10.0", "20.19.0"} {
-		bin := filepath.Join(root, "installs", "node", version, "bin")
+		bin := testMiseNodeBin(root, version)
 		if err := os.MkdirAll(bin, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -503,7 +503,7 @@ func TestNodeVersionOverride_PartialPinUsesHighestManagedInstallAndLogsResolutio
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(env) != 1 || !strings.HasPrefix(env[0], "PATH="+filepath.Join(root, "installs", "node", "20.19.0", "bin")) {
+	if len(env) != 1 || !strings.HasPrefix(env[0], "PATH="+testMiseNodeBin(root, "20.19.0")) {
 		t.Fatalf("partial pin override = %v", env)
 	}
 	if !strings.Contains(note, `"20" from .nvmrc to exact v20.19.0`) {
@@ -610,6 +610,14 @@ func TestPathNodeVersion_UsesStepCancellation(t *testing.T) {
 	}
 }
 
+func testMiseNodeBin(root, version string) string {
+	versionDir := filepath.Join(root, "installs", "node", version)
+	if runtime.GOOS == "windows" {
+		return versionDir
+	}
+	return filepath.Join(versionDir, "bin")
+}
+
 func nodeVersionTestContext(workDir string) *pipeline.StepContext {
 	return &pipeline.StepContext{Ctx: context.Background(), WorkDir: workDir}
 }
@@ -628,6 +636,23 @@ func writeExecutable(t *testing.T, path string) {
 
 func writeNodeVersion(t *testing.T, path, version string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		testBinary, err := os.Executable()
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents, err := os.ReadFile(testBinary)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, contents, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path+".version", []byte(version), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
 	if err := os.WriteFile(path, []byte("#!/bin/sh\necho v"+version+"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

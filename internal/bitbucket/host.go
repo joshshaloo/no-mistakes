@@ -16,11 +16,12 @@ import (
 type Host struct {
 	client API
 	repo   RepoRef
+	draft  bool // open created PRs as drafts ("draft": true in the create body)
 }
 
-// NewHost builds a Host from a Bitbucket API transport and parsed repository reference.
-func NewHost(client API, repo RepoRef) *Host {
-	return &Host{client: client, repo: repo}
+// NewHost builds a Host from either authenticated transport. Draft defaults false.
+func NewHost(client API, repo RepoRef, draft ...bool) *Host {
+	return &Host{client: client, repo: repo, draft: len(draft) > 0 && draft[0]}
 }
 
 func (h *Host) Provider() scm.Provider { return scm.ProviderBitbucket }
@@ -50,7 +51,7 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 }
 
 func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PRContent) (*scm.PR, error) {
-	pr, err := h.client.CreatePR(ctx, h.repo, branch, base, content.Title, content.Body)
+	pr, err := h.client.CreatePR(ctx, h.repo, branch, base, content.Title, content.Body, h.draft)
 	if err != nil {
 		return nil, err
 	}
@@ -97,6 +98,9 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	if got == nil {
 		return "", nil
 	}
+	if strings.TrimSpace(pr.HeadSHA) == "" {
+		pr.HeadSHA = strings.TrimSpace(got.SourceCommitHash)
+	}
 	return normalizePRState(got.State), nil
 }
 
@@ -105,17 +109,25 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	if err != nil {
 		return nil, err
 	}
-	statuses, err := h.client.ListPRStatuses(ctx, h.repo, id)
+	result, err := h.client.ListPRStatuses(ctx, h.repo, id)
 	if err != nil {
 		return nil, err
 	}
-	statuses = LatestStatuses(statuses)
+	if expected := strings.TrimSpace(pr.HeadSHA); expected != "" {
+		if err := validateExpectedHead(expected, result.Commit, "checks"); err != nil {
+			return nil, err
+		}
+	}
+	statuses := LatestStatuses(result.Statuses)
 	checks := make([]scm.Check, 0, len(statuses))
 	for _, status := range statuses {
 		checks = append(checks, scm.Check{
-			Name:       statusName(status),
-			Bucket:     statusBucket(status.State),
-			DetailsURL: strings.TrimSpace(status.URL),
+			Name:        statusName(status),
+			ProviderID:  statusProviderID(status),
+			Bucket:      statusBucket(status.State),
+			ExecutionID: pipelineBuildNumberFromStatusURL(status.URL),
+			DetailsURL:  strings.TrimSpace(status.URL),
+			Link:        strings.TrimSpace(status.URL),
 		})
 	}
 	return checks, nil
@@ -129,21 +141,164 @@ func (h *Host) GetMergeableState(_ context.Context, _ *scm.PR) (scm.MergeableSta
 	return "", scm.ErrUnsupported
 }
 
-func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, branch string, headSHA string, failingNames []string) (string, error) {
-	if h.client == nil {
-		return "", nil
-	}
+func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) {
 	id, err := strconv.Atoi(pr.Number)
+	if err != nil {
+		return "", fmt.Errorf("invalid Bitbucket PR number %q: %w", pr.Number, err)
+	}
+	got, err := h.client.GetPR(ctx, h.repo, id)
 	if err != nil {
 		return "", err
 	}
-	fetcher, ok := h.client.(interface {
-		FetchFailedCheckLogs(context.Context, RepoRef, int, string, string, []string) (string, error)
-	})
-	if !ok {
+	if got == nil {
 		return "", nil
 	}
-	return fetcher.FetchFailedCheckLogs(ctx, h.repo, id, branch, headSHA, failingNames)
+	if strings.TrimSpace(pr.HeadSHA) == "" {
+		pr.HeadSHA = strings.TrimSpace(got.SourceCommitHash)
+	}
+	return strings.TrimSpace(got.DestinationBranch), nil
+}
+
+func (h *Host) FetchFailedCheckLogs(ctx context.Context, pr *scm.PR, branch, headSHA string, failingNames []string) (string, error) {
+	targets := make([]scm.CheckTarget, 0, len(failingNames))
+	for _, name := range failingNames {
+		targets = append(targets, scm.CheckTarget{Name: name})
+	}
+	logs, err := h.FetchFailedCheckTargetLogs(ctx, pr, branch, headSHA, targets)
+	if err != nil {
+		return "", err
+	}
+	return scm.CombineFailedCheckLogs(logs)
+}
+
+func (h *Host) FetchFailedCheckTargetLogs(ctx context.Context, pr *scm.PR, branch string, headSHA string, selected []scm.CheckTarget) ([]scm.FailedCheckLog, error) {
+	if h.client == nil {
+		return nil, errors.New("Bitbucket client is not configured")
+	}
+	if len(selected) == 0 {
+		return nil, nil
+	}
+	id, err := strconv.Atoi(pr.Number)
+	if err != nil {
+		return nil, err
+	}
+	if fetcher, ok := h.client.(interface {
+		FetchFailedCheckTargetLogs(context.Context, RepoRef, int, string, string, []scm.CheckTarget) ([]scm.FailedCheckLog, error)
+	}); ok {
+		return fetcher.FetchFailedCheckTargetLogs(ctx, h.repo, id, branch, headSHA, selected)
+	}
+	transport, ok := h.client.(pipelineAPI)
+	if !ok {
+		return nil, errors.New("Bitbucket transport does not support selected pipeline logs")
+	}
+	commitSHA := strings.TrimSpace(headSHA)
+	if commitSHA == "" {
+		return nil, errors.New("resolve selected Bitbucket checks: requested head commit is empty")
+	}
+	got, err := h.client.GetPR(ctx, h.repo, id)
+	if err != nil {
+		return nil, fmt.Errorf("resolve selected Bitbucket pull request head: %w", err)
+	}
+	if got == nil {
+		return nil, errors.New("resolve selected Bitbucket pull request head: pull request was not found")
+	}
+	if err := validateExpectedHead(commitSHA, got.SourceCommitHash, "pull request"); err != nil {
+		return nil, err
+	}
+	result, err := h.client.ListPRStatuses(ctx, h.repo, id)
+	if err != nil {
+		return nil, fmt.Errorf("resolve selected Bitbucket checks: %w", err)
+	}
+	if err := validateExpectedHead(commitSHA, result.Commit, "failed checks"); err != nil {
+		return nil, err
+	}
+	statuses := result.Statuses
+	targetBuildNumbers := make([]map[string]struct{}, len(selected))
+	for i, target := range selected {
+		resolved, err := failedPipelineBuildNumberTargets(statuses, []scm.CheckTarget{target})
+		if err == nil {
+			targetBuildNumbers[i] = resolved
+		}
+	}
+	if strings.TrimSpace(commitSHA) == "" {
+		return nil, errors.New("resolve selected Bitbucket checks: pull request head commit is empty")
+	}
+	pipelines, err := transport.ListPipelinesByCommit(ctx, h.repo, commitSHA)
+	if err != nil {
+		return nil, fmt.Errorf("list selected Bitbucket pipelines: %w", err)
+	}
+	pipelineByBuild := make(map[string]Pipeline, len(pipelines))
+	for _, pipelineRun := range pipelines {
+		if pipelineRun.BuildNumber > 0 {
+			pipelineByBuild[strconv.Itoa(pipelineRun.BuildNumber)] = pipelineRun
+		}
+	}
+	cache := map[string]scm.FailedCheckLog{}
+	results := make([]scm.FailedCheckLog, 0, len(selected))
+	for i, target := range selected {
+		result := scm.FailedCheckLog{Target: target}
+		if len(targetBuildNumbers[i]) == 0 {
+			result.Err = fmt.Errorf("selected Bitbucket check %q was not found", target.Identity())
+			results = append(results, result)
+			continue
+		}
+		var outputs []string
+		var logErrors []error
+		for buildNumber := range targetBuildNumbers[i] {
+			cached, ok := cache[buildNumber]
+			if !ok {
+				pipelineRun, found := pipelineByBuild[buildNumber]
+				if !found {
+					cached.Err = fmt.Errorf("selected Bitbucket pipeline build %s was not found for commit %s", buildNumber, commitSHA)
+				} else {
+					cached.Output, cached.Err = h.fetchPipelineLogs(ctx, transport, pipelineRun)
+				}
+				cache[buildNumber] = cached
+			}
+			if cached.Output != "" {
+				outputs = append(outputs, cached.Output)
+			}
+			if cached.Err != nil {
+				logErrors = append(logErrors, cached.Err)
+			}
+		}
+		result.Output = strings.Join(outputs, "\n\n")
+		result.Err = errors.Join(logErrors...)
+		results = append(results, result)
+	}
+	return results, nil
+}
+
+func validateExpectedHead(expected, actual, evidence string) error {
+	expected = strings.TrimSpace(expected)
+	actual = strings.TrimSpace(actual)
+	if !strings.EqualFold(expected, actual) {
+		return fmt.Errorf("%w: Bitbucket %s are for %q, want %q", scm.ErrHeadChanged, evidence, actual, expected)
+	}
+	return nil
+}
+
+func (h *Host) fetchPipelineLogs(ctx context.Context, transport pipelineAPI, pipelineRun Pipeline) (string, error) {
+	steps, err := transport.ListPipelineSteps(ctx, h.repo, pipelineRun.UUID)
+	if err != nil {
+		return "", fmt.Errorf("list Bitbucket pipeline %s steps: %w", pipelineRun.UUID, err)
+	}
+	var logs []string
+	var logErrors []error
+	for _, step := range steps {
+		if !strings.EqualFold(step.State.Result.Name, "FAILED") {
+			continue
+		}
+		logOutput, err := transport.GetStepLog(ctx, h.repo, pipelineRun.UUID, step.UUID)
+		if err != nil {
+			logErrors = append(logErrors, fmt.Errorf("fetch Bitbucket pipeline %s step %s log: %w", pipelineRun.UUID, step.UUID, err))
+			continue
+		}
+		if log := strings.TrimSpace(logOutput); log != "" {
+			logs = append(logs, log)
+		}
+	}
+	return strings.Join(logs, "\n\n"), errors.Join(logErrors...)
 }
 
 func (h *Host) toPR(pr *PullRequest) *scm.PR {
@@ -151,8 +306,10 @@ func (h *Host) toPR(pr *PullRequest) *scm.PR {
 		return nil
 	}
 	return &scm.PR{
-		Number: strconv.Itoa(pr.ID),
-		URL:    prURL(h.repo, pr.ID, pr.URL),
+		Number:     strconv.Itoa(pr.ID),
+		URL:        prURL(h.repo, pr.ID, pr.URL),
+		HeadSHA:    strings.TrimSpace(pr.SourceCommitHash),
+		BaseBranch: strings.TrimSpace(pr.DestinationBranch),
 	}
 }
 
@@ -210,6 +367,16 @@ func statusName(status CommitStatus) string {
 	return strings.TrimSpace(status.Key)
 }
 
+func statusProviderID(status CommitStatus) string {
+	if key := strings.TrimSpace(status.Key); key != "" {
+		return "bitbucket-status:" + key
+	}
+	if buildNumber := pipelineBuildNumberFromStatusURL(status.URL); buildNumber != "" {
+		return "bitbucket-pipeline-build:" + buildNumber
+	}
+	return ""
+}
+
 func statusBucket(state string) scm.CheckBucket {
 	switch strings.ToUpper(strings.TrimSpace(state)) {
 	case "SUCCESSFUL", "SUCCESS":
@@ -225,16 +392,7 @@ func statusBucket(state string) scm.CheckBucket {
 	}
 }
 
-func normalizePipelineUUID(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	trimmed = strings.Trim(trimmed, "{}")
-	if trimmed == "" {
-		return ""
-	}
-	return strings.ToLower(trimmed)
-}
-
-func pipelineUUIDFromStatusURL(raw string) string {
+func pipelineBuildNumberFromStatusURL(raw string) string {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return ""
@@ -245,40 +403,55 @@ func pipelineUUIDFromStatusURL(raw string) string {
 		if idx < 0 {
 			continue
 		}
-		uuid := fragment[idx+len("/results/"):]
-		uuid = strings.TrimSpace(strings.SplitN(uuid, "?", 2)[0])
-		uuid = strings.TrimSpace(strings.SplitN(uuid, "/", 2)[0])
-		return normalizePipelineUUID(uuid)
+		buildNumber := fragment[idx+len("/results/"):]
+		buildNumber = strings.TrimSpace(strings.SplitN(buildNumber, "?", 2)[0])
+		buildNumber = strings.TrimSpace(strings.SplitN(buildNumber, "/", 2)[0])
+		buildNumber = strings.Trim(buildNumber, "{}")
+		if number, err := strconv.Atoi(buildNumber); err == nil && number > 0 {
+			return strconv.Itoa(number)
+		}
+		return ""
 	}
 	return ""
 }
 
-func failedPipelineUUIDs(statuses []CommitStatus, failingNames []string) map[string]struct{} {
-	if len(failingNames) == 0 {
-		return nil
-	}
-	failing := make(map[string]struct{}, len(failingNames))
-	for _, name := range failingNames {
-		trimmed := strings.TrimSpace(name)
-		if trimmed != "" {
-			failing[trimmed] = struct{}{}
+func failedPipelineBuildNumberTargets(statuses []CommitStatus, selected []scm.CheckTarget) (map[string]struct{}, error) {
+	latest := LatestStatuses(statuses)
+	targets := make(map[string]struct{}, len(selected))
+	var resolveErrors []error
+	for _, target := range selected {
+		matched := false
+		for _, status := range latest {
+			if statusBucket(status.State) != scm.CheckBucketFail {
+				continue
+			}
+			if target.ProviderID != "" {
+				if statusProviderID(status) != target.ProviderID {
+					continue
+				}
+			} else if statusName(status) != strings.TrimSpace(target.Name) {
+				continue
+			}
+			matched = true
+			if buildNumber := pipelineBuildNumberFromStatusURL(status.URL); buildNumber != "" {
+				targets[buildNumber] = struct{}{}
+			} else {
+				resolveErrors = append(resolveErrors, fmt.Errorf("selected Bitbucket check %q has no pipeline identity", statusName(status)))
+			}
+		}
+		if !matched {
+			identity := target.ProviderID
+			if identity == "" {
+				identity = target.Name
+			}
+			resolveErrors = append(resolveErrors, fmt.Errorf("selected Bitbucket check %q was not found", identity))
 		}
 	}
-	if len(failing) == 0 {
-		return nil
-	}
-	targets := map[string]struct{}{}
-	for _, status := range LatestStatuses(statuses) {
-		if _, ok := failing[statusName(status)]; !ok {
-			continue
-		}
-		uuid := pipelineUUIDFromStatusURL(status.URL)
-		if uuid != "" {
-			targets[uuid] = struct{}{}
-		}
+	if err := errors.Join(resolveErrors...); err != nil {
+		return nil, err
 	}
 	if len(targets) == 0 {
-		return nil
+		return nil, errors.New("no selected Bitbucket checks resolved to pipelines")
 	}
-	return targets
+	return targets, nil
 }

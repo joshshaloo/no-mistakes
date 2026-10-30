@@ -11,6 +11,86 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+// TestModel_ApplyEvent_RunCompletedCarriesCIOverride is the consumer half of
+// the "TUI hides persisted CI overrides" P1: renderOutcomeBanner reads the
+// override reason correctly (see TestOutcomeBanner_CIOverrideShowsReason), but
+// before the fix the live run_completed event never populated m.run
+// .CIOverrideReason, so the banner showed a plain "✓ Pipeline passed" for an
+// overridden run on the event path. Drive the real event (do NOT set the field
+// on the fixture) and assert it survives to the banner.
+func TestModel_ApplyEvent_RunCompletedCarriesCIOverride(t *testing.T) {
+	run := testRun()
+	m := NewModel("/tmp/sock", nil, run)
+	reason := "live checks for https://github.com/test/repo/pull/42 not all passed: deploy (pending)"
+
+	m.applyEvent(ipc.Event{
+		Type:             ipc.EventRunCompleted,
+		RunID:            run.ID,
+		Status:           ptr(string(types.RunCompleted)),
+		CIOverrideReason: ptr(reason),
+	})
+
+	banner := stripANSI(renderOutcomeBanner(m.run, m.steps))
+	if !strings.Contains(banner, "override") || !strings.Contains(banner, reason) {
+		t.Errorf("banner did not carry the override from the run_completed event: %q", banner)
+	}
+}
+
+func TestModel_ApplyEvent_RunCompletedCarriesTestException(t *testing.T) {
+	for _, ciReason := range []string{"", "CI override remains visible"} {
+		run := testRun()
+		m := NewModel("/tmp/sock", nil, run)
+		reason := "Test exception approved: synthetic operator explanation"
+		m.applyEvent(ipc.Event{
+			Type:               ipc.EventRunCompleted,
+			RunID:              run.ID,
+			Status:             ptr(string(types.RunCompleted)),
+			TestOverrideReason: ptr(reason),
+			CIOverrideReason:   ptr(ciReason),
+		})
+		banner := stripANSI(renderOutcomeBanner(m.run, m.steps))
+		if !strings.Contains(banner, "passed with override") || !strings.Contains(banner, reason) || !strings.Contains(banner, ciReason) {
+			t.Fatalf("completion banner lost exception evidence: %q", banner)
+		}
+	}
+}
+
+func TestOutcomeBanner_MultilineTestExceptionStaysOnOneLine(t *testing.T) {
+	run := testRun()
+	run.Status = types.RunCompleted
+	run.TestOverrideReason = "configured test command failed with exit code 7\nTest exception approved: first line\nsecond line"
+	durationMS := int64(62000)
+	banner := stripANSI(renderOutcomeBanner(run, []ipc.StepResultInfo{{StepName: types.StepTest, Status: types.StepStatusCompleted, DurationMS: &durationMS}}))
+	want := "⚠ Pipeline passed with override: configured test command failed with exit code 7; Test exception approved: first line; second line  62.0s"
+	if banner != want {
+		t.Fatalf("banner = %q, want %q", banner, want)
+	}
+}
+
+func TestModel_ApplyEvent_StepCompletedCarriesCombinedWorkScope(t *testing.T) {
+	run := testRun()
+	run.Steps = append(run.Steps, ipc.StepResultInfo{StepName: types.StepDocument, Status: types.StepStatusPending})
+	m := NewModel("/tmp/sock", nil, run)
+	status := string(types.StepStatusCompleted)
+	m.applyEvent(ipc.Event{
+		Type:      ipc.EventStepCompleted,
+		RunID:     run.ID,
+		StepName:  ptr(types.StepDocument),
+		Status:    &status,
+		WorkScope: ipc.WorkScopeDocumentLintHousekeeping,
+	})
+
+	for _, step := range m.steps {
+		if step.StepName == types.StepDocument {
+			if step.WorkScope != ipc.WorkScopeDocumentLintHousekeeping {
+				t.Fatalf("work scope = %q, want combined housekeeping", step.WorkScope)
+			}
+			return
+		}
+	}
+	t.Fatal("document step not found")
+}
+
 func TestModel_ApplyEvent_LogChunk(t *testing.T) {
 	run := testRun()
 	m := NewModel("/tmp/sock", nil, run)

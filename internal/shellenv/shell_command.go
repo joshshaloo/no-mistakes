@@ -19,9 +19,17 @@ type shellOutputPipe struct {
 // RunShellCommand starts cmd with StartShellCommand, waits for it, and
 // terminates any surviving command-group descendants.
 //
-// Use this instead of cmd.Run after ConfigureShellCommand so clean exits and
-// ordinary errors get the same process-tree cleanup as context cancellation.
+// Use this instead of cmd.Run after ConfigureShellCommand or
+// ConfigureCooperativeShellCommand so clean exits and ordinary errors get the
+// same process-tree cleanup as context cancellation.
 func RunShellCommand(cmd *exec.Cmd) error {
+	// Even commands that deliberately remain in the caller's process group need
+	// a pipe backstop. After context cancellation, a helper process can inherit
+	// stdout or stderr from the direct child and otherwise keep cmd.Wait blocked
+	// forever (notably git's transport helpers on Windows).
+	if cmd.WaitDelay == 0 {
+		cmd.WaitDelay = 5 * time.Second
+	}
 	pipes, err := prepareShellOutputPipes(cmd)
 	if err != nil {
 		return err
@@ -29,11 +37,12 @@ func RunShellCommand(cmd *exec.Cmd) error {
 	if len(pipes) > 0 {
 		return runShellCommandWithOutputPipes(cmd, pipes)
 	}
+	oomBase, oomOK := OOMKillBaseline()
 	if err := StartShellCommand(cmd); err != nil {
 		return err
 	}
 	defer TerminateShellCommandGroup(cmd)
-	return cmd.Wait()
+	return AttributeOOMKill(oomBase, oomOK, cmd.Wait())
 }
 
 // OutputShellCommand is the process-tree-cleaning counterpart to cmd.Output.
@@ -106,6 +115,7 @@ func newShellOutputPipe(dst io.Writer) (shellOutputPipe, error) {
 }
 
 func runShellCommandWithOutputPipes(cmd *exec.Cmd, pipes []shellOutputPipe) error {
+	oomBase, oomOK := OOMKillBaseline()
 	if err := StartShellCommand(cmd); err != nil {
 		closeShellOutputPipes(pipes)
 		return err
@@ -125,7 +135,7 @@ func runShellCommandWithOutputPipes(cmd *exec.Cmd, pipes []shellOutputPipe) erro
 
 	waitCh := make(chan error, 1)
 	go func() {
-		err := cmd.Wait()
+		err := AttributeOOMKill(oomBase, oomOK, cmd.Wait())
 		TerminateShellCommandGroup(cmd)
 		waitCh <- err
 	}()

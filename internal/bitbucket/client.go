@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/notices"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
 const (
@@ -29,12 +30,18 @@ type RepoRef struct {
 }
 
 type PullRequest struct {
-	Title            string
-	Description      string
-	ID               int
-	URL              string
-	State            string
-	SourceCommitHash string
+	Title             string
+	Description       string
+	ID                int
+	URL               string
+	State             string
+	SourceCommitHash  string
+	DestinationBranch string
+}
+
+type PRStatuses struct {
+	Commit   string
+	Statuses []CommitStatus
 }
 
 type CommitStatus struct {
@@ -48,7 +55,8 @@ type CommitStatus struct {
 }
 
 type Pipeline struct {
-	UUID string `json:"uuid"`
+	UUID        string `json:"uuid"`
+	BuildNumber int    `json:"build_number"`
 }
 
 type PipelineStep struct {
@@ -131,19 +139,32 @@ func (c *Client) FindOpenPRBySourceBranch(ctx context.Context, repo RepoRef, bra
 	clauses = append(clauses, fmt.Sprintf(`state=%q`, "OPEN"))
 	query.Set("q", strings.Join(clauses, " AND "))
 
-	var response struct {
+	var response *struct {
 		Values []bitbucketPullRequest `json:"values"`
 	}
 	if err := c.doJSON(ctx, http.MethodGet, repoPRPath(repo), query, nil, &response); err != nil {
 		return nil, err
 	}
+	if response == nil || response.Values == nil {
+		return nil, fmt.Errorf("decode Bitbucket PR list: expected values array")
+	}
 	if len(response.Values) == 0 {
 		return nil, nil
+	}
+	for i := range response.Values {
+		candidate := &response.Values[i]
+		if candidate.ID <= 0 {
+			return nil, fmt.Errorf("decode Bitbucket PR list: entry %d missing positive id", i)
+		}
+		candidate.Links.HTML.Href = prURL(repo, candidate.ID, "")
+		if candidate.Links.HTML.Href == "" {
+			return nil, fmt.Errorf("decode Bitbucket PR list: entry %d missing configured repository identity", i)
+		}
 	}
 	return response.Values[0].toPullRequest(), nil
 }
 
-func (c *Client) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destBranch, title, body string) (*PullRequest, error) {
+func (c *Client) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destBranch, title, body string, draft bool) (*PullRequest, error) {
 	requestBody := map[string]any{
 		"title":       title,
 		"description": body,
@@ -154,6 +175,9 @@ func (c *Client) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destB
 			"branch": map[string]string{"name": destBranch},
 		},
 	}
+	if draft {
+		requestBody["draft"] = true
+	}
 	var response bitbucketPullRequest
 	if err := c.doJSON(ctx, http.MethodPost, repoPRPath(repo), nil, requestBody, &response); err != nil {
 		return nil, err
@@ -162,9 +186,9 @@ func (c *Client) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destB
 }
 
 func (c *Client) UpdatePR(ctx context.Context, repo RepoRef, prID int, title, body string) (*PullRequest, error) {
-	requestBody := map[string]any{
-		"title":       title,
-		"description": body,
+	requestBody := map[string]any{"description": body}
+	if title != "" {
+		requestBody["title"] = title
 	}
 	var response bitbucketPullRequest
 	if err := c.doJSON(ctx, http.MethodPut, fmt.Sprintf("%s/%d", repoPRPath(repo), prID), nil, requestBody, &response); err != nil {
@@ -233,7 +257,11 @@ func (c *Client) GetPR(ctx context.Context, repo RepoRef, prID int) (*PullReques
 	return response.toPullRequest(), nil
 }
 
-func (c *Client) ListPRStatuses(ctx context.Context, repo RepoRef, prID int) ([]CommitStatus, error) {
+func (c *Client) ListPRStatuses(ctx context.Context, repo RepoRef, prID int) (*PRStatuses, error) {
+	before, err := c.GetPR(ctx, repo, prID)
+	if err != nil {
+		return nil, err
+	}
 	query := url.Values{}
 	query.Set("sort", "-created_on")
 
@@ -258,7 +286,16 @@ func (c *Client) ListPRStatuses(ctx context.Context, repo RepoRef, prID int) ([]
 		}
 		next = response.Next
 	}
-	return statuses, nil
+	after, err := c.GetPR(ctx, repo, prID)
+	if err != nil {
+		return nil, err
+	}
+	beforeCommit := strings.TrimSpace(before.SourceCommitHash)
+	afterCommit := strings.TrimSpace(after.SourceCommitHash)
+	if beforeCommit == "" || !strings.EqualFold(beforeCommit, afterCommit) {
+		return nil, fmt.Errorf("%w: Bitbucket pull request moved from %q to %q while reading checks", scm.ErrHeadChanged, beforeCommit, afterCommit)
+	}
+	return &PRStatuses{Commit: afterCommit, Statuses: statuses}, nil
 }
 
 func (c *Client) ListPipelinesByCommit(ctx context.Context, repo RepoRef, commitSHA string) ([]Pipeline, error) {
@@ -347,8 +384,8 @@ func (c *Client) FetchFailedCheckLogs(ctx context.Context, repo RepoRef, prID in
 	if got, prErr := c.GetPR(ctx, repo, prID); prErr == nil && got != nil && strings.TrimSpace(got.SourceCommitHash) != "" {
 		commitSHA = strings.TrimSpace(got.SourceCommitHash)
 	}
-	if statuses, statusErr := c.ListPRStatuses(ctx, repo, prID); statusErr == nil {
-		targets = failedPipelineUUIDs(statuses, failingNames)
+	if result, statusErr := c.ListPRStatuses(ctx, repo, prID); statusErr == nil {
+		targets = failedPipelineUUIDs(result.Statuses, failingNames)
 	}
 	if commitSHA == "" {
 		return "", nil
@@ -422,6 +459,11 @@ type bitbucketPullRequest struct {
 			Hash string `json:"hash"`
 		} `json:"commit"`
 	} `json:"source"`
+	Destination struct {
+		Branch struct {
+			Name string `json:"name"`
+		} `json:"branch"`
+	} `json:"destination"`
 	Links struct {
 		HTML struct {
 			Href string `json:"href"`
@@ -431,12 +473,13 @@ type bitbucketPullRequest struct {
 
 func (pr bitbucketPullRequest) toPullRequest() *PullRequest {
 	return &PullRequest{
-		Title:            pr.Title,
-		Description:      pr.Description,
-		ID:               pr.ID,
-		URL:              strings.TrimSpace(pr.Links.HTML.Href),
-		State:            strings.TrimSpace(pr.State),
-		SourceCommitHash: strings.TrimSpace(pr.Source.Commit.Hash),
+		Title:             pr.Title,
+		Description:       pr.Description,
+		ID:                pr.ID,
+		URL:               strings.TrimSpace(pr.Links.HTML.Href),
+		State:             strings.TrimSpace(pr.State),
+		SourceCommitHash:  strings.TrimSpace(pr.Source.Commit.Hash),
+		DestinationBranch: strings.TrimSpace(pr.Destination.Branch.Name),
 	}
 }
 
@@ -535,8 +578,12 @@ func (c *Client) doJSONPathOrURLWithLimit(ctx context.Context, method, pathOrURL
 		}
 		return len(data), nil
 	}
-	if err := json.NewDecoder(resp.Body).Decode(responseBody); err != nil {
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(responseBody); err != nil {
 		return 0, fmt.Errorf("decode Bitbucket response: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return 0, fmt.Errorf("decode Bitbucket response: expected a single JSON value")
 	}
 	return 0, nil
 }

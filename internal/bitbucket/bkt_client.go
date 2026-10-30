@@ -255,6 +255,17 @@ type bktPRViewEnvelope struct {
 	PullRequest bktPullRequest `json:"pull_request"`
 }
 
+type bktPRCommentsEnvelope struct {
+	Workspace string `json:"workspace"`
+	Repo      string `json:"repo"`
+	Comments  []struct {
+		Text    string `json:"text"`
+		Content struct {
+			Raw string `json:"raw"`
+		} `json:"content"`
+	} `json:"comments"`
+}
+
 func (c *BKTClient) FindOpenPRBySourceBranch(ctx context.Context, repo RepoRef, branch, destBranch string) (*PullRequest, error) {
 	selectors, err := c.repoArgs(repo)
 	if err != nil {
@@ -286,7 +297,7 @@ func (c *BKTClient) FindOpenPRBySourceBranch(ctx context.Context, repo RepoRef, 
 	return nil, nil
 }
 
-func (c *BKTClient) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destBranch, title, body string) (*PullRequest, error) {
+func (c *BKTClient) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, destBranch, title, body string, draft bool) (*PullRequest, error) {
 	selectors, err := c.repoArgs(repo)
 	if err != nil {
 		return nil, err
@@ -300,6 +311,9 @@ func (c *BKTClient) CreatePR(ctx context.Context, repo RepoRef, sourceBranch, de
 		"--body", body,
 		"--json",
 	)
+	if draft {
+		args = append(args, "--draft")
+	}
 	var result struct {
 		ID int `json:"id"`
 	}
@@ -321,7 +335,10 @@ func (c *BKTClient) UpdatePR(ctx context.Context, repo RepoRef, prID int, title,
 	}
 	args := []string{"pr", "edit", strconv.Itoa(prID)}
 	args = append(args, selectors...)
-	args = append(args, "--title", title, "--body", body, "--json")
+	if title != "" {
+		args = append(args, "--title", title)
+	}
+	args = append(args, "--body", body, "--json")
 	var envelope bktPRViewEnvelope
 	if err := c.runJSON(ctx, "PR update", &envelope, args...); err != nil {
 		return nil, err
@@ -357,20 +374,18 @@ func (c *BKTClient) ListPRComments(ctx context.Context, repo RepoRef, prID int) 
 	args := []string{"pr", "comments", strconv.Itoa(prID)}
 	args = append(args, selectors...)
 	args = append(args, "--state", "all", "--json")
-	var comments []struct {
-		Text    string `json:"text"`
-		Content struct {
-			Raw string `json:"raw"`
-		} `json:"content"`
-	}
-	if err := c.runJSON(ctx, "PR comments", &comments, args...); err != nil {
+	var envelope bktPRCommentsEnvelope
+	if err := c.runJSON(ctx, "PR comments", &envelope, args...); err != nil {
 		return nil, err
 	}
-	if err := notices.ValidateCounts(1, len(comments)); err != nil {
+	if err := validateRepoEnvelope(repo, envelope.Workspace, envelope.Repo); err != nil {
+		return nil, err
+	}
+	if err := notices.ValidateCounts(1, len(envelope.Comments)); err != nil {
 		return nil, fmt.Errorf("read bkt PR notices: %w", err)
 	}
-	bodies := make([]string, 0, len(comments))
-	for _, comment := range comments {
+	bodies := make([]string, 0, len(envelope.Comments))
+	for _, comment := range envelope.Comments {
 		if comment.Content.Raw != "" {
 			bodies = append(bodies, comment.Content.Raw)
 		} else {
@@ -425,12 +440,13 @@ func bktPRToPullRequest(repo RepoRef, pr bktPullRequest) (*PullRequest, error) {
 		}
 	}
 	return &PullRequest{
-		Title:            pr.Title,
-		Description:      pr.Description,
-		ID:               pr.ID,
-		URL:              prURL(repo, pr.ID, rawURL),
-		State:            strings.TrimSpace(pr.State),
-		SourceCommitHash: strings.TrimSpace(pr.Source.Commit.Hash),
+		Title:             pr.Title,
+		Description:       pr.Description,
+		ID:                pr.ID,
+		URL:               prURL(repo, pr.ID, rawURL),
+		State:             strings.TrimSpace(pr.State),
+		SourceCommitHash:  strings.TrimSpace(pr.Source.Commit.Hash),
+		DestinationBranch: strings.TrimSpace(pr.Destination.Branch.Name),
 	}, nil
 }
 
@@ -442,7 +458,7 @@ type bktChecksEnvelope struct {
 	Statuses    []CommitStatus `json:"statuses"`
 }
 
-func (c *BKTClient) ListPRStatuses(ctx context.Context, repo RepoRef, prID int) ([]CommitStatus, error) {
+func (c *BKTClient) ListPRStatuses(ctx context.Context, repo RepoRef, prID int) (*PRStatuses, error) {
 	selectors, err := c.repoArgs(repo)
 	if err != nil {
 		return nil, err
@@ -460,7 +476,7 @@ func (c *BKTClient) ListPRStatuses(ctx context.Context, repo RepoRef, prID int) 
 	if envelope.PullRequest != prID {
 		return nil, fmt.Errorf("bkt PR checks returned pull request %d, want %d", envelope.PullRequest, prID)
 	}
-	return envelope.Statuses, nil
+	return &PRStatuses{Commit: strings.TrimSpace(envelope.Commit), Statuses: envelope.Statuses}, nil
 }
 
 type bktPipeline struct {
@@ -530,11 +546,11 @@ func (c *BKTClient) GetStepLog(ctx context.Context, repo RepoRef, pipelineUUID, 
 // failing PR check. It deliberately declines a branch-only pipeline-list
 // fallback because bkt 0.30.0's structured list schema omits the commit SHA.
 func (c *BKTClient) FetchFailedCheckLogs(ctx context.Context, repo RepoRef, prID int, _ string, _ string, failingNames []string) (string, error) {
-	statuses, err := c.ListPRStatuses(ctx, repo, prID)
+	result, err := c.ListPRStatuses(ctx, repo, prID)
 	if err != nil {
 		return "", err
 	}
-	targets := failedPipelineUUIDs(statuses, failingNames)
+	targets := failedPipelineUUIDs(result.Statuses, failingNames)
 	if len(targets) == 0 {
 		return "", nil
 	}

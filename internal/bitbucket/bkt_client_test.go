@@ -287,11 +287,11 @@ func TestBKTClientPRDiscoveryCreateAndUpdateUseExplicitSelectors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FindOpenPRBySourceBranch() error = %v", err)
 	}
-	if found == nil || found.ID != 42 || found.SourceCommitHash != "abc123" {
-		t.Fatalf("found PR = %#v, want #42 at abc123", found)
+	if found == nil || found.ID != 42 || found.SourceCommitHash != "abc123" || found.DestinationBranch != "main" {
+		t.Fatalf("found PR = %#v, want #42 at abc123 targeting main", found)
 	}
 
-	created, err := client.CreatePR(context.Background(), repo, "feature", "main", "feat: ship", "body")
+	created, err := client.CreatePR(context.Background(), repo, "feature", "main", "feat: ship", "body", false)
 	if err != nil || created == nil || created.ID != 42 {
 		t.Fatalf("CreatePR() = %#v, %v", created, err)
 	}
@@ -315,6 +315,35 @@ func TestBKTClientPRDiscoveryCreateAndUpdateUseExplicitSelectors(t *testing.T) {
 		if !containsSequence(createArgs, want) {
 			t.Errorf("create args %q missing %q", createArgs, want)
 		}
+	}
+}
+
+func TestBKTClientBodyOnlyUpdatePreservesTitle(t *testing.T) {
+	repo := RepoRef{Workspace: "envy-forge", RepoSlug: "app"}
+	view := `{"workspace":"envy-forge","repo":"app","pull_request":{"id":42,"title":"keep me","description":"updated body","state":"OPEN","source":{"branch":{"name":"feature"},"commit":{"hash":"abc123"},"repository":{"full_name":"envy-forge/app"}},"destination":{"branch":{"name":"main"}},"links":{"html":{"href":"https://bitbucket.org/envy-forge/app/pull-requests/42"}}}}`
+	client, fake := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
+		switch {
+		case commandIs(args, "pr", "edit"), commandIs(args, "pr", "view"):
+			return fakeBKTResult{stdout: view}
+		default:
+			t.Fatalf("unexpected bkt args: %q", args)
+			return fakeBKTResult{}
+		}
+	})
+	if err := client.Available(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := client.UpdatePR(context.Background(), repo, 42, "", "updated body")
+	if err != nil || updated == nil || updated.Title != "keep me" {
+		t.Fatalf("UpdatePR() = %#v, %v", updated, err)
+	}
+	editArgs := findCall(t, fake.snapshotCalls(), "pr", "edit")
+	if slices.Contains(editArgs, "--title") {
+		t.Fatalf("body-only update args unexpectedly replace title: %q", editArgs)
+	}
+	if !containsSequence(editArgs, []string{"--body", "updated body"}) {
+		t.Fatalf("body-only update args %q missing body", editArgs)
 	}
 }
 
@@ -346,7 +375,7 @@ func TestBKTHostReadsTerminalPRStatesAndChecks(t *testing.T) {
 			client, _ := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
 				switch {
 				case commandIs(args, "pr", "view"):
-					return fakeBKTResult{stdout: fmt.Sprintf(`{"workspace":"envy-forge","repo":"app","pull_request":{"id":42,"state":%q,"source":{"commit":{"hash":"abc123"}},"links":{"html":{"href":"https://bitbucket.org/envy-forge/app/pull-requests/42"}}}}`, tt.raw)}
+					return fakeBKTResult{stdout: fmt.Sprintf(`{"workspace":"envy-forge","repo":"app","pull_request":{"id":42,"state":%q,"source":{"commit":{"hash":"abc123"}},"destination":{"branch":{"name":"main"}},"links":{"html":{"href":"https://bitbucket.org/envy-forge/app/pull-requests/42"}}}}`, tt.raw)}
 				case commandIs(args, "pr", "checks"):
 					return fakeBKTResult{stdout: `{"workspace":"envy-forge","repo":"app","pull_request":42,"commit":"abc123","statuses":[{"name":"pass","key":"pass","state":"SUCCESSFUL"},{"name":"fail","key":"fail","state":"FAILED"},{"name":"pending","key":"pending","state":"INPROGRESS"}]}`}
 				default:
@@ -358,11 +387,7 @@ func TestBKTHostReadsTerminalPRStatesAndChecks(t *testing.T) {
 				t.Fatal(err)
 			}
 			host := NewHost(client, repo)
-			pr := &scm.PR{Number: "42", URL: "https://bitbucket.org/envy-forge/app/pull-requests/42"}
-			state, err := host.GetPRState(context.Background(), pr)
-			if err != nil || state != tt.want {
-				t.Fatalf("GetPRState() = %q, %v; want %q", state, err, tt.want)
-			}
+			pr := &scm.PR{Number: "42", URL: "https://bitbucket.org/envy-forge/app/pull-requests/42", HeadSHA: "abc123"}
 			checks, err := host.GetChecks(context.Background(), pr)
 			if err != nil {
 				t.Fatal(err)
@@ -376,7 +401,40 @@ func TestBKTHostReadsTerminalPRStatesAndChecks(t *testing.T) {
 					t.Errorf("checks[%d].Bucket = %q, want %q", i, checks[i].Bucket, want[i])
 				}
 			}
+			pr.HeadSHA = "run-head"
+			state, err := host.GetPRState(context.Background(), pr)
+			if err != nil || state != tt.want {
+				t.Fatalf("GetPRState() = %q, %v; want %q", state, err, tt.want)
+			}
+			if pr.HeadSHA != "run-head" {
+				t.Fatalf("GetPRState() changed expected head to %q", pr.HeadSHA)
+			}
+			base, err := host.GetPRBaseBranch(context.Background(), pr)
+			if err != nil || base != "main" {
+				t.Fatalf("GetPRBaseBranch() = %q, %v; want main", base, err)
+			}
+			if pr.HeadSHA != "run-head" {
+				t.Fatalf("GetPRBaseBranch() changed expected head to %q", pr.HeadSHA)
+			}
 		})
+	}
+}
+
+func TestBKTHostRejectsChecksForDifferentHead(t *testing.T) {
+	repo := RepoRef{Workspace: "envy-forge", RepoSlug: "app"}
+	client, _ := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
+		if commandIs(args, "pr", "checks") {
+			return fakeBKTResult{stdout: `{"workspace":"envy-forge","repo":"app","pull_request":42,"commit":"new-head","statuses":[{"name":"build","key":"build","state":"SUCCESSFUL"}]}`}
+		}
+		t.Fatalf("unexpected bkt args: %q", args)
+		return fakeBKTResult{}
+	})
+	if err := client.Available(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewHost(client, repo).GetChecks(context.Background(), &scm.PR{Number: "42", HeadSHA: "run-head"})
+	if !errors.Is(err, scm.ErrHeadChanged) {
+		t.Fatalf("GetChecks() error = %v, want ErrHeadChanged", err)
 	}
 }
 
@@ -562,6 +620,55 @@ func TestBKTClientSuccessfulCommandStderrCapacityIsEnforced(t *testing.T) {
 			t.Fatalf("comments = %#v, want nil after overflow", comments)
 		}
 	})
+}
+
+func TestBKTClientListPRCommentsDecodesAndValidatesEnvelope(t *testing.T) {
+	repo := RepoRef{Workspace: "envy-forge", RepoSlug: "app"}
+	t.Run("actual envelope", func(t *testing.T) {
+		client, _ := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
+			if commandIs(args, "pr", "comments") {
+				return fakeBKTResult{stdout: `{"workspace":"envy-forge","repo":"app","comments":[{"content":{"raw":"first"}},{"text":"second"}]}`}
+			}
+			t.Fatalf("unexpected bkt args: %q", args)
+			return fakeBKTResult{}
+		})
+		if err := client.Available(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		comments, err := client.ListPRComments(context.Background(), repo, 42)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(comments, []string{"first", "second"}) {
+			t.Fatalf("comments = %#v", comments)
+		}
+	})
+
+	for _, tc := range []struct {
+		name      string
+		workspace string
+		repo      string
+	}{
+		{name: "workspace", workspace: "someone-else", repo: "app"},
+		{name: "repository", workspace: "envy-forge", repo: "other"},
+	} {
+		t.Run("mismatched "+tc.name, func(t *testing.T) {
+			client, _ := newHealthyFakeBKT(t, func(args []string) fakeBKTResult {
+				if commandIs(args, "pr", "comments") {
+					return fakeBKTResult{stdout: fmt.Sprintf(`{"workspace":%q,"repo":%q,"comments":[]}`, tc.workspace, tc.repo)}
+				}
+				t.Fatalf("unexpected bkt args: %q", args)
+				return fakeBKTResult{}
+			})
+			if err := client.Available(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			_, err := client.ListPRComments(context.Background(), repo, 42)
+			if err == nil || !strings.Contains(err.Error(), "mismatched repository") {
+				t.Fatalf("error = %v, want mismatched repository", err)
+			}
+		})
+	}
 }
 
 func TestBKTClientFailedCommandStderrIsSanitizedAndBounded(t *testing.T) {

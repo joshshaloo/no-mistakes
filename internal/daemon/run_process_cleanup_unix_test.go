@@ -71,7 +71,7 @@ func TestRunCleanupKillsBackgroundChildBeforeRemovingWorktree(t *testing.T) {
 	step := &runProcessStep{pidDir: pidDir, started: make(chan string, 1), release: make(chan struct{})}
 	mgr := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
 
-	runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "")
+	runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "", "", false, "")
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}
@@ -103,14 +103,14 @@ func TestRunCleanupDoesNotKillDaemonOrSiblingRun(t *testing.T) {
 
 	fakeDaemon := startFakeDaemonProcess(t)
 
-	siblingID, err := mgr.startRun(context.Background(), repo, "sibling", head, head, "test", nil, "")
+	siblingID, err := mgr.startRun(context.Background(), repo, "sibling", head, head, "test", nil, "", "", false, "")
 	if err != nil {
 		t.Fatalf("start sibling run: %v", err)
 	}
 	waitForStartedRun(t, step.started, siblingID)
 	siblingPID := readPID(t, filepath.Join(pidDir, siblingID+".pid"))
 
-	targetID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "")
+	targetID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "", "", false, "")
 	if err != nil {
 		t.Fatalf("start target run: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestRunCleanupSparesForeignProcessInWorktree(t *testing.T) {
 	step := &runProcessStep{pidDir: pidDir, started: make(chan string, 1), release: make(chan struct{})}
 	mgr := NewRunManager(database, p, func() []pipeline.Step { return []pipeline.Step{step} })
 
-	runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "")
+	runID, err := mgr.startRun(context.Background(), repo, "target", head, head, "test", nil, "", "", false, "")
 	if err != nil {
 		t.Fatalf("start run: %v", err)
 	}

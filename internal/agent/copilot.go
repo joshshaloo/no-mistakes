@@ -14,12 +14,13 @@ import (
 )
 
 // copilotAgent spawns the GitHub Copilot CLI for each invocation. Copilot
-// runs non-interactively with `copilot -p <prompt> --output-format json`,
+// runs non-interactively with the prompt on stdin and `--output-format json`,
 // emitting JSONL events on stdout. The lifecycle is codex/pi-shaped: one
 // process per Run, no managed server.
 type copilotAgent struct {
 	bin       string
 	extraArgs []string
+	subprocessContext
 }
 
 func (a *copilotAgent) Name() string { return "copilot" }
@@ -36,17 +37,17 @@ func (a *copilotAgent) Close() error { return nil }
 
 func (a *copilotAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	prompt := buildCopilotPrompt(opts.Prompt, opts.JSONSchema)
-	args := a.buildArgs(prompt)
+	args := a.buildArgs()
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
-	cmd.Stdin = nil
-	cmd.Env = gitSafeEnv(opts.CWD)
+	cmd.Stdin = strings.NewReader(prompt)
+	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
 	shellenv.ConfigureShellCommand(cmd)
 	shellenv.SuperviseShellCommand(ctx, cmd)
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
-	started, err := startNativeAgentCommand(cmd)
+	started, err := startNativeAgentCommand(cmd, nativeAgentActivityObserver(opts, "copilot"))
 	if err != nil {
 		return nil, fmt.Errorf("copilot start: %w", err)
 	}
@@ -69,7 +70,7 @@ func (a *copilotAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 		stderrWG.Wait()
 		retErr := fmt.Errorf("copilot parse events: %w", err)
 		emitAgentExited(opts, "copilot", pid, retErr)
-		return nil, retErr
+		return resultFromUsage(usage), retErr
 	}
 
 	waitErr := started.wait()
@@ -80,21 +81,21 @@ func (a *copilotAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 		if detail != "" {
 			retErr := fmt.Errorf("copilot exited: %w: %s", waitErr, detail)
 			emitAgentExited(opts, "copilot", pid, retErr)
-			return nil, retErr
+			return resultFromUsage(usage), retErr
 		}
 		retErr := fmt.Errorf("copilot exited: %w", waitErr)
 		emitAgentExited(opts, "copilot", pid, retErr)
-		return nil, retErr
+		return resultFromUsage(usage), retErr
 	}
 	if exitCode != 0 {
 		if detail != "" {
 			retErr := fmt.Errorf("copilot reported exit code %d: %s", exitCode, detail)
 			emitAgentExited(opts, "copilot", pid, retErr)
-			return nil, retErr
+			return resultFromUsage(usage), retErr
 		}
 		retErr := fmt.Errorf("copilot reported exit code %d", exitCode)
 		emitAgentExited(opts, "copilot", pid, retErr)
-		return nil, retErr
+		return resultFromUsage(usage), retErr
 	}
 
 	res, err := finalizeCopilotResult(messages, opts.JSONSchema, usage)
@@ -144,11 +145,10 @@ func copilotErrorDetail(copilotErr, stderr string) string {
 // supplied their own permission flag, the default --allow-all-tools is not
 // added; --no-ask-user is always added so the agent never blocks waiting for
 // interactive input.
-func (a *copilotAgent) buildArgs(prompt string) []string {
-	args := make([]string, 0, len(a.extraArgs)+8)
+func (a *copilotAgent) buildArgs() []string {
+	args := make([]string, 0, len(a.extraArgs)+6)
 	args = append(args, a.extraArgs...)
 	args = append(args,
-		"-p", prompt,
 		"--output-format", "json",
 		"--no-color",
 	)

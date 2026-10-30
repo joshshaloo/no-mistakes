@@ -109,3 +109,53 @@ func TestParseIntentPushOptionsNone(t *testing.T) {
 		t.Fatalf("parseIntentPushOptions(no intent) = %q, want empty", got)
 	}
 }
+
+func TestProofAndPRBaseBranchPushOptionsRoundTrip(t *testing.T) {
+	nonce := "request-7f3"
+	generation := "generation-7"
+	nonceOpt := formatLaunchNoncePushOption(nonce)
+	generationOpt := formatValidationGenerationPushOption(generation)
+	baseBranchOpt := formatPRBaseBranchPushOption("epic/feature")
+	gotNonce, err := parseLaunchNoncePushOptions([]string{nonceOpt, baseBranchOpt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotGeneration, err := parseValidationGenerationPushOptions([]string{generationOpt, baseBranchOpt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotBaseBranch, err := parsePRBaseBranchPushOptions([]string{nonceOpt, generationOpt, baseBranchOpt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotNonce != nonce || gotGeneration != generation || gotBaseBranch != "epic/feature" {
+		t.Fatalf("push options = nonce %q generation %q base branch %q", gotNonce, gotGeneration, gotBaseBranch)
+	}
+	if _, err := parseValidationGenerationPushOptions([]string{generationOpt, formatValidationGenerationPushOption("generation-8")}); err == nil {
+		t.Fatal("conflicting validation generations were accepted")
+	}
+}
+
+func TestReconciledPreviousHeadPushOptionRoundTrip(t *testing.T) {
+	head := "1234567890abcdef1234567890abcdef12345678"
+	opt := formatReconciledPreviousHeadPushOption(head)
+	if opt == "" {
+		t.Fatal("reconciled previous head produced no push option")
+	}
+	got, err := parseReconciledPreviousHeadPushOptions([]string{"no-mistakes.skip=review", opt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != head {
+		t.Fatalf("parsed previous head = %q, want %q", got, head)
+	}
+	if formatReconciledPreviousHeadPushOption("   ") != "" {
+		t.Fatal("an empty previous head produced a push option")
+	}
+	if got, err := parseReconciledPreviousHeadPushOptions(nil); err != nil || got != "" {
+		t.Fatalf("absent option = %q, %v", got, err)
+	}
+	if _, err := parseReconciledPreviousHeadPushOptions([]string{"no-mistakes.reconciled-previous-head=refs/heads/main"}); err == nil {
+		t.Fatal("a non-SHA previous head claim was accepted")
+	}
+}

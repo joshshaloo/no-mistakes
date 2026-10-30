@@ -65,11 +65,12 @@ func runWithRetry(
 ) (*Result, error) {
 	var lastErr error
 	var lastLabel string
+	var lastResult *Result
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			emitAgentRetry(opts, name, lastLabel, attempt+1, maxRetries+1)
 			if err := transientBackoff(ctx, attempt); err != nil {
-				return nil, err
+				return lastResult, err
 			}
 		}
 		startedAt := time.Now()
@@ -78,9 +79,10 @@ func runWithRetry(
 		if err == nil {
 			return result, nil
 		}
+		lastResult = result
 		label, retry := classify(err)
 		if !retry {
-			return nil, err
+			return result, err
 		}
 		if recoverRetry != nil {
 			recoverRetry(label)
@@ -88,7 +90,7 @@ func runWithRetry(
 		lastErr = err
 		lastLabel = label
 	}
-	return nil, lastErr
+	return lastResult, lastErr
 }
 
 func emitAgentAttempt(opts RunOpts, name string, result *Result, err error, startedAt, completedAt time.Time) {
@@ -144,6 +146,41 @@ var transientNeedles = []struct {
 	{"temporary failure in name resolution", "dns temporary failure"},
 	{"tls handshake", "tls handshake failure"},
 	{"unexpected eof", "unexpected eof"},
+	// A model ending its turn with prose instead of the required JSON object
+	// is a stochastic behavior, not a deterministic defect: the step's real
+	// work is typically already complete, so a cold retry succeeds often
+	// enough to be worth more than a terminal failure.
+	{"ended its turn with prose", "prose final turn"},
+	// agy's strict tool-call validation kills the whole run when the model
+	// emits one malformed call; the step work is usually already complete.
+	{"declaring permissions", "agy permission declaration"},
+	{"invalid tool call", "invalid tool call"},
+	// Provider tool-protocol residue after a complete JSON object, or a
+	// structured answer split across two adjacent objects the parser could not
+	// fuse: in each case the step's real work is done and only the final text
+	// shape is wrong. Same rationale as the prose needle above. Generic schema
+	// validation failures stay non-transient (see the schema_validation
+	// negative case), and so do two objects that each validate on their own,
+	// which are competing verdicts rather than one split answer; only these two
+	// parse-specific strings are added.
+	{"invalid character '<' after top-level value", "provider protocol residue after JSON"},
+	{"split bare json objects could not be fused into one valid object", "unfused split bare JSON objects"},
+}
+
+var terminalNeedles = []struct {
+	needle string
+	label  string
+}{
+	{"freeusagelimit", "free usage limit"},
+	{"free usage limit", "free usage limit"},
+	{"free_usage_limit", "free usage limit"},
+	{"insufficient quota", "insufficient quota"},
+	{"insufficient_quota", "insufficient quota"},
+	{"exceeded your current quota", "quota exceeded"},
+	{"quota exceeded", "quota exceeded"},
+	{"quota_exceeded", "quota exceeded"},
+	{"quota exhausted", "quota exhausted"},
+	{"quota_exhausted", "quota exhausted"},
 }
 
 // classifyTransient reports whether an error message looks like a transient
@@ -157,6 +194,9 @@ func classifyTransient(err error) (string, bool) {
 		return "", false
 	}
 	msg := strings.ToLower(err.Error())
+	if isTerminalRetryError(msg) {
+		return "", false
+	}
 	for _, sig := range transientNeedles {
 		if strings.Contains(msg, sig.needle) {
 			return sig.label, true
@@ -166,4 +206,13 @@ func classifyTransient(err error) (string, bool) {
 		return "http " + m, true
 	}
 	return "", false
+}
+
+func isTerminalRetryError(msg string) bool {
+	for _, sig := range terminalNeedles {
+		if strings.Contains(msg, sig.needle) {
+			return true
+		}
+	}
+	return false
 }

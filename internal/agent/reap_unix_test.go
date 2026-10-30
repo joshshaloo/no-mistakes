@@ -33,7 +33,7 @@ func TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder(t *testing.T) {
 	shellenv.ConfigureShellCommand(cmd)
 	cmd.WaitDelay = 100 * time.Millisecond
 
-	started, err := startNativeAgentCommand(cmd)
+	started, err := startNativeAgentCommand(cmd, nil)
 	if err != nil {
 		t.Fatalf("startNativeAgentCommand: %v", err)
 	}
@@ -151,6 +151,41 @@ exit 0
 		_ = syscall.Kill(grandchild, syscall.SIGKILL) // do not orphan a real process
 		t.Fatalf("grandchild pid %d still alive after clean agent exit; the process group leaked "+
 			"(this is the leak that OOM-kills the daemon)", grandchild)
+	}
+}
+
+// TestCodexAgent_Run_CancellationTerminatesProcessGroup proves an invocation
+// timeout retains the native command's process-group cleanup. A tool child
+// must not survive cancellation of its agent.
+func TestCodexAgent_Run_CancellationTerminatesProcessGroup(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "grandchild.pid")
+	bin := writeFakeCodex(t, dir, `#!/bin/sh
+( sleep 120 >/dev/null 2>&1 ) &
+echo $! > "`+pidFile+`"
+sleep 120
+`, "")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := (&codexAgent{bin: bin}).Run(ctx, RunOpts{Prompt: "review", CWD: dir})
+		done <- err
+	}()
+	grandchild := waitForPidFile(t, pidFile, 5*time.Second)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected cancellation")
+		}
+	case <-time.After(5 * time.Second):
+		_ = syscall.Kill(grandchild, syscall.SIGKILL)
+		t.Fatal("agent did not return after cancellation")
+	}
+	if !pidGoneWithin(grandchild, 5*time.Second) {
+		_ = syscall.Kill(grandchild, syscall.SIGKILL)
+		t.Fatalf("grandchild pid %d survived cancelled agent process group", grandchild)
 	}
 }
 

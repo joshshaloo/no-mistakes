@@ -2,6 +2,8 @@ package bitbucket
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
 func TestParseRepoRefRejectsLookalikeHosts(t *testing.T) {
@@ -60,6 +64,11 @@ func TestListPRStatusesFollowsPagination(t *testing.T) {
 
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/2.0/repositories/test/repo/pullrequests/42" {
+			_, _ = w.Write([]byte(`{"id":42,"source":{"commit":{"hash":"abc123"}}}`))
+			return
+		}
 		if r.URL.Path != "/2.0/repositories/test/repo/pullrequests/42/statuses" {
 			t.Fatalf("path = %q, want %q", r.URL.Path, "/2.0/repositories/test/repo/pullrequests/42/statuses")
 		}
@@ -67,7 +76,6 @@ func TestListPRStatusesFollowsPagination(t *testing.T) {
 			t.Fatalf("sort = %q, want -created_on", got)
 		}
 		pageCalls++
-		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Query().Get("page") {
 		case "", "1":
 			_, _ = w.Write([]byte(`{"values":[{"name":"build","state":"SUCCESSFUL"}],"next":"` + server.URL + `/2.0/repositories/test/repo/pullrequests/42/statuses?sort=-created_on&page=2"}`))
@@ -88,15 +96,18 @@ func TestListPRStatusesFollowsPagination(t *testing.T) {
 		},
 	}
 
-	statuses, err := client.ListPRStatuses(context.Background(), repo, 42)
+	result, err := client.ListPRStatuses(context.Background(), repo, 42)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(statuses) != 2 {
-		t.Fatalf("len(statuses) = %d, want 2", len(statuses))
+	if result.Commit != "abc123" {
+		t.Fatalf("commit = %q, want abc123", result.Commit)
 	}
-	if statuses[0].Name != "build" || statuses[1].Name != "tests" {
-		t.Fatalf("statuses = %#v, want build then tests", statuses)
+	if len(result.Statuses) != 2 {
+		t.Fatalf("len(statuses) = %d, want 2", len(result.Statuses))
+	}
+	if result.Statuses[0].Name != "build" || result.Statuses[1].Name != "tests" {
+		t.Fatalf("statuses = %#v, want build then tests", result.Statuses)
 	}
 	if pageCalls != 2 {
 		t.Fatalf("pageCalls = %d, want 2", pageCalls)
@@ -108,6 +119,10 @@ func TestListPRStatusesRejectsCrossOriginPagination(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/2.0/repositories/test/repo/pullrequests/42" {
+			_, _ = w.Write([]byte(`{"id":42,"source":{"commit":{"hash":"abc123"}}}`))
+			return
+		}
 		_, _ = fmt.Fprintf(w, `{"values":[{"name":"build","state":"SUCCESSFUL"}],"next":"https://evil.example/2.0/repositories/test/repo/pullrequests/42/statuses?page=2"}`)
 	}))
 	defer server.Close()
@@ -127,6 +142,66 @@ func TestListPRStatusesRejectsCrossOriginPagination(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cross-origin") {
 		t.Fatalf("error = %q, want cross-origin validation failure", err)
+	}
+}
+
+func TestRESTHostRejectsChecksForDifferentHead(t *testing.T) {
+	repo := RepoRef{Workspace: "test", RepoSlug: "repo"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/2.0/repositories/test/repo/pullrequests/42":
+			_, _ = w.Write([]byte(`{"id":42,"source":{"commit":{"hash":"new-head"}},"destination":{"branch":{"name":"main"}}}`))
+		case "/2.0/repositories/test/repo/pullrequests/42/statuses":
+			_, _ = w.Write([]byte(`{"values":[{"name":"build","state":"SUCCESSFUL"}]}`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{baseURL: server.URL, email: "test@example.com", token: "token", httpClient: server.Client()}
+	host := NewHost(client, repo)
+	_, err := host.GetChecks(context.Background(), &scm.PR{Number: "42", HeadSHA: "run-head"})
+	if !errors.Is(err, scm.ErrHeadChanged) {
+		t.Fatalf("GetChecks() error = %v, want ErrHeadChanged", err)
+	}
+	pr := &scm.PR{Number: "42", HeadSHA: "run-head"}
+	if _, err := host.GetPRState(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	if pr.HeadSHA != "run-head" {
+		t.Fatalf("GetPRState() changed expected head to %q", pr.HeadSHA)
+	}
+	base, err := host.GetPRBaseBranch(context.Background(), pr)
+	if err != nil || base != "main" {
+		t.Fatalf("GetPRBaseBranch() = %q, %v; want main", base, err)
+	}
+	if pr.HeadSHA != "run-head" {
+		t.Fatalf("GetPRBaseBranch() changed expected head to %q", pr.HeadSHA)
+	}
+}
+
+func TestRESTHostFailedLogsRejectDifferentHead(t *testing.T) {
+	repo := RepoRef{Workspace: "test", RepoSlug: "repo"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/2.0/repositories/test/repo/pullrequests/42":
+			_, _ = w.Write([]byte(`{"id":42,"source":{"commit":{"hash":"new-head"}}}`))
+		case "/2.0/repositories/test/repo/pullrequests/42/statuses":
+			_, _ = w.Write([]byte(`{"values":[{"name":"build","key":"build","state":"FAILED","url":"https://bitbucket.org/test/repo/pipelines/results/1"}]}`))
+		default:
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{baseURL: server.URL, email: "test@example.com", token: "token", httpClient: server.Client()}
+	host := NewHost(client, repo)
+	_, err := host.FetchFailedCheckTargetLogs(context.Background(), &scm.PR{Number: "42"}, "feature", "run-head", []scm.CheckTarget{{Name: "build", ProviderID: "bitbucket-status:build"}})
+	if !errors.Is(err, scm.ErrHeadChanged) {
+		t.Fatalf("FetchFailedCheckTargetLogs() error = %v, want ErrHeadChanged", err)
 	}
 }
 
@@ -162,6 +237,134 @@ func TestFindOpenPRBySourceAndDestinationBranchFiltersSourceRepo(t *testing.T) {
 	}
 	if gotQ != `source.branch.name="feature" AND source.repository.full_name="test/repo" AND destination.branch.name="main" AND state="OPEN"` {
 		t.Fatalf("q = %q, want source repo and destination branch filters", gotQ)
+	}
+}
+
+func TestFindOpenPRBySourceBranchCanonicalizesForeignHTMLLink(t *testing.T) {
+	repo := RepoRef{Workspace: "test", RepoSlug: "repo"}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"values":[{"id":42,"links":{"html":{"href":"https://bitbucket.org/other/repo/pull-requests/99"}}}]}`))
+	}))
+	defer server.Close()
+
+	client := &Client{
+		baseURL: server.URL,
+		email:   "test@example.com",
+		token:   "token",
+		httpClient: &http.Client{
+			Timeout: time.Second,
+		},
+	}
+
+	pr, err := client.FindOpenPRBySourceBranch(context.Background(), repo, "feature", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr == nil || pr.ID != 42 {
+		t.Fatalf("pr = %#v, want id 42", pr)
+	}
+	if pr.URL != "https://bitbucket.org/test/repo/pull-requests/42" {
+		t.Fatalf("pr.URL = %q, want configured canonical URL", pr.URL)
+	}
+}
+
+func TestFindOpenPRBySourceBranchRejectsInvalidResponse(t *testing.T) {
+	repo := RepoRef{Workspace: "test", RepoSlug: "repo"}
+
+	for _, tc := range []struct {
+		name     string
+		response string
+	}{
+		{name: "null", response: "null"},
+		{name: "missing values", response: `{}`},
+		{name: "trailing data", response: `{"values":[]}garbage`},
+		{name: "missing identity", response: `{"values":[{}]}`},
+		{
+			name:     "later missing identity",
+			response: `{"values":[{"id":42,"links":{"html":{"href":"https://bitbucket.org/test/repo/pull-requests/42"}}},{}]}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(tc.response))
+			}))
+			defer server.Close()
+
+			client := &Client{
+				baseURL: server.URL,
+				email:   "test@example.com",
+				token:   "token",
+				httpClient: &http.Client{
+					Timeout: time.Second,
+				},
+			}
+
+			pr, err := client.FindOpenPRBySourceBranch(context.Background(), repo, "feature", "main")
+			if err == nil {
+				t.Fatal("FindOpenPRBySourceBranch() error = nil, want response error")
+			}
+			if !strings.Contains(err.Error(), "Bitbucket") {
+				t.Fatalf("FindOpenPRBySourceBranch() error = %v, want provider parse context", err)
+			}
+			if pr != nil {
+				t.Fatalf("FindOpenPRBySourceBranch() = %#v, want nil", pr)
+			}
+		})
+	}
+}
+
+func TestCreatePRSetsDraftFieldWhenRequested(t *testing.T) {
+	repo := RepoRef{Workspace: "test", RepoSlug: "repo"}
+
+	tests := []struct {
+		name      string
+		draft     bool
+		wantField bool
+	}{
+		{name: "draft", draft: true, wantField: true},
+		{name: "not draft", draft: false, wantField: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/2.0/repositories/test/repo/pullrequests" {
+					t.Fatalf("request = %s %q, want POST pullrequests", r.Method, r.URL.Path)
+				}
+				if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+					t.Fatalf("decode body: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"id":7,"links":{"html":{"href":"https://bitbucket.org/test/repo/pull-requests/7"}}}`))
+			}))
+			defer server.Close()
+
+			client := &Client{
+				baseURL:    server.URL,
+				email:      "test@example.com",
+				token:      "token",
+				httpClient: &http.Client{Timeout: time.Second},
+			}
+
+			pr, err := client.CreatePR(context.Background(), repo, "feature", "main", "title", "body", tt.draft)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pr == nil || pr.ID != 7 {
+				t.Fatalf("pr = %#v, want id 7", pr)
+			}
+			_, gotField := gotBody["draft"]
+			if gotField != tt.wantField {
+				t.Fatalf("body draft field present = %v, want %v (body=%v)", gotField, tt.wantField, gotBody)
+			}
+			if tt.wantField && gotBody["draft"] != true {
+				t.Fatalf("body draft = %v, want true", gotBody["draft"])
+			}
+		})
 	}
 }
 

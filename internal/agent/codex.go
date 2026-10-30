@@ -21,6 +21,7 @@ import (
 type codexAgent struct {
 	bin       string
 	extraArgs []string
+	subprocessContext
 	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
 	// buildArgs suppresses codex's project-level settings/instructions surface.
 	disableProjectSettings bool
@@ -30,7 +31,7 @@ func (a *codexAgent) Name() string { return "codex" }
 
 // SupportsSessionResume reports codex's native durable-session capability:
 // `codex exec --json` emits thread.started with a thread_id, and
-// `codex exec resume <id> <prompt>` continues that thread.
+// `codex exec resume <id> -` continues that thread with the prompt on stdin.
 func (a *codexAgent) SupportsSessionResume() bool { return true }
 
 func (a *codexAgent) ReportsAgentAttempts() bool { return true }
@@ -89,17 +90,17 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	if opts.Session != nil {
 		resumeID = opts.Session.ID
 	}
-	args := a.buildArgs(opts.Prompt, schemaPath, resumeID)
+	args := a.buildArgs(schemaPath, resumeID)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
-	cmd.Stdin = nil
-	cmd.Env = gitSafeEnv(opts.CWD)
+	cmd.Stdin = strings.NewReader(opts.Prompt)
+	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
 	shellenv.ConfigureShellCommand(cmd)
 	shellenv.SuperviseShellCommand(ctx, cmd)
 
 	var stderrBuf []byte
 	var stderrWG sync.WaitGroup
-	started, err := startNativeAgentCommand(cmd)
+	started, err := startNativeAgentCommand(cmd, nativeAgentActivityObserver(opts, "codex"))
 	if err != nil {
 		return nil, fmt.Errorf("codex start: %w", err)
 	}
@@ -118,12 +119,23 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 	var codexErr string
 	var threadID string
 	metrics := newCodexMetricsAccumulator()
+	// An error return carries the same session facts the success path sets
+	// below, so cumulative thread usage is never read as a per-round delta.
+	partialResult := func() *Result {
+		res := resultFromUsage(usage)
+		if res != nil {
+			res.SessionID = threadID
+			res.Resumed = resumeID != ""
+			res.SessionUsageCumulative = true
+		}
+		return res
+	}
 	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, &usage, &lastMessage, &codexErr, &threadID, metrics); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("codex parse events: %w", err)
 		emitAgentExited(opts, "codex", pid, retErr)
-		return nil, retErr
+		return partialResult(), retErr
 	}
 
 	waitErr := started.wait()
@@ -138,9 +150,15 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		}
 		retErr := fmt.Errorf("codex exited: %w: %s", waitErr, detail)
 		emitAgentExited(opts, "codex", pid, retErr)
-		return nil, retErr
+		return partialResult(), retErr
 	}
 
+	// Codex's strict output mode treats every property as required after
+	// addAdditionalPropertiesFalse, but it may still omit properties that were
+	// optional in the caller's schema. The normalized schema makes those fields
+	// nullable; materialize them as null before the shared validator sees the
+	// response so omission remains compatible without weakening required fields.
+	lastMessage = codexFillNullableRequiredFields(lastMessage, opts.JSONSchema)
 	res, err := finalizeTextResult("codex", lastMessage, validationSchema, usage)
 	if res != nil {
 		res.SessionID = threadID
@@ -160,14 +178,14 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 func (a *codexAgent) Close() error { return nil }
 
 // buildArgs constructs the codex CLI arguments. User-supplied extraArgs are
-// inserted between "exec" and the prompt so user flags (e.g. -m, --sandbox)
+// inserted between "exec" and the stdin prompt marker so user flags (e.g. -m, --sandbox)
 // take effect. If the user declared their own execution-mode flag, the
 // default --dangerously-bypass-approvals-and-sandbox is not added.
-// A non-empty resumeID routes through `codex exec resume <id> <prompt>`,
+// A non-empty resumeID routes through `codex exec resume <id> -`,
 // which exposes a narrower flag surface than `codex exec` (no --color, no
 // -s/--sandbox as of codex 0.144): unsupported user extraArgs make the
 // invocation fail fast and the caller's cold fallback preserves correctness.
-func (a *codexAgent) buildArgs(prompt, schemaPath, resumeID string) []string {
+func (a *codexAgent) buildArgs(schemaPath, resumeID string) []string {
 	args := make([]string, 0, len(a.extraArgs)+11)
 	args = append(args, "exec")
 	if resumeID != "" {
@@ -177,7 +195,7 @@ func (a *codexAgent) buildArgs(prompt, schemaPath, resumeID string) []string {
 	if resumeID != "" {
 		args = append(args, resumeID)
 	}
-	args = append(args, prompt, "--json")
+	args = append(args, "-", "--json")
 	if schemaPath != "" {
 		args = append(args, "--output-schema", schemaPath)
 	}
@@ -194,7 +212,7 @@ func (a *codexAgent) buildArgs(prompt, schemaPath, resumeID string) []string {
 	// (AGENTS.md) plus project execpolicy `.rules`; codex config itself is
 	// user-level ($CODEX_HOME), not project. Both knobs are global overrides
 	// accepted by `codex exec` AND `codex exec resume`, appended last so they
-	// never disturb codex's `[resume] <id> <prompt>` positionals:
+	// never disturb codex's `[resume] <id> -` positionals:
 	//   - `-c project_doc_max_bytes=0` makes codex read zero bytes of AGENTS.md
 	//     (the identity-bearing surface). Skipped only when the operator pinned
 	//     their own project_doc_max_bytes (their choice wins; NeutralizesGate-
@@ -369,11 +387,12 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), us
 		case "turn.completed":
 			if event.Usage != nil {
 				usage.Add(TokenUsage{
-					InputTokens:     event.Usage.InputTokens,
-					OutputTokens:    event.Usage.OutputTokens,
-					CacheReadTokens: event.Usage.CachedInputTokens,
-					ReasoningTokens: event.Usage.ReasoningOutputToks,
-					Reported:        true,
+					InputTokens:       event.Usage.InputTokens,
+					OutputTokens:      event.Usage.OutputTokens,
+					CacheReadTokens:   event.Usage.CachedInputTokens,
+					ReasoningTokens:   event.Usage.ReasoningOutputToks,
+					ReasoningReported: true,
+					Reported:          true,
 				})
 			}
 		}
@@ -389,6 +408,75 @@ func codexOutputSchema(schema json.RawMessage) ([]byte, error) {
 	}
 	addAdditionalPropertiesFalse(value)
 	return json.Marshal(value)
+}
+
+// codexFillNullableRequiredFields turns properties that were optional in the
+// caller's schema but became required by addAdditionalPropertiesFalse into
+// explicit nulls when Codex omitted them. It deliberately leaves genuinely
+// required properties absent: the normal structured-output validator must still
+// reject those responses. Invalid or non-JSON text is returned unchanged so
+// the shared parser remains responsible for reporting its ordinary error.
+func codexFillNullableRequiredFields(text string, schema json.RawMessage) string {
+	if len(schema) == 0 || strings.TrimSpace(text) == "" {
+		return text
+	}
+
+	var output any
+	if err := json.Unmarshal([]byte(text), &output); err != nil {
+		return text
+	}
+	var schemaValue any
+	if err := json.Unmarshal(schema, &schemaValue); err != nil {
+		return text
+	}
+
+	if !codexFillNullableFields(output, schemaValue) {
+		return text
+	}
+	filled, err := json.Marshal(output)
+	if err != nil {
+		return text
+	}
+	return string(filled)
+}
+
+func codexFillNullableFields(value, schema any) bool {
+	schemaMap, ok := schema.(map[string]any)
+	if !ok {
+		return false
+	}
+
+	changed := false
+	if properties, ok := schemaMap["properties"].(map[string]any); ok {
+		object, ok := value.(map[string]any)
+		if ok {
+			required := requiredSet(schemaMap)
+			for name, propertySchema := range properties {
+				property, present := object[name]
+				if !present {
+					if !required[name] {
+						object[name] = nil
+						changed = true
+					}
+					continue
+				}
+				if property != nil && codexFillNullableFields(property, propertySchema) {
+					changed = true
+				}
+			}
+		}
+	}
+
+	if items, ok := schemaMap["items"]; ok {
+		if array, ok := value.([]any); ok {
+			for _, item := range array {
+				if codexFillNullableFields(item, items) {
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
 }
 
 func addAdditionalPropertiesFalse(value any) {
